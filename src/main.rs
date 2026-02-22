@@ -5,7 +5,6 @@
 esp_bootloader_esp_idf::esp_app_desc!();
 
 use embassy_executor::Spawner;
-use embassy_futures::join::join3;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
@@ -14,10 +13,8 @@ use esp_alloc as _;
 use esp_backtrace as _;
 use esp_hal::rng::Rng;
 use esp_println::println;
-use esp_radio::ble::controller::BleConnector;
 use esp_storage::FlashStorage;
 use static_cell::StaticCell;
-use trouble_host::prelude::*;
 
 pub mod config;
 pub mod crypto;

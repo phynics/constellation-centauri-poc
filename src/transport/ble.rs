@@ -1,4 +1,3 @@
-use crate::config::HEARTBEAT_INTERVAL_SECS;
 use crate::crypto::identity::ShortAddr;
 use crate::protocol::heartbeat::HeartbeatPayload;
 use crate::routing::table::RoutingTable;
