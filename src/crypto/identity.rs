@@ -1,6 +1,6 @@
 use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier};
 use sha2::{Sha256, Digest};
-use rand_core::CryptoRngCore;
+use rand_core::{CryptoRngCore, RngCore};
 
 pub type PubKey = [u8; 32];
 pub type ShortAddr = [u8; 8];
@@ -15,6 +15,22 @@ pub struct NodeIdentity {
 impl NodeIdentity {
     pub fn generate(rng: &mut impl CryptoRngCore) -> Self {
         let signing_key = SigningKey::generate(rng);
+        Self::from_signing_key(signing_key)
+    }
+
+    /// Generate identity using non-cryptographic RNG (for PoC/testing only).
+    ///
+    /// ⚠️  WARNING: This should NOT be used in production! Use `generate()` with
+    /// a cryptographically secure RNG (TRNG) instead.
+    ///
+    /// This method exists for development/testing when TRNG is not available.
+    pub fn generate_insecure(rng: &mut impl RngCore) -> Self {
+        // Generate random 32 bytes for the secret key
+        let mut secret = [0u8; 32];
+        rng.fill_bytes(&mut secret);
+
+        // Create signing key from the random bytes
+        let signing_key = SigningKey::from_bytes(&secret);
         Self::from_signing_key(signing_key)
     }
 

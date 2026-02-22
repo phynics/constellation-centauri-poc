@@ -11,7 +11,7 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Timer};
 use esp_alloc as _;
 use esp_backtrace as _;
-use esp_hal::rng::Trng;
+use esp_hal::rng::Rng;
 use esp_println::println;
 use esp_storage::FlashStorage;
 use static_cell::StaticCell;
@@ -60,8 +60,11 @@ async fn main(spawner: Spawner) {
     // 2. Initialize peripherals
     let peripherals = esp_hal::init(esp_hal::Config::default());
 
-    // Initialize TRNG for identity generation
-    let mut rng = Trng::try_new().expect("Failed to initialize TRNG");
+    // Initialize RNG for identity generation
+    // ⚠️  WARNING: Using non-cryptographic RNG for PoC/testing only!
+    // In production, initialize radio first and use Trng for cryptographic security.
+    println!("Initializing RNG (non-cryptographic - PoC only)...");
+    let mut rng = Rng::new();
 
     // Initialize flash storage for identity persistence
     let mut flash = FlashStorage::new(peripherals.FLASH);
@@ -79,7 +82,7 @@ async fn main(spawner: Spawner) {
                 Err(e) => {
                     println!("Failed to load identity: {:?}", e);
                     println!("Generating new identity...");
-                    let id = NodeIdentity::generate(&mut rng);
+                    let id = NodeIdentity::generate_insecure(&mut rng);
                     if let Err(e) = node::storage::save_identity(&mut flash, &id) {
                         println!("Warning: Failed to save identity: {:?}", e);
                     }
@@ -89,7 +92,7 @@ async fn main(spawner: Spawner) {
         }
         Ok(false) | Err(_) => {
             println!("No identity found. Generating new identity...");
-            let id = NodeIdentity::generate(&mut rng);
+            let id = NodeIdentity::generate_insecure(&mut rng);
             match node::storage::save_identity(&mut flash, &id) {
                 Ok(_) => println!("Identity saved to flash"),
                 Err(e) => println!("Warning: Failed to save identity: {:?}", e),
