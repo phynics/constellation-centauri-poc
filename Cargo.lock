@@ -212,6 +212,7 @@ name = "constellation"
 version = "0.1.0"
 dependencies = [
  "chacha20poly1305",
+ "curve25519-dalek",
  "ed25519-dalek",
  "embassy-executor",
  "embassy-futures",

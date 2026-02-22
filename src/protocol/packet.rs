@@ -1,4 +1,5 @@
-use crate::crypto::identity::{ShortAddr, Signature};
+use crate::config::{BROADCAST_ADDR, DEFAULT_TTL, HEADER_SIZE, PROTOCOL_VERSION};
+use crate::crypto::identity::{verify, NodeIdentity, ShortAddr, Signature};
 
 pub const PACKET_TYPE_HEARTBEAT: u8 = 0x01;
 pub const PACKET_TYPE_DATA: u8 = 0x02;
@@ -10,6 +11,14 @@ pub const FLAG_ACK_REQUESTED: u8 = 0b0000_0001;
 pub const FLAG_FRAGMENTED: u8 = 0b0000_0010;
 pub const FLAG_BROADCAST: u8 = 0b0000_0100;
 
+#[derive(Debug)]
+pub enum PacketError {
+    BufferTooSmall,
+    InvalidHeader,
+    InvalidSignature,
+}
+
+#[derive(Clone)]
 pub struct PacketHeader {
     pub version: u8,
     pub packet_type: u8,
@@ -22,4 +31,229 @@ pub struct PacketHeader {
     pub signature: Signature,
 }
 
-// Serialization implementation in Phase 1.5.
+impl PacketHeader {
+    /// Serialize the header into a byte buffer.
+    ///
+    /// Header layout (84 bytes):
+    /// - version (4 bits) | packet_type (4 bits): 1 byte
+    /// - flags: 1 byte
+    /// - ttl: 1 byte
+    /// - hop_count: 1 byte
+    /// - src: 8 bytes
+    /// - dst: 8 bytes
+    /// - message_id: 8 bytes
+    /// - signature: 64 bytes
+    ///
+    /// Returns the number of bytes written.
+    pub fn serialize(&self, buf: &mut [u8]) -> Result<usize, PacketError> {
+        if buf.len() < HEADER_SIZE {
+            return Err(PacketError::BufferTooSmall);
+        }
+
+        let mut offset = 0;
+
+        // Byte 0: version (upper 4 bits) | packet_type (lower 4 bits)
+        buf[offset] = (self.version << 4) | (self.packet_type & 0x0F);
+        offset += 1;
+
+        // Byte 1: flags
+        buf[offset] = self.flags;
+        offset += 1;
+
+        // Byte 2: ttl
+        buf[offset] = self.ttl;
+        offset += 1;
+
+        // Byte 3: hop_count
+        buf[offset] = self.hop_count;
+        offset += 1;
+
+        // Bytes 4-11: src (8 bytes)
+        buf[offset..offset + 8].copy_from_slice(&self.src);
+        offset += 8;
+
+        // Bytes 12-19: dst (8 bytes)
+        buf[offset..offset + 8].copy_from_slice(&self.dst);
+        offset += 8;
+
+        // Bytes 20-27: message_id (8 bytes)
+        buf[offset..offset + 8].copy_from_slice(&self.message_id);
+        offset += 8;
+
+        // Bytes 28-91: signature (64 bytes)
+        buf[offset..offset + 64].copy_from_slice(&self.signature);
+        offset += 64;
+
+        Ok(offset)
+    }
+
+    /// Deserialize a header from a byte buffer.
+    ///
+    /// Returns the parsed header and a slice to the remaining payload.
+    pub fn deserialize(buf: &[u8]) -> Result<(PacketHeader, &[u8]), PacketError> {
+        if buf.len() < HEADER_SIZE {
+            return Err(PacketError::InvalidHeader);
+        }
+
+        let mut offset = 0;
+
+        // Byte 0: version | packet_type
+        let version = (buf[offset] >> 4) & 0x0F;
+        let packet_type = buf[offset] & 0x0F;
+        offset += 1;
+
+        // Byte 1: flags
+        let flags = buf[offset];
+        offset += 1;
+
+        // Byte 2: ttl
+        let ttl = buf[offset];
+        offset += 1;
+
+        // Byte 3: hop_count
+        let hop_count = buf[offset];
+        offset += 1;
+
+        // Bytes 4-11: src
+        let mut src = [0u8; 8];
+        src.copy_from_slice(&buf[offset..offset + 8]);
+        offset += 8;
+
+        // Bytes 12-19: dst
+        let mut dst = [0u8; 8];
+        dst.copy_from_slice(&buf[offset..offset + 8]);
+        offset += 8;
+
+        // Bytes 20-27: message_id
+        let mut message_id = [0u8; 8];
+        message_id.copy_from_slice(&buf[offset..offset + 8]);
+        offset += 8;
+
+        // Bytes 28-91: signature
+        let mut signature = [0u8; 64];
+        signature.copy_from_slice(&buf[offset..offset + 64]);
+        offset += 64;
+
+        let header = PacketHeader {
+            version,
+            packet_type,
+            flags,
+            ttl,
+            hop_count,
+            src,
+            dst,
+            message_id,
+            signature,
+        };
+
+        let payload = &buf[offset..];
+
+        Ok((header, payload))
+    }
+
+    /// Sign the packet header and payload.
+    ///
+    /// Signature covers: [version, type, flags, ttl, src, dst, message_id, payload]
+    /// Note: hop_count is NOT signed since relays increment it.
+    pub fn sign(&mut self, identity: &NodeIdentity, payload: &[u8]) {
+        let signable_data = self.build_signable_data(payload);
+        self.signature = identity.sign(&signable_data);
+    }
+
+    /// Verify the packet signature.
+    pub fn verify(&self, sender_pubkey: &[u8; 32], payload: &[u8]) -> bool {
+        let signable_data = self.build_signable_data(payload);
+        verify(sender_pubkey, &signable_data, &self.signature)
+    }
+
+    /// Build the data that should be signed/verified.
+    ///
+    /// Includes all header fields except hop_count and signature, plus payload.
+    fn build_signable_data(&self, payload: &[u8]) -> heapless::Vec<u8, 256> {
+        let mut data = heapless::Vec::new();
+
+        // version | packet_type
+        let _ = data.push((self.version << 4) | (self.packet_type & 0x0F));
+
+        // flags
+        let _ = data.push(self.flags);
+
+        // ttl
+        let _ = data.push(self.ttl);
+
+        // src (8 bytes)
+        let _ = data.extend_from_slice(&self.src);
+
+        // dst (8 bytes)
+        let _ = data.extend_from_slice(&self.dst);
+
+        // message_id (8 bytes)
+        let _ = data.extend_from_slice(&self.message_id);
+
+        // payload (variable)
+        let _ = data.extend_from_slice(payload);
+
+        data
+    }
+}
+
+/// Helper to build a complete packet (header + payload) and sign it.
+///
+/// Returns the number of bytes written to `buf`.
+pub fn build_packet(
+    identity: &NodeIdentity,
+    packet_type: u8,
+    flags: u8,
+    dst: ShortAddr,
+    payload: &[u8],
+    buf: &mut [u8],
+) -> Result<usize, PacketError> {
+    if buf.len() < HEADER_SIZE + payload.len() {
+        return Err(PacketError::BufferTooSmall);
+    }
+
+    // Generate random message ID (in real usage, use TRNG)
+    // For now, use a placeholder - will be replaced with RNG in Phase 5
+    let message_id = [0u8; 8]; // TODO: Use esp_hal::rng::Trng in main
+
+    let mut header = PacketHeader {
+        version: PROTOCOL_VERSION,
+        packet_type,
+        flags,
+        ttl: DEFAULT_TTL,
+        hop_count: 0,
+        src: *identity.short_addr(),
+        dst,
+        message_id,
+        signature: [0u8; 64], // Will be filled by sign()
+    };
+
+    // Sign the header + payload
+    header.sign(identity, payload);
+
+    // Serialize header
+    let header_len = header.serialize(buf)?;
+
+    // Append payload
+    buf[header_len..header_len + payload.len()].copy_from_slice(payload);
+
+    Ok(header_len + payload.len())
+}
+
+/// Helper to build a broadcast packet.
+pub fn build_broadcast_packet(
+    identity: &NodeIdentity,
+    packet_type: u8,
+    flags: u8,
+    payload: &[u8],
+    buf: &mut [u8],
+) -> Result<usize, PacketError> {
+    build_packet(
+        identity,
+        packet_type,
+        flags | FLAG_BROADCAST,
+        BROADCAST_ADDR,
+        payload,
+        buf,
+    )
+}
