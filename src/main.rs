@@ -1,6 +1,9 @@
 #![no_std]
 #![no_main]
 
+// ESP-IDF application descriptor (required for flashing)
+esp_bootloader_esp_idf::esp_app_desc!();
+
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Channel;
