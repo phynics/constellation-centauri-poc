@@ -1,28 +1,26 @@
 #![no_std]
 #![no_main]
 
-use embassy_executor::Spawner;
-use esp_hal::{clock::CpuClock, timer::timg::TimerGroup};
-use esp_wifi::ble::controller::BleConnector;
-use trouble_host::prelude::ExternalController;
 use {esp_alloc as _, esp_backtrace as _};
 
-#[esp_hal_embassy::main]
-async fn main(_s: Spawner) {
-    esp_println::logger::init_logger_from_env();
-    let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
-    esp_alloc::heap_allocator!(size: 72 * 1024);
-    let timg0 = TimerGroup::new(peripherals.TIMG0);
+pub mod config;
+pub mod crypto;
+pub mod node;
+pub mod protocol;
+pub mod routing;
+pub mod transport;
 
-    let mut rng = esp_hal::rng::Trng::new(peripherals.RNG, peripherals.ADC1);
-    
-    // create a SpiInterface from SpiDevice, a DC pin and a buffer
-    let mut buffer = [0u8; 512];
-    let di = SpiInterface::new(spi, dc, &mut buffer);
-    // create the ILI9486 display driver in rgb666 color mode from the display interface and use a HW reset pin during init
-    let mut display = Builder::new(ILI9486Rgb666, di)
-        .reset_pin(rst)
-        .init(&mut delay)?; // delay provider from your MCU
-                            // clear the display to black
-    display.clear(Rgb666::BLACK)?;
+// Note: Entry point configuration is blocked by esp-hal 1.0 API changes.
+// The `entry` macro location has changed. This will be resolved in Phase 5
+// when we integrate the full embassy executor setup.
+//
+// For now, the module skeleton compiles correctly. To proceed with development:
+// 1. All core modules (crypto, protocol, routing) compile
+// 2. Phase 1 implementation can continue without running on hardware
+// 3. Hardware entry point will be fixed when setting up embassy tasks
+
+#[no_mangle]
+pub extern "C" fn main() -> ! {
+    // Placeholder - will be replaced with proper entry point in Phase 5
+    loop {}
 }
