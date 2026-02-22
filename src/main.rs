@@ -10,6 +10,7 @@ use esp_alloc as _;
 use esp_backtrace as _;
 use esp_hal::rng::Trng;
 use esp_println::println;
+use esp_storage::FlashStorage;
 use static_cell::StaticCell;
 
 pub mod config;
@@ -54,15 +55,45 @@ async fn main(spawner: Spawner) {
     println!("======================================");
 
     // 2. Initialize peripherals
-    let _peripherals = esp_hal::init(esp_hal::Config::default());
+    let peripherals = esp_hal::init(esp_hal::Config::default());
 
     // Initialize TRNG for identity generation
     let mut rng = Trng::try_new().expect("Failed to initialize TRNG");
 
+    // Initialize flash storage for identity persistence
+    let mut flash = FlashStorage::new(peripherals.FLASH);
+
     // 3. Identity provisioning
-    // For PoC, we generate a new identity on each boot.
-    // In production, this would load from flash storage.
-    let identity = NodeIdentity::generate(&mut rng);
+    // Load from flash if provisioned, otherwise generate new identity
+    let identity = match node::storage::is_provisioned(&mut flash) {
+        Ok(true) => {
+            println!("Loading identity from flash...");
+            match node::storage::load_identity(&mut flash) {
+                Ok(id) => {
+                    println!("Identity loaded successfully");
+                    id
+                }
+                Err(e) => {
+                    println!("Failed to load identity: {:?}", e);
+                    println!("Generating new identity...");
+                    let id = NodeIdentity::generate(&mut rng);
+                    if let Err(e) = node::storage::save_identity(&mut flash, &id) {
+                        println!("Warning: Failed to save identity: {:?}", e);
+                    }
+                    id
+                }
+            }
+        }
+        Ok(false) | Err(_) => {
+            println!("No identity found. Generating new identity...");
+            let id = NodeIdentity::generate(&mut rng);
+            match node::storage::save_identity(&mut flash, &id) {
+                Ok(_) => println!("Identity saved to flash"),
+                Err(e) => println!("Warning: Failed to save identity: {:?}", e),
+            }
+            id
+        }
+    };
 
     println!(
         "Node identity: {:02x?}",
