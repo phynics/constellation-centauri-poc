@@ -196,6 +196,7 @@ async fn advertise_and_accept<'a, C: Controller>(
     let len = AdStructure::encode_slice(
         &[
             AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
+            AdStructure::CompleteLocalName(b"Constellation"),
             AdStructure::ServiceUuids16(&[[0x34, 0x12]]), // Service 0x1234
             AdStructure::ManufacturerSpecificData {
                 company_identifier: 0x1234,
