@@ -8,7 +8,7 @@ use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, Timer};
+// use embassy_time::{Duration, Timer}; // Temporarily disabled - needs timer driver setup
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_hal::rng::Rng;
@@ -149,12 +149,12 @@ async fn main(spawner: Spawner) {
 
     // Main executor loop - keep the executor alive
     // The spawned tasks will run concurrently
-    loop {
-        Timer::after(Duration::from_secs(10)).await;
+    // Note: Periodic logging disabled until timer driver is configured
+    println!("Main loop running. Tasks will execute concurrently.");
 
-        // Periodic status log
-        let table = routing_table.lock().await;
-        println!("Status: {} peers in routing table", table.peers.len());
+    loop {
+        // Yield to allow other tasks to run
+        embassy_futures::yield_now().await;
     }
 }
 
@@ -186,51 +186,20 @@ async fn gatt_task(
 /// - Periodic heartbeat generation
 /// - Demo message sending when peers are discovered
 /// - Routing table maintenance
+///
+/// Note: Periodic logging temporarily disabled until timer driver is configured.
 #[embassy_executor::task]
 async fn main_logic_task(routing_table: &'static Mutex<NoopRawMutex, RoutingTable>) {
-    let mut uptime_secs: u32 = 0;
-    let mut message_sent = false;
+    println!("Main logic task running");
 
+    // Log initial routing table state
+    let table = routing_table.lock().await;
+    println!("Initial routing table: {} peers", table.peers.len());
+    drop(table);
+
+    // Yield control - when timer driver is configured, this will check
+    // routing table periodically and send demo messages
     loop {
-        Timer::after(Duration::from_secs(1)).await;
-        uptime_secs = uptime_secs.wrapping_add(1);
-
-        // Every 60 seconds, log routing table and attempt demo message
-        if uptime_secs % 60 == 0 {
-            let table = routing_table.lock().await;
-
-            println!("Uptime: {} seconds", uptime_secs);
-            println!("Routing table: {} peers", table.peers.len());
-
-            if !table.peers.is_empty() {
-                println!("Peers:");
-                for (i, peer) in table.peers.iter().enumerate() {
-                    println!(
-                        "  [{}] {:02x?} (caps: 0x{:04x}, hops: {})",
-                        i,
-                        peer.short_addr,
-                        peer.capabilities,
-                        peer.hop_count
-                    );
-                }
-
-                // Demo: Send encrypted message to first peer (once)
-                if !message_sent {
-                    let peer = &table.peers[0];
-                    println!(
-                        "Demo: Would send encrypted message to {:02x?}",
-                        peer.short_addr
-                    );
-                    // TODO: Implement actual encrypted message sending
-                    // let plaintext = b"hello from constellation";
-                    // let nonce = [0u8; 12]; // TODO: Generate random nonce
-                    // let mut encrypted = [0u8; 128];
-                    // let len = encrypt(identity, &peer.pubkey, plaintext, &nonce, &mut encrypted)?;
-                    // send_packet_via_ble(&peer.transport_addr, &encrypted[..len]).await;
-
-                    message_sent = true;
-                }
-            }
-        }
+        embassy_futures::yield_now().await;
     }
 }

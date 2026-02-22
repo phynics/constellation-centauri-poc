@@ -6,7 +6,7 @@ use crate::transport::TransportAddr;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, Timer};
+// use embassy_time::{Duration, Timer}; // Temporarily disabled - needs timer driver setup
 
 /// Constellation mesh BLE service UUID.
 /// Custom 128-bit UUID for the mesh network service.
@@ -124,7 +124,9 @@ pub async fn ble_advertise_task(
 
         log::info!("BLE advertising beacon for {short_addr:x?}");
 
-        Timer::after(Duration::from_secs(HEARTBEAT_INTERVAL_SECS)).await;
+        // Yield to allow other tasks to run
+        // TODO: Replace with Timer::after when timer driver is configured
+        embassy_futures::yield_now().await;
     }
 }
 
@@ -162,7 +164,7 @@ pub async fn ble_scan_task(
         //     // table.update_peer(&heartbeat, transport_addr, now_ticks());
         // }
 
-        Timer::after(Duration::from_millis(100)).await;
+        embassy_futures::yield_now().await;
     }
 }
 
@@ -212,7 +214,7 @@ pub async fn ble_gatt_task(
         //     gatt_notify(PACKET_CHAR_HANDLE, &packet);
         // }
 
-        Timer::after(Duration::from_millis(10)).await;
+        embassy_futures::yield_now().await;
     }
 }
 
