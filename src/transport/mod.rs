@@ -1,4 +1,5 @@
 pub mod ble;
+pub mod gatt;
 
 /// Transport-layer address for a peer.
 ///
