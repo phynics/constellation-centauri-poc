@@ -157,6 +157,7 @@ checksum = "0b396d1f76d455557e1218ec8066ae14bba60b4b36ecd55577ba979f5db7ecaa"
 name = "constellation"
 version = "0.1.0"
 dependencies = [
+ "bt-hci",
  "chacha20poly1305",
  "curve25519-dalek",
  "ed25519-dalek",
@@ -524,6 +525,7 @@ dependencies = [
  "critical-section",
  "document-features",
  "embassy-time-driver",
+ "embassy-time-queue-utils",
  "embedded-hal 0.2.7",
  "embedded-hal 1.0.0",
  "embedded-hal-async",

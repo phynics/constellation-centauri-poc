@@ -12,7 +12,7 @@ pub struct ConstellationServer {
 pub struct MeshService {
     /// Full heartbeat payload (71 bytes)
     /// Contains: pubkey (32), capabilities (2), uptime (4), bloom (32), generation (1)
-    #[characteristic(uuid = "12345678-9abc-def0-1234-56789abcdef2", read, value = [0; 71])]
+    #[characteristic(uuid = "12345678-9abc-def0-1234-56789abcdef2", read, notify, value = [0; 71])]
     pub heartbeat: [u8; 71],
 
     /// Mesh packet exchange (write for incoming, notify for outgoing)

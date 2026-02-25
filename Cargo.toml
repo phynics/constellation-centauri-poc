@@ -4,10 +4,10 @@ name = "constellation"
 version = "0.1.0"
 
 [dependencies]
-embassy-executor = { version = "0.9.1", features = ["arch-riscv32"] }
+embassy-executor = { version = "0.9.1", features = ["arch-riscv32"], default-features = false }
 embassy-futures = { version = "0.1.1", features = ["log"] }
 embassy-sync = { version = "0.7.2", features = ["log"] }
-embassy-time = { version = "0.5.0", features = ["log"] }
+embassy-time = { version = "0.5.0", features = ["log", "generic-queue-8"], default-features = false }
 esp-alloc = "0.9.0"
 esp-backtrace = { version = "0.18.1", features = ["panic-handler", "println"] }
 esp-hal = { version = "1.0.0", features = ["unstable", "rt"] }
@@ -18,9 +18,12 @@ esp-rtos = { version = "0.2.0", features = ["embassy", "esp-alloc", "esp-radio"]
 static_cell = "2.1.0"
 trouble-host = { git = "https://github.com/embassy-rs/trouble.git", branch = "main", features = [
   "peripheral",
+  "central",
+  "scan",
   "gatt",
 ] }
 trouble-host-macros = { git = "https://github.com/embassy-rs/trouble.git", branch = "main" }
+bt-hci = "0.8"
 
 # Crypto dependencies
 ed25519-dalek = { version = "2.1", default-features = false, features = [
