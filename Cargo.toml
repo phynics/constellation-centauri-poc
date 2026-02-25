@@ -18,9 +18,7 @@ esp-rtos = { version = "0.2.0", features = ["embassy", "esp-alloc", "esp-radio"]
 static_cell = "2.1.0"
 trouble-host = { git = "https://github.com/embassy-rs/trouble.git", branch = "main", features = [
   "peripheral",
-  "central",
   "scan",
-  "gatt",
 ] }
 trouble-host-macros = { git = "https://github.com/embassy-rs/trouble.git", branch = "main" }
 bt-hci = "0.8"

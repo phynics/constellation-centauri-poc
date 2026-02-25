@@ -1,30 +1,71 @@
+// =============================================================================
+// Constellation Mesh Node — BLE Firmware for ESP32
+// =============================================================================
+//
+// ARCHITECTURE OVERVIEW
+// ---------------------
+// Each node broadcasts heartbeats via BLE advertising and receives heartbeats
+// from peers via scanning. No BLE connections are needed.
+//
+//   advertise_task:  Periodically broadcasts a compact heartbeat payload
+//                    as ManufacturerSpecificData in legacy BLE advertising.
+//
+//   scan_task:       Runs passive scans; the scan event handler parses
+//                    incoming heartbeats and pushes them into a channel.
+//                    The scan_task drains the channel and updates the
+//                    routing table.
+//
+// Legacy advertising (31-byte limit) carries a 15-byte compact heartbeat:
+//   short_addr(8) + capabilities(2) + uptime(4) + bloom_gen(1)
+// The full pubkey and bloom filter are exchanged later via connections.
+//
+// CONCURRENCY MODEL
+// -----------------
+// Four tasks run concurrently via `join4`:
+//
+//   1. ble_runner_task      — Pumps the HCI event loop
+//   2. advertise_task       — Broadcast compact heartbeat
+//   3. scan_task            — Passive scan, drain heartbeat channel
+//   4. heartbeat_update_task — Tick uptime counter every 5 seconds
+//
+// Legacy advertising and scanning coexist on ESP32-C6 — the controller
+// interleaves them at the link layer. No time-division multiplexing needed.
+// =============================================================================
+
 #![no_std]
 #![no_main]
 
-// ESP-IDF application descriptor (required for flashing)
 esp_bootloader_esp_idf::esp_app_desc!();
+
+// ---------------------------------------------------------------------------
+// Imports
+// ---------------------------------------------------------------------------
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join4;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
-use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
+
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_hal::rng::Rng;
 use esp_println::println;
 use esp_radio::ble::controller::BleConnector;
 use esp_storage::FlashStorage;
+
 use static_cell::StaticCell;
+
 use trouble_host::prelude::*;
 
 use bt_hci::cmd::le::{
-    LeAddDeviceToFilterAcceptList, LeClearFilterAcceptList, LeCreateConn, LeSetScanEnable,
+    LeAddDeviceToFilterAcceptList,
+    LeClearFilterAcceptList,
+    LeSetScanEnable,
     LeSetScanParams,
 };
-use bt_hci::controller::{ControllerCmdAsync, ControllerCmdSync};
+use bt_hci::controller::ControllerCmdSync;
 
 pub mod config;
 pub mod crypto;
@@ -34,50 +75,102 @@ pub mod routing;
 pub mod transport;
 
 use config::BLOOM_FILTER_BYTES;
-use crypto::identity::{short_addr_of, NodeIdentity};
+use crypto::identity::{ShortAddr, NodeIdentity};
 use node::roles::Capabilities;
 use protocol::heartbeat::HeartbeatPayload;
-use routing::table::RoutingTable;
-use transport::ble::PacketBuf;
-use transport::gatt::ConstellationServer;
-use routing::table::TransportAddr;
+use routing::table::{RoutingTable, TransportAddr};
 
-/// Heap size: 72 KB
+// =============================================================================
+// Constants
+// =============================================================================
+
 const HEAP_SIZE: usize = 72 * 1024;
-
-/// BLE configuration constants
-const CONNECTIONS_MAX: usize = 2; // 1 peripheral + 1 central
-const L2CAP_CHANNELS_MAX: usize = 3; // Signal + ATT per connection
-
-/// Constellation manufacturer ID used in advertising
+const CONNECTIONS_MAX: usize = 1;
+const L2CAP_CHANNELS_MAX: usize = 3;
 const CONSTELLATION_COMPANY_ID: u16 = 0x1234;
 
-/// Static cells for shared state
+/// Compact heartbeat payload for legacy BLE advertising.
+/// Layout: [short_addr: 8][capabilities: 2][uptime: 4][bloom_gen: 1] = 15 bytes
+const COMPACT_HEARTBEAT_SIZE: usize = 8 + 2 + 4 + 1;
+
+// =============================================================================
+// Compact heartbeat (over-the-air format for legacy advertising)
+// =============================================================================
+
+/// Parsed compact heartbeat from a BLE advertisement.
+struct CompactHeartbeat {
+    short_addr: ShortAddr,
+    capabilities: u16,
+    uptime_secs: u32,
+    bloom_generation: u8,
+}
+
+fn serialize_compact_heartbeat(
+    identity: &NodeIdentity,
+    hb: &HeartbeatPayload,
+    buf: &mut [u8],
+) -> Option<usize> {
+    if buf.len() < COMPACT_HEARTBEAT_SIZE {
+        return None;
+    }
+    let sa = identity.short_addr();
+    buf[0..8].copy_from_slice(sa);
+    buf[8..10].copy_from_slice(&hb.capabilities.to_le_bytes());
+    buf[10..14].copy_from_slice(&hb.uptime_secs.to_le_bytes());
+    buf[14] = hb.bloom_generation;
+    Some(COMPACT_HEARTBEAT_SIZE)
+}
+
+fn deserialize_compact_heartbeat(data: &[u8]) -> Option<CompactHeartbeat> {
+    if data.len() < COMPACT_HEARTBEAT_SIZE {
+        return None;
+    }
+    let mut short_addr = [0u8; 8];
+    short_addr.copy_from_slice(&data[0..8]);
+    let capabilities = u16::from_le_bytes([data[8], data[9]]);
+    let uptime_secs = u32::from_le_bytes([data[10], data[11], data[12], data[13]]);
+    let bloom_generation = data[14];
+    Some(CompactHeartbeat {
+        short_addr,
+        capabilities,
+        uptime_secs,
+        bloom_generation,
+    })
+}
+
+// =============================================================================
+// Shared static state
+// =============================================================================
+
 static ROUTING_TABLE: StaticCell<Mutex<NoopRawMutex, RoutingTable>> = StaticCell::new();
 static HEARTBEAT: StaticCell<Mutex<NoopRawMutex, HeartbeatPayload>> = StaticCell::new();
-static INCOMING_PACKETS: StaticCell<Channel<NoopRawMutex, PacketBuf, 4>> = StaticCell::new();
-static OUTGOING_PACKETS: StaticCell<Channel<NoopRawMutex, PacketBuf, 4>> = StaticCell::new();
-static GATT_SERVER: StaticCell<ConstellationServer> = StaticCell::new();
-static DISCOVERED_PEER: StaticCell<Signal<NoopRawMutex, Address>> = StaticCell::new();
+
+/// Channel for the scan handler (synchronous callback) to pass received
+/// compact heartbeats to the scan_task (async).
+static HEARTBEAT_RX: StaticCell<Channel<NoopRawMutex, (BdAddr, AddrKind, CompactHeartbeat), 4>> =
+    StaticCell::new();
+
+// =============================================================================
+// Entry point
+// =============================================================================
 
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) {
-    // 1. Initialize heap allocator
     esp_alloc::heap_allocator! {
         size: HEAP_SIZE
     }
 
-    println!("Constellation Mesh Node - BLE PoC");
-    println!("==================================");
+    println!("Constellation Mesh Node - BLE Advertising Broadcast");
+    println!("====================================================");
 
-    // 2. Initialize peripherals
     let peripherals = esp_hal::init(esp_hal::Config::default());
 
-    // 3. Initialize esp-rtos scheduler (required for BLE)
     println!("Initializing RTOS scheduler...");
     let timg0 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG0);
+
     #[cfg(target_arch = "riscv32")]
-    let software_interrupt = esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    let software_interrupt =
+        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
 
     esp_rtos::start(
         timg0.timer0,
@@ -85,34 +178,27 @@ async fn main(_spawner: Spawner) {
         software_interrupt.software_interrupt0,
     );
 
-    // 4. Initialize RNG and flash storage
     println!("Initializing RNG (non-cryptographic - PoC only)...");
     let mut rng = Rng::new();
     let mut flash = FlashStorage::new(peripherals.FLASH);
 
-    // 5. Identity provisioning
     let identity = load_or_generate_identity(&mut flash, &mut rng);
-
     println!("Node identity: {:02x?}", identity.short_addr());
     println!("Public key: {:02x?}", identity.pubkey());
 
-    // 6. Initialize BLE controller
     println!("Initializing BLE controller...");
     let bluetooth = peripherals.BT;
     let connector = BleConnector::new(bluetooth, Default::default())
         .expect("Failed to create BLE connector");
     let controller: ExternalController<_, 20> = ExternalController::new(connector);
 
-    // 7. Create BLE host resources
     let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
         HostResources::new();
 
-    // 8. Create BLE stack
     let address = derive_ble_address(&identity);
     println!("BLE address: {:02x?}", address);
 
-    let stack = trouble_host::new(controller, &mut resources)
-        .set_random_address(address);
+    let stack = trouble_host::new(controller, &mut resources).set_random_address(address);
 
     let Host {
         mut peripheral,
@@ -121,7 +207,7 @@ async fn main(_spawner: Spawner) {
         ..
     } = stack.build();
 
-    // 9. Create shared state
+    // Shared state
     let routing_table = RoutingTable::new(*identity.short_addr());
     let routing_table = ROUTING_TABLE.init(Mutex::new(routing_table));
 
@@ -135,57 +221,27 @@ async fn main(_spawner: Spawner) {
     };
     let heartbeat = HEARTBEAT.init(Mutex::new(heartbeat_payload));
 
-    let incoming_packets = INCOMING_PACKETS.init(Channel::new());
-    let outgoing_packets = OUTGOING_PACKETS.init(Channel::new());
-    let discovered_peer = DISCOVERED_PEER.init(Signal::new());
+    let heartbeat_rx = HEARTBEAT_RX.init(Channel::new());
 
-    println!("Shared state initialized");
-
-    // 10. Create GATT server
-    let server = ConstellationServer::new_with_config(GapConfig::default("Cstltn"))
-        .expect("Failed to create GATT server");
-    let server = GATT_SERVER.init(server);
-
-    // 11. Create scan handler for discovering Constellation peers
     let scan_handler = ConstellationScanHandler {
         our_addr: address,
-        discovered: discovered_peer,
+        heartbeat_rx,
     };
 
-    println!("GATT server created");
-    println!("Ready to advertise, scan, and connect");
+    println!("Ready to advertise and scan (legacy, connectionless)");
 
-    // 12. Run BLE stack concurrently with application logic
     let _ = join4(
-        // BLE runner task with scan event handler
         ble_runner_task(runner, &scan_handler),
-        // Peripheral role: advertise + accept connections + serve GATT
-        peripheral_task(
-            &mut peripheral,
-            server,
-            &identity,
-            routing_table,
-            heartbeat,
-            incoming_packets,
-            outgoing_packets,
-        ),
-        // Central role: scan + connect + subscribe to peer heartbeats
-        central_task(
-            central,
-            &stack,
-            discovered_peer,
-            routing_table,
-            heartbeat,
-        ),
-        // Heartbeat update task (periodic uptime + bloom updates)
-        heartbeat_update_task(server, heartbeat, routing_table),
+        advertise_task(&mut peripheral, &identity, heartbeat),
+        scan_task(central, heartbeat_rx, routing_table),
+        heartbeat_update_task(heartbeat, routing_table),
     )
     .await;
 }
 
-// ---------------------------------------------------------------------------
+// =============================================================================
 // Heartbeat logging helpers
-// ---------------------------------------------------------------------------
+// =============================================================================
 
 fn format_capabilities(caps: u16) -> &'static str {
     match caps {
@@ -200,34 +256,30 @@ fn format_capabilities(caps: u16) -> &'static str {
     }
 }
 
-fn log_heartbeat_tx(hb: &HeartbeatPayload) {
-    let node_id = short_addr_of(&hb.full_pubkey);
-    println!("[heartbeat:tx] Sending heartbeat:");
-    println!("  Node ID:      {:02x?}", node_id);
-    println!("  Pubkey:       {:02x?}...", &hb.full_pubkey[..8]);
+fn log_heartbeat_tx(hb: &HeartbeatPayload, short_addr: &ShortAddr) {
+    println!("[heartbeat:tx] Broadcasting heartbeat:");
+    println!("  Node ID:      {:02x?}", short_addr);
     println!("  Capabilities: {}", format_capabilities(hb.capabilities));
     println!("  Uptime:       {}s", hb.uptime_secs);
     println!("  Bloom gen:    {}", hb.bloom_generation);
 }
 
-fn log_heartbeat_rx(hb: &HeartbeatPayload) {
-    let node_id = short_addr_of(&hb.full_pubkey);
+fn log_heartbeat_rx(chb: &CompactHeartbeat) {
     println!("[heartbeat:rx] Received from peer:");
-    println!("  Node ID:      {:02x?}", node_id);
-    println!("  Pubkey:       {:02x?}...", &hb.full_pubkey[..8]);
-    println!("  Capabilities: {}", format_capabilities(hb.capabilities));
-    println!("  Uptime:       {}s", hb.uptime_secs);
-    println!("  Bloom gen:    {}", hb.bloom_generation);
+    println!("  Node ID:      {:02x?}", chb.short_addr);
+    println!("  Capabilities: {}", format_capabilities(chb.capabilities));
+    println!("  Uptime:       {}s", chb.uptime_secs);
+    println!("  Bloom gen:    {}", chb.bloom_generation);
 }
 
-// ---------------------------------------------------------------------------
-// BLE advertising data parsing
-// ---------------------------------------------------------------------------
+// =============================================================================
+// BLE advertising data parser
+// =============================================================================
 
-/// Parse BLE advertising data (AD structures) looking for Constellation manufacturer data.
-/// AD structure format: [length, type, data...]
-/// Type 0xFF = Manufacturer Specific Data, first 2 bytes = company ID (LE).
-fn is_constellation_adv(data: &[u8]) -> bool {
+/// Parse AD structures from raw advertising data, looking for
+/// ManufacturerSpecificData with our company ID (0x1234). If found,
+/// deserialize the payload as a CompactHeartbeat.
+fn parse_heartbeat_from_adv(data: &[u8]) -> Option<CompactHeartbeat> {
     let mut i = 0;
     while i + 1 < data.len() {
         let len = data[i] as usize;
@@ -235,60 +287,54 @@ fn is_constellation_adv(data: &[u8]) -> bool {
             break;
         }
         let ad_type = data[i + 1];
-        // Manufacturer Specific Data type = 0xFF, needs at least 2 bytes for company ID
         if ad_type == 0xFF && len >= 3 {
             let company_id = u16::from_le_bytes([data[i + 2], data[i + 3]]);
             if company_id == CONSTELLATION_COMPANY_ID {
-                return true;
+                let payload_start = i + 4;
+                let payload_end = i + 1 + len;
+                if payload_start < payload_end {
+                    return deserialize_compact_heartbeat(&data[payload_start..payload_end]);
+                }
             }
         }
         i += 1 + len;
     }
-    false
+    None
 }
 
-// ---------------------------------------------------------------------------
+// =============================================================================
 // Scan event handler
-// ---------------------------------------------------------------------------
+// =============================================================================
 
-/// EventHandler that filters BLE scan reports for Constellation nodes.
-/// When a peer is discovered, signals the central task via a Signal.
 struct ConstellationScanHandler {
     our_addr: Address,
-    discovered: &'static Signal<NoopRawMutex, Address>,
+    heartbeat_rx: &'static Channel<NoopRawMutex, (BdAddr, AddrKind, CompactHeartbeat), 4>,
 }
 
 impl EventHandler for ConstellationScanHandler {
     fn on_adv_reports(&self, mut it: LeAdvReportsIter<'_>) {
         while let Some(Ok(report)) = it.next() {
-            // Skip our own advertisements
             if report.addr.raw() == self.our_addr.addr.raw() {
                 continue;
             }
 
-            // Check if this is a Constellation node
-            if is_constellation_adv(report.data) {
-                let peer_addr = Address {
-                    kind: report.addr_kind,
-                    addr: report.addr,
-                };
+            if let Some(chb) = parse_heartbeat_from_adv(report.data) {
                 println!(
-                    "[scan] Discovered Constellation peer: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} (RSSI: {})",
+                    "[scan] Received heartbeat from {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} (RSSI: {})",
                     report.addr.raw()[5], report.addr.raw()[4], report.addr.raw()[3],
                     report.addr.raw()[2], report.addr.raw()[1], report.addr.raw()[0],
                     report.rssi,
                 );
-                self.discovered.signal(peer_addr);
+                let _ = self.heartbeat_rx.try_send((report.addr, report.addr_kind, chb));
             }
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// BLE runner task
-// ---------------------------------------------------------------------------
+// =============================================================================
+// Task 1: BLE runner
+// =============================================================================
 
-/// Background BLE runner task with scan event handler
 async fn ble_runner_task<C: Controller, E: EventHandler>(
     mut runner: Runner<'_, C, DefaultPacketPool>,
     handler: &E,
@@ -300,14 +346,170 @@ async fn ble_runner_task<C: Controller, E: EventHandler>(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Heartbeat update task
-// ---------------------------------------------------------------------------
+// =============================================================================
+// Task 2: Advertise compact heartbeat (legacy BLE advertising)
+// =============================================================================
 
-/// Periodic heartbeat update task
-/// Updates uptime counter and bloom filter every 5 seconds
+/// Broadcasts a compact heartbeat via legacy NonconnectableNonscannableUndirected
+/// advertising. Restarts every cycle with fresh data.
+///
+/// Advertise duration uses a prime (3s) so that two nodes' cycles naturally
+/// drift and overlap — one node advertises while the other scans.
+async fn advertise_task<'a, C: Controller>(
+    peripheral: &mut Peripheral<'a, C, DefaultPacketPool>,
+    identity: &NodeIdentity,
+    heartbeat: &'static Mutex<NoopRawMutex, HeartbeatPayload>,
+) {
+    // Per-node startup jitter to break synchronization between nodes.
+    let jitter_ms = u16::from_le_bytes([identity.short_addr()[0], identity.short_addr()[1]]) % 2048;
+    println!("[adv] Startup jitter: {}ms", jitter_ms);
+    Timer::after(Duration::from_millis(jitter_ms as u64)).await;
+
+    loop {
+        // Serialize compact heartbeat into MfgSpecificData
+        let mut compact_buf = [0u8; COMPACT_HEARTBEAT_SIZE];
+        {
+            let hb = heartbeat.lock().await;
+            if serialize_compact_heartbeat(identity, &hb, &mut compact_buf).is_none() {
+                println!("[adv] Failed to serialize heartbeat");
+                Timer::after(Duration::from_secs(3)).await;
+                continue;
+            }
+            log_heartbeat_tx(&hb, identity.short_addr());
+        }
+
+        let mut adv_data = [0u8; 31];
+        let len = match AdStructure::encode_slice(
+            &[
+                AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
+                AdStructure::ManufacturerSpecificData {
+                    company_identifier: CONSTELLATION_COMPANY_ID,
+                    payload: &compact_buf,
+                },
+            ],
+            &mut adv_data[..],
+        ) {
+            Ok(len) => len,
+            Err(e) => {
+                println!("[adv] Failed to encode AD structures: {:?}", e);
+                Timer::after(Duration::from_secs(3)).await;
+                continue;
+            }
+        };
+
+        println!("[adv] Broadcasting heartbeat ({} bytes)...", len);
+
+        match peripheral
+            .advertise(
+                &Default::default(),
+                Advertisement::NonconnectableNonscannableUndirected {
+                    adv_data: &adv_data[..len],
+                },
+            )
+            .await
+        {
+            Ok(_advertiser) => {
+                // Advertising runs in the controller. Sleep for one cycle.
+                // 3 seconds (prime) — coprime with scan duration (7s) to
+                // ensure phase rotation between nodes.
+                Timer::after(Duration::from_secs(3)).await;
+                // Dropping _advertiser stops advertising
+            }
+            Err(e) => {
+                println!("[adv] Advertising error: {:?}", e);
+                Timer::after(Duration::from_secs(3)).await;
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Task 3: Scan for peer heartbeats
+// =============================================================================
+
+/// Runs passive scans and drains the heartbeat channel into the routing table.
+///
+/// Scan duration uses a prime (7s) — coprime with the advertise duration (3s)
+/// so that two nodes' windows naturally rotate and overlap.
+async fn scan_task<'a, C>(
+    central: Central<'a, C, DefaultPacketPool>,
+    heartbeat_rx: &'static Channel<NoopRawMutex, (BdAddr, AddrKind, CompactHeartbeat), 4>,
+    routing_table: &'static Mutex<NoopRawMutex, RoutingTable>,
+) where
+    C: Controller
+        + ControllerCmdSync<LeSetScanParams>
+        + ControllerCmdSync<LeSetScanEnable>
+        + ControllerCmdSync<LeClearFilterAcceptList>
+        + ControllerCmdSync<LeAddDeviceToFilterAcceptList>,
+{
+    let mut scanner = Scanner::new(central);
+
+    loop {
+        println!("[scan] Scanning for peers...");
+
+        let scan_config = ScanConfig {
+            active: false,
+            phys: PhySet::M1,
+            interval: Duration::from_millis(100),
+            window: Duration::from_millis(100),
+            ..Default::default()
+        };
+
+        match scanner.scan(&scan_config).await {
+            Ok(_session) => {
+                let deadline = Instant::now() + Duration::from_secs(7);
+
+                while Instant::now() < deadline {
+                    let remaining = deadline - Instant::now();
+                    match embassy_futures::select::select(
+                        heartbeat_rx.receive(),
+                        Timer::after(remaining),
+                    )
+                    .await
+                    {
+                        embassy_futures::select::Either::First((bd_addr, _addr_kind, chb)) => {
+                            let mac = bd_addr.raw();
+                            let mut mac_arr = [0u8; 6];
+                            mac_arr.copy_from_slice(mac);
+                            let transport = TransportAddr {
+                                addr_type: 0,
+                                addr: mac_arr,
+                            };
+
+                            let mut table = routing_table.lock().await;
+                            table.update_peer_compact(
+                                chb.short_addr,
+                                chb.capabilities,
+                                transport,
+                                Instant::now().as_ticks(),
+                            );
+                            println!(
+                                "  -> Routing table updated ({} peers)",
+                                table.peers.len()
+                            );
+
+                            log_heartbeat_rx(&chb);
+                        }
+                        embassy_futures::select::Either::Second(_) => {
+                            break;
+                        }
+                    }
+                }
+                // Dropping _session stops scanning
+            }
+            Err(e) => {
+                println!("[scan] Scan error: {:?}", e);
+                Timer::after(Duration::from_secs(7)).await;
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Task 4: Heartbeat update
+// =============================================================================
+
 async fn heartbeat_update_task(
-    _server: &'static ConstellationServer<'static>,
     heartbeat: &'static Mutex<NoopRawMutex, HeartbeatPayload>,
     routing_table: &'static Mutex<NoopRawMutex, RoutingTable>,
 ) {
@@ -321,7 +523,6 @@ async fn heartbeat_update_task(
             let mut hb = heartbeat.lock().await;
             hb.uptime_secs = uptime_secs;
 
-            // Sync bloom filter from routing table
             let table = routing_table.lock().await;
             hb.bloom_filter = table.local_bloom.bits;
             hb.bloom_generation = table.bloom_generation;
@@ -334,410 +535,10 @@ async fn heartbeat_update_task(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Peripheral task (existing, refactored)
-// ---------------------------------------------------------------------------
-
-/// Peripheral role: advertise, accept connections, serve GATT
-async fn peripheral_task<'a, C: Controller>(
-    peripheral: &mut Peripheral<'a, C, DefaultPacketPool>,
-    server: &'static ConstellationServer<'static>,
-    identity: &NodeIdentity,
-    routing_table: &'static Mutex<NoopRawMutex, RoutingTable>,
-    heartbeat: &'static Mutex<NoopRawMutex, HeartbeatPayload>,
-    incoming_packets: &'static Channel<NoopRawMutex, PacketBuf, 4>,
-    outgoing_packets: &'static Channel<NoopRawMutex, PacketBuf, 4>,
-) {
-    loop {
-        match advertise_and_accept(peripheral, server, identity, heartbeat).await {
-            Ok(conn) => {
-                println!("[peripheral] Connection established");
-
-                if let Err(e) = handle_peripheral_connection(
-                    &conn,
-                    server,
-                    routing_table,
-                    heartbeat,
-                    incoming_packets,
-                    outgoing_packets,
-                )
-                .await
-                {
-                    println!("[peripheral] Connection error: {:?}", e);
-                }
-
-                println!("[peripheral] Connection closed");
-            }
-            Err(e) => {
-                println!("[peripheral] Advertising error: {:?}", e);
-                embassy_futures::yield_now().await;
-            }
-        }
-    }
-}
-
-/// Advertise with custom manufacturer data and accept connection
-async fn advertise_and_accept<'a, C: Controller>(
-    peripheral: &mut Peripheral<'a, C, DefaultPacketPool>,
-    server: &'static ConstellationServer<'static>,
-    identity: &NodeIdentity,
-    _heartbeat: &'static Mutex<NoopRawMutex, HeartbeatPayload>,
-) -> Result<GattConnection<'a, 'static, DefaultPacketPool>, BleHostError<C::Error>> {
-    let mut adv_data = [0u8; 31];
-    let short_addr = identity.short_addr();
-
-    let len = AdStructure::encode_slice(
-        &[
-            AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-            AdStructure::CompleteLocalName(b"Cstltn"),
-            AdStructure::ManufacturerSpecificData {
-                company_identifier: CONSTELLATION_COMPANY_ID,
-                payload: short_addr,
-            },
-        ],
-        &mut adv_data[..],
-    )?;
-
-    println!("[adv] Advertising as 'Cstltn' beacon={:02x?}", short_addr);
-
-    let advertiser = peripheral
-        .advertise(
-            &Default::default(),
-            Advertisement::ConnectableScannableUndirected {
-                adv_data: &adv_data[..len],
-                scan_data: &[],
-            },
-        )
-        .await?;
-
-    println!("[adv] Waiting for connection...");
-
-    let conn = advertiser.accept().await?.with_attribute_server(server)?;
-
-    println!("[adv] Connection accepted");
-
-    Ok(conn)
-}
-
-/// Handle GATT connection events (peripheral/server side)
-async fn handle_peripheral_connection<P: PacketPool>(
-    conn: &GattConnection<'_, '_, P>,
-    server: &'static ConstellationServer<'static>,
-    _routing_table: &'static Mutex<NoopRawMutex, RoutingTable>,
-    heartbeat: &'static Mutex<NoopRawMutex, HeartbeatPayload>,
-    incoming_packets: &'static Channel<NoopRawMutex, PacketBuf, 4>,
-    _outgoing_packets: &'static Channel<NoopRawMutex, PacketBuf, 4>,
-) -> Result<(), ()> {
-    use embassy_futures::select::{select, Either};
-
-    loop {
-        match select(conn.next(), Timer::after(Duration::from_secs(10))).await {
-            Either::First(event) => match event {
-                GattConnectionEvent::Disconnected { reason } => {
-                    println!("[gatt] Disconnected: {:?}", reason);
-                    return Ok(());
-                }
-
-                GattConnectionEvent::Gatt { event } => {
-                    match &event {
-                        GattEvent::Read(read_event) => {
-                            if read_event.handle() == server.mesh_service.heartbeat.handle {
-                                let hb = heartbeat.lock().await;
-                                let mut buf = [0u8; 71];
-                                if let Ok(_) = hb.serialize(&mut buf) {
-                                    log_heartbeat_tx(&hb);
-                                    let _ = server.mesh_service.heartbeat.set(server, &buf);
-                                }
-                            }
-                        }
-
-                        GattEvent::Write(write_event) => {
-                            if write_event.handle() == server.mesh_service.packets.handle {
-                                let data = write_event.data();
-                                println!("[gatt] Received packet ({} bytes)", data.len());
-                                let mut packet = PacketBuf::new();
-                                if packet.extend_from_slice(data).is_ok() {
-                                    incoming_packets.send(packet).await;
-                                }
-                            }
-                        }
-
-                        _ => {}
-                    }
-
-                    match event.accept() {
-                        Ok(reply) => {
-                            reply.send().await;
-                        }
-                        Err(e) => {
-                            println!("[gatt] Error sending response: {:?}", e);
-                        }
-                    }
-                }
-
-                _ => {}
-            },
-            Either::Second(_) => {
-                // Send periodic heartbeat notification
-                let hb = heartbeat.lock().await;
-                let mut buf = [0u8; 71];
-                if let Ok(_) = hb.serialize(&mut buf) {
-                    log_heartbeat_tx(&hb);
-
-                    if let Ok(_) = server.mesh_service.heartbeat.set(server, &buf) {
-                        if let Ok(_) = server.mesh_service.heartbeat.notify(conn, &buf).await {
-                            println!("  -> Notification sent ({} bytes)", buf.len());
-                        } else {
-                            println!("  -> Notification failed (not subscribed?)");
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Central task (new): scan, connect, subscribe to peer heartbeats
-// ---------------------------------------------------------------------------
-
-/// Central role: scan for Constellation peers, connect, discover GATT services,
-/// subscribe to heartbeat notifications, and update routing table.
-async fn central_task<'a, C>(
-    central: Central<'a, C, DefaultPacketPool>,
-    stack: &'a Stack<'a, C, DefaultPacketPool>,
-    discovered_peer: &'static Signal<NoopRawMutex, Address>,
-    routing_table: &'static Mutex<NoopRawMutex, RoutingTable>,
-    _heartbeat: &'static Mutex<NoopRawMutex, HeartbeatPayload>,
-) where
-    C: Controller
-        + ControllerCmdSync<LeSetScanParams>
-        + ControllerCmdSync<LeSetScanEnable>
-        + ControllerCmdSync<LeClearFilterAcceptList>
-        + ControllerCmdSync<LeAddDeviceToFilterAcceptList>
-        + ControllerCmdAsync<LeCreateConn>,
-{
-    let mut scanner = Scanner::new(central);
-
-    loop {
-        // Phase 1: Scan for Constellation peers
-        println!("[central] Scanning for Constellation peers...");
-        discovered_peer.reset();
-
-        let scan_config = ScanConfig {
-            active: false,
-            phys: PhySet::M1,
-            interval: Duration::from_millis(100),
-            window: Duration::from_millis(100),
-            ..Default::default()
-        };
-
-        let peer_addr = match scanner.scan(&scan_config).await {
-            Ok(session) => {
-                // Wait for a peer to be discovered via the EventHandler (with timeout)
-                let result = embassy_futures::select::select(
-                    discovered_peer.wait(),
-                    Timer::after(Duration::from_secs(30)),
-                )
-                .await;
-
-                drop(session); // Stop scanning
-
-                match result {
-                    embassy_futures::select::Either::First(addr) => {
-                        discovered_peer.reset();
-                        addr
-                    }
-                    embassy_futures::select::Either::Second(_) => {
-                        println!("[central] No peers found, retrying...");
-                        continue;
-                    }
-                }
-            }
-            Err(e) => {
-                println!("[central] Scan error: {:?}", e);
-                Timer::after(Duration::from_secs(5)).await;
-                continue;
-            }
-        };
-
-        // Phase 2: Connect to the discovered peer
-        // Get Central back from Scanner (connect() requires Central, not Scanner)
-        let mut central = scanner.into_inner();
-
-        println!("[central] Connecting to peer...");
-
-        let connect_config = ConnectConfig {
-            connect_params: Default::default(),
-            scan_config: ScanConfig {
-                filter_accept_list: &[(peer_addr.kind, &peer_addr.addr)],
-                ..Default::default()
-            },
-        };
-
-        match central.connect(&connect_config).await {
-            Ok(conn) => {
-                println!("[central] Connected to peer!");
-
-                // Phase 3: GATT client operations
-                if let Err(e) =
-                    handle_central_connection(&conn, stack, routing_table).await
-                {
-                    println!("[central] Connection handling error: {:?}", e);
-                }
-
-                println!("[central] Peer connection closed, will re-scan");
-            }
-            Err(e) => {
-                println!("[central] Connect failed: {:?}", e);
-            }
-        }
-
-        // Wrap central back into Scanner for next iteration
-        scanner = Scanner::new(central);
-
-        // Brief delay before re-scanning
-        Timer::after(Duration::from_secs(2)).await;
-    }
-}
-
-/// Handle a central-role connection: discover services, subscribe to heartbeat,
-/// receive notifications and update routing table.
-async fn handle_central_connection<'a, C: Controller, P: PacketPool>(
-    conn: &Connection<'a, P>,
-    stack: &'a Stack<'a, C, P>,
-    routing_table: &'static Mutex<NoopRawMutex, RoutingTable>,
-) -> Result<(), &'static str> {
-    // Create GATT client (performs MTU exchange)
-    let client = GattClient::<C, P, 10>::new(stack, conn)
-        .await
-        .map_err(|_| "Failed to create GATT client")?;
-
-    println!("[central] GATT client created, discovering services...");
-
-    // The client.task() must run concurrently with our GATT operations
-    let _ = embassy_futures::join::join(
-        client.task(),
-        async {
-            // Discover Constellation mesh service by UUID
-            // UUID "12345678-9abc-def0-1234-56789abcdef1" in BLE little-endian byte order
-            let service_uuid = Uuid::new_long([
-                0xf1, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, 0xf0, 0xde, 0xbc, 0x9a, 0x78,
-                0x56, 0x34, 0x12,
-            ]);
-
-            let services = match client.services_by_uuid(&service_uuid).await {
-                Ok(s) => s,
-                Err(e) => {
-                    println!("[central] Service discovery failed: {:?}", e);
-                    return;
-                }
-            };
-
-            let service = match services.first() {
-                Some(s) => s,
-                None => {
-                    println!("[central] Constellation service not found");
-                    return;
-                }
-            };
-
-            println!("[central] Found Constellation mesh service");
-
-            // Discover heartbeat characteristic by UUID
-            // UUID "12345678-9abc-def0-1234-56789abcdef2" in BLE little-endian byte order
-            let heartbeat_uuid = Uuid::new_long([
-                0xf2, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, 0xf0, 0xde, 0xbc, 0x9a, 0x78,
-                0x56, 0x34, 0x12,
-            ]);
-
-            let hb_char: Characteristic<[u8; 71]> = match client
-                .characteristic_by_uuid(service, &heartbeat_uuid)
-                .await
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    println!("[central] Heartbeat characteristic not found: {:?}", e);
-                    return;
-                }
-            };
-
-            println!("[central] Found heartbeat characteristic");
-
-            // Read the current heartbeat value
-            let mut hb_buf = [0u8; 71];
-            match client.read_characteristic(&hb_char, &mut hb_buf).await {
-                Ok(len) => {
-                    println!("[central] Initial heartbeat read ({} bytes)", len);
-                    if let Ok(hb) = HeartbeatPayload::deserialize(&hb_buf[..len]) {
-                        log_heartbeat_rx(&hb);
-                        update_routing_table_from_conn(conn, &hb, routing_table).await;
-                    }
-                }
-                Err(e) => {
-                    println!("[central] Read failed: {:?}", e);
-                }
-            }
-
-            // Subscribe to heartbeat notifications
-            println!("[central] Subscribing to heartbeat notifications...");
-            let mut listener = match client.subscribe(&hb_char, false).await {
-                Ok(l) => l,
-                Err(e) => {
-                    println!("[central] Failed to subscribe: {:?}", e);
-                    return;
-                }
-            };
-
-            println!("[central] Subscribed! Listening for heartbeat notifications...");
-
-            // Receive heartbeat notifications until disconnection
-            loop {
-                let notification = listener.next().await;
-                let data = notification.as_ref();
-
-                if let Ok(hb) = HeartbeatPayload::deserialize(data) {
-                    log_heartbeat_rx(&hb);
-                    update_routing_table_from_conn(conn, &hb, routing_table).await;
-                } else {
-                    println!(
-                        "[central] Notification ({} bytes) failed to deserialize",
-                        data.len()
-                    );
-                }
-            }
-        },
-    )
-    .await;
-
-    Ok(())
-}
-
-/// Helper: update routing table from a connection's peer address and heartbeat
-async fn update_routing_table_from_conn<P: PacketPool>(
-    conn: &Connection<'_, P>,
-    hb: &HeartbeatPayload,
-    routing_table: &Mutex<NoopRawMutex, RoutingTable>,
-) {
-    let peer_bd_addr = conn.peer_address();
-    let mac = peer_bd_addr.raw();
-    let mut mac_arr = [0u8; 6];
-    mac_arr.copy_from_slice(mac);
-    let transport = TransportAddr {
-        addr_type: 0, // BLE
-        addr: mac_arr,
-    };
-
-    let mut table = routing_table.lock().await;
-    table.update_peer(hb, transport, Instant::now().as_ticks());
-    println!("  -> Routing table updated ({} peers)", table.peers.len());
-}
-
-// ---------------------------------------------------------------------------
+// =============================================================================
 // Utility functions
-// ---------------------------------------------------------------------------
+// =============================================================================
 
-/// Load identity from flash or generate new one
 fn load_or_generate_identity(flash: &mut FlashStorage, rng: &mut Rng) -> NodeIdentity {
     use node::storage;
 
@@ -772,7 +573,6 @@ fn load_or_generate_identity(flash: &mut FlashStorage, rng: &mut Rng) -> NodeIde
     }
 }
 
-/// Derive BLE address from node identity
 fn derive_ble_address(identity: &NodeIdentity) -> Address {
     let short_addr = identity.short_addr();
     let mut mac = [0u8; 6];

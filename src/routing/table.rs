@@ -86,6 +86,42 @@ impl RoutingTable {
         self.recompute_bloom();
     }
 
+    /// Update a peer from a compact advertisement (no full pubkey or bloom).
+    /// Used when heartbeats arrive via legacy BLE advertising which can't
+    /// carry the full 71-byte payload.
+    pub fn update_peer_compact(
+        &mut self,
+        short_addr: ShortAddr,
+        capabilities: u16,
+        transport_addr: TransportAddr,
+        now_ticks: u64,
+    ) {
+        if short_addr == self.self_addr {
+            return;
+        }
+
+        if let Some(entry) = self.peers.iter_mut().find(|p| p.short_addr == short_addr) {
+            entry.capabilities = capabilities;
+            entry.transport_addr = transport_addr;
+            entry.last_seen_ticks = now_ticks;
+            entry.hop_count = 0;
+            entry.trust = TRUST_DIRECT;
+        } else if !self.peers.is_full() {
+            let _ = self.peers.push(PeerEntry {
+                pubkey: [0u8; 32],
+                short_addr,
+                capabilities,
+                bloom: BloomFilter::new(),
+                transport_addr,
+                last_seen_ticks: now_ticks,
+                hop_count: 0,
+                trust: TRUST_DIRECT,
+            });
+        }
+
+        self.recompute_bloom();
+    }
+
     pub fn find_peer(&self, dst: &ShortAddr) -> Option<&PeerEntry> {
         self.peers.iter().find(|p| &p.short_addr == dst)
     }
