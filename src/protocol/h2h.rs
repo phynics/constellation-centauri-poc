@@ -20,6 +20,9 @@ use crate::config::{H2H_CYCLE_SECS, H2H_MAX_PEER_ENTRIES};
 use crate::crypto::identity::{PubKey, ShortAddr};
 use crate::protocol::packet::PacketError;
 
+/// Current H2H protocol version. Bumped on breaking wire-format changes.
+pub const H2H_VERSION: u8 = 0x02;
+
 // ── Pair scheduling ──────────────────────────────────────────────────────────
 
 /// Returns `true` if `our_addr < peer_addr` (lexicographic), meaning we
@@ -52,12 +55,12 @@ pub fn slot_offset(our_addr: &ShortAddr, peer_addr: &ShortAddr) -> u64 {
 /// Information about a single known peer, transmitted in the H2H exchange.
 #[derive(Clone)]
 pub struct PeerInfo {
-    pub short_addr: ShortAddr,
+    pub pubkey: PubKey,
     pub capabilities: u16,
     pub hop_count: u8,
 }
 
-const PEER_INFO_SIZE: usize = 8 + 2 + 1; // 11
+const PEER_INFO_SIZE: usize = 32 + 2 + 1; // 35
 
 /// H2H exchange payload — sent and received over L2CAP.
 pub struct H2hPayload {
@@ -71,10 +74,10 @@ pub struct H2hPayload {
 }
 
 impl H2hPayload {
-    /// Minimum header: flags(1) + capabilities(2) + uptime(4) + peer_count(1) = 8
-    /// With pubkey:    flags(1) + pubkey(32) + capabilities(2) + uptime(4) + peer_count(1) = 40
-    const HEADER_MIN: usize = 1 + 2 + 4 + 1;
-    const HEADER_WITH_PUBKEY: usize = 1 + 32 + 2 + 4 + 1;
+    /// Minimum header: flags(1) + version(1) + capabilities(2) + uptime(4) + peer_count(1) = 9
+    /// With pubkey:    flags(1) + version(1) + pubkey(32) + capabilities(2) + uptime(4) + peer_count(1) = 41
+    const HEADER_MIN: usize = 1 + 1 + 2 + 4 + 1;
+    const HEADER_WITH_PUBKEY: usize = 1 + 1 + 32 + 2 + 4 + 1;
 
     pub fn max_size() -> usize {
         Self::HEADER_WITH_PUBKEY + H2H_MAX_PEER_ENTRIES * PEER_INFO_SIZE
@@ -95,6 +98,10 @@ impl H2hPayload {
         buf[off] = if has_pubkey { 0x01 } else { 0x00 };
         off += 1;
 
+        // Version byte
+        buf[off] = H2H_VERSION;
+        off += 1;
+
         // Conditional pubkey
         if let Some(ref pk) = self.full_pubkey {
             buf[off..off + 32].copy_from_slice(pk);
@@ -112,8 +119,8 @@ impl H2hPayload {
 
         for i in 0..count {
             if let Some(ref pi) = self.peers[i] {
-                buf[off..off + 8].copy_from_slice(&pi.short_addr);
-                off += 8;
+                buf[off..off + 32].copy_from_slice(&pi.pubkey);
+                off += 32;
                 buf[off..off + 2].copy_from_slice(&pi.capabilities.to_le_bytes());
                 off += 2;
                 buf[off] = pi.hop_count;
@@ -134,6 +141,13 @@ impl H2hPayload {
         // Read flags
         let flags = buf[off];
         off += 1;
+
+        // Read and validate version
+        let version = buf[off];
+        off += 1;
+        if version != H2H_VERSION {
+            return Err(PacketError::InvalidHeader);
+        }
 
         let has_pubkey = (flags & 0x01) != 0;
 
@@ -168,9 +182,9 @@ impl H2hPayload {
         let mut peers = [NONE; H2H_MAX_PEER_ENTRIES];
 
         for i in 0..peer_count as usize {
-            let mut short_addr = [0u8; 8];
-            short_addr.copy_from_slice(&buf[off..off + 8]);
-            off += 8;
+            let mut pubkey = [0u8; 32];
+            pubkey.copy_from_slice(&buf[off..off + 32]);
+            off += 32;
 
             let caps = u16::from_le_bytes([buf[off], buf[off + 1]]);
             off += 2;
@@ -179,7 +193,7 @@ impl H2hPayload {
             off += 1;
 
             peers[i] = Some(PeerInfo {
-                short_addr,
+                pubkey,
                 capabilities: caps,
                 hop_count,
             });
@@ -194,3 +208,4 @@ impl H2hPayload {
         })
     }
 }
+

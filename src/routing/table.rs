@@ -1,12 +1,10 @@
 use heapless::Vec;
-use crate::config::{MAX_PEERS, H2H_MAX_PEER_ENTRIES};
-use crate::crypto::identity::{PubKey, ShortAddr};
+use crate::config::{MAX_PEERS, H2H_MAX_PEER_ENTRIES, TICK_HZ};
+use crate::crypto::identity::{PubKey, ShortAddr, short_addr_of};
 use crate::protocol::dedup::SeenMessages;
 use crate::protocol::h2h::{H2hPayload, PeerInfo};
 use crate::routing::bloom::BloomFilter;
 
-/// Embassy on ESP32 defaults to 1 MHz tick rate.
-const TICK_HZ: u64 = 1_000_000;
 /// Scaling factor for integer weight computation (avoids floats).
 const WEIGHT_SCALE: u64 = 10_000;
 /// Minimum weight floor for direct peers so they're always well-represented.
@@ -109,14 +107,16 @@ impl RoutingTable {
         // Update indirect peers from the peer list
         for i in 0..payload.peer_count as usize {
             if let Some(ref pi) = payload.peers[i] {
-                if pi.short_addr == self.self_addr {
+                let pi_short_addr = short_addr_of(&pi.pubkey);
+                if pi_short_addr == self.self_addr {
                     continue;
                 }
                 let hop = pi.hop_count.saturating_add(1);
 
-                if let Some(entry) = self.peers.iter_mut().find(|p| p.short_addr == pi.short_addr) {
+                if let Some(entry) = self.peers.iter_mut().find(|p| p.short_addr == pi_short_addr) {
                     // Only update if our existing info is stale or lower trust
                     if entry.trust <= TRUST_INDIRECT {
+                        entry.pubkey = pi.pubkey;
                         entry.capabilities = pi.capabilities;
                         entry.hop_count = hop;
                         entry.last_seen_ticks = now_ticks;
@@ -125,8 +125,8 @@ impl RoutingTable {
                     }
                 } else if !self.peers.is_full() {
                     let _ = self.peers.push(PeerEntry {
-                        pubkey: [0u8; 32],
-                        short_addr: pi.short_addr,
+                        pubkey: pi.pubkey,
+                        short_addr: pi_short_addr,
                         capabilities: pi.capabilities,
                         bloom: BloomFilter::new(),
                         transport_addr: TransportAddr { addr_type: 0, addr: [0u8; 6] },
@@ -280,7 +280,7 @@ impl RoutingTable {
 
             let p = &self.peers[idx];
             result[count] = Some(PeerInfo {
-                short_addr: p.short_addr,
+                pubkey: p.pubkey,
                 capabilities: p.capabilities,
                 hop_count: p.hop_count,
             });

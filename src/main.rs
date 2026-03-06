@@ -72,7 +72,7 @@ pub mod protocol;
 pub mod routing;
 pub mod transport;
 
-use config::{H2H_CYCLE_SECS, H2H_CONNECTION_TIMEOUT_SECS, H2H_MTU, H2H_PSM};
+use config::{H2H_CYCLE_SECS, H2H_CONNECTION_TIMEOUT_SECS, H2H_MTU, H2H_PSM, TICK_HZ};
 use crypto::identity::{NodeIdentity, ShortAddr, short_addr_of};
 use node::roles::Capabilities;
 use protocol::h2h::{self, H2hPayload};
@@ -765,7 +765,10 @@ async fn heartbeat_update_task(
 
         let (up, peers) = {
             let u = uptime.lock().await;
-            let table = routing_table.lock().await;
+            let mut table = routing_table.lock().await;
+            // Decay peers not seen within 3× the H2H cycle.
+            let max_age = H2H_CYCLE_SECS * 3 * TICK_HZ;
+            table.decay(Instant::now().as_ticks(), max_age);
             (*u, table.peers.len())
         };
 
