@@ -1,0 +1,21 @@
+[package]
+name = "sim"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+routing-core = { path = "../routing-core" }
+
+embassy-executor = { version = "0.9.1", features = ["arch-std", "executor-thread"] }
+embassy-sync = { version = "0.7.2" }
+embassy-time = { version = "0.5.0", features = ["std", "generic-queue-8"] }
+embassy-futures = { version = "0.1.1" }
+
+static_cell = "2.1.0"
+critical-section = { version = "1", features = ["std"] }
+log = "0.4"
+heapless = "0.8.0"
+rand = { version = "0.8", features = ["small_rng"] }
+
+ratatui = "0.30"
+crossterm = "0.29"
