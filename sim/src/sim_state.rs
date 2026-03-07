@@ -90,6 +90,8 @@ pub struct TuiState {
     /// Capped at 200 entries.
     pub messages: VecDeque<MessageEntry>,
     pub elapsed_secs: u32,
+    pub msgs_sent: [u32; MAX_NODES],
+    pub msgs_received: [u32; MAX_NODES],
 }
 
 impl Default for TuiState {
@@ -98,6 +100,8 @@ impl Default for TuiState {
             nodes: core::array::from_fn(|_| NodeSnapshot::default()),
             messages: VecDeque::new(),
             elapsed_secs: 0,
+            msgs_sent: [0; MAX_NODES],
+            msgs_received: [0; MAX_NODES],
         }
     }
 }

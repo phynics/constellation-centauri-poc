@@ -141,7 +141,7 @@ impl App {
             }
 
             KeyCode::Char('t') | KeyCode::Char('T') => {
-                if self.focus == Panel::NodeDetail {
+                if self.focus == Panel::NodeList || self.focus == Panel::NodeDetail {
                     let node = self.selected_node;
                     let mut cfg = sim_config.lock().unwrap();
                     cfg.node_types[node] = cfg.node_types[node].cycle();

@@ -1,5 +1,20 @@
 # Hardware Testing Guide - Phase 6
 
+## Quick Start - TL;DR
+
+```bash
+# 1. Build
+cargo build --release
+
+# 2. Flash to first ESP32-C6 board (Node A)
+espflash flash target/riscv32imac-unknown-none-elf/release/constellation --monitor
+
+# 3. In a new terminal, flash to second board (Node B)
+espflash flash target/riscv32imac-unknown-none-elf/release/constellation --monitor
+
+# 4. Watch the serial output from both boards
+```
+
 ## Overview
 
 This guide covers testing the Constellation Mesh PoC on physical ESP32-C6 hardware. You'll need **two ESP32-C6 development boards** to demonstrate peer discovery and message exchange.
@@ -239,7 +254,7 @@ Once trouble-host is integrated:
 
 ### 3. Verify Success Criteria
 
-From POC_IMPLEMENTATION_PLAN.md:
+From [poc-plan.md](../archive/poc-plan.md):
 
 - [x] Node boots and generates/loads identity
 - [x] Identity persists across reboots

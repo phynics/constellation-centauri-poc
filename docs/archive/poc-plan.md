@@ -96,7 +96,7 @@ Run `cargo build` to confirm the skeleton compiles with all new deps on `riscv32
 Build the foundational types that everything else depends on. No hardware interaction yet — pure logic, testable in isolation.
 
 ### 1.1 `src/config.rs` — Constants
-Implement the configuration constants from SPEC.md Section 13:
+Implement the configuration constants from [protocol.md](../spec/protocol.md) Section 13:
 - `PROTOCOL_VERSION`, `HEARTBEAT_INTERVAL`, `DEFAULT_TTL`
 - `BLOOM_FILTER_BYTES`, `BLOOM_HASH_COUNT`, `SEEN_MESSAGES_CAPACITY`
 - `MAX_PEERS`, `HEAP_SIZE`

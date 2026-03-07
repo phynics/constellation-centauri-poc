@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Table, Wrap},
 };
 
-use crate::sim_state::{SimConfig, TuiState, MAX_NODES};
+use crate::sim_state::{MessageEntry, SimConfig, TuiState, MAX_NODES};
 use super::app::{App, BottomTab, InputTarget, Mode, Panel};
 
 pub fn render(frame: &mut Frame, app: &App, state: &TuiState, config: &SimConfig) {
@@ -16,11 +16,17 @@ pub fn render(frame: &mut Frame, app: &App, state: &TuiState, config: &SimConfig
 
     // Vertical: top section + message log (12 rows).
     let vert = Layout::vertical([Constraint::Fill(1), Constraint::Length(12)]).split(area);
-    // Horizontal: node list (24 cols) + detail pane.
-    let horiz = Layout::horizontal([Constraint::Length(24), Constraint::Fill(1)]).split(vert[0]);
+    // Horizontal: node list (24) | peer list | node traffic.
+    let horiz = Layout::horizontal([
+        Constraint::Length(24),
+        Constraint::Fill(1),
+        Constraint::Fill(1),
+    ])
+    .split(vert[0]);
 
     render_node_list(frame, app, state, config, horiz[0]);
     render_node_detail(frame, app, state, config, horiz[1]);
+    render_node_traffic(frame, app, state, horiz[2]);
     render_message_log(frame, app, state, config, vert[1]);
 
     if app.mode != Mode::Normal {
@@ -88,13 +94,15 @@ fn render_node_list(
         Span::styled("A", Style::default().fg(Color::Cyan)),
         Span::raw("]dd  ["),
         Span::styled("D", Style::default().fg(Color::Cyan)),
-        Span::raw("]el"),
+        Span::raw("]el  ["),
+        Span::styled("T", Style::default().fg(Color::Cyan)),
+        Span::raw("]ype"),
     ]))
     .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(hint, hint_area);
 }
 
-// ── Node detail / link config ─────────────────────────────────────────────────
+// ── Node detail / peer list ───────────────────────────────────────────────────
 
 fn render_node_detail(
     frame: &mut Frame,
@@ -108,7 +116,7 @@ fn render_node_detail(
     let node = &state.nodes[node_idx];
 
     let title = format!(
-        " Node {}: {:02x}{:02x} ",
+        " Node {}: {:02x}{:02x} — Peers ",
         node_idx, node.short_addr[0], node.short_addr[1]
     );
 
@@ -128,25 +136,29 @@ fn render_node_detail(
         return;
     }
 
-    // Header: type / uptime / peer count.
+    // Layout: header (2 rows) | links table | hints (1 row).
     let header_area = Rect { height: 2, ..inner };
     let links_area = Rect {
         y: inner.y + 2,
-        height: inner.height.saturating_sub(4),
+        height: inner.height.saturating_sub(3),
         ..inner
     };
     let hints_area = Rect {
-        y: inner.y + inner.height.saturating_sub(2),
+        y: inner.y + inner.height.saturating_sub(1),
         height: 1,
         ..inner
     };
 
+    let sent = state.msgs_sent[node_idx];
+    let recv = state.msgs_received[node_idx];
     frame.render_widget(
         Paragraph::new(format!(
-            " Type: [{}]   Uptime: {}s   Peers: {}",
+            " Type: [{}]   Uptime: {}s\n Peers: {}   Sent: {}   Recv: {}",
             config.node_types[node_idx].as_str(),
             node.uptime_secs,
-            node.peers.len()
+            node.peers.len(),
+            sent,
+            recv,
         )),
         header_area,
     );
@@ -191,7 +203,10 @@ fn render_node_detail(
                 ("?", String::new(), String::new())
             };
 
-            let addr = format!("{:02x}{:02x}", state.nodes[i].short_addr[0], state.nodes[i].short_addr[1]);
+            let addr = format!(
+                "{:02x}{:02x}",
+                state.nodes[i].short_addr[0], state.nodes[i].short_addr[1]
+            );
             let drop_str = format!("drop={:3}%", drop);
             let hints = if enabled { "[L][P]" } else { "[L]" };
 
@@ -225,12 +240,115 @@ fn render_node_detail(
     );
 
     frame.render_widget(
-        Paragraph::new(
-            " [T] Cycle type   [L] Toggle link   [P] Set drop %",
-        )
-        .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(" [T] Cycle type   [L] Toggle link   [P] Set drop %")
+            .style(Style::default().fg(Color::DarkGray)),
         hints_area,
     );
+}
+
+// ── Node traffic (direct + relayed messages) ──────────────────────────────────
+
+fn render_node_traffic(
+    frame: &mut Frame,
+    app: &App,
+    state: &TuiState,
+    area: Rect,
+) {
+    let node_idx = app.selected_node;
+    let node = &state.nodes[node_idx];
+
+    let title = format!(
+        " Node {}: {:02x}{:02x} — Traffic ",
+        node_idx, node.short_addr[0], node.short_addr[1]
+    );
+    let block = Block::default().title(title).borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Collect indices of this node's known peers (by matching short_addr).
+    let peer_indices: Vec<usize> = (0..MAX_NODES)
+        .filter(|&i| {
+            i != node_idx
+                && node
+                    .peers
+                    .iter()
+                    .any(|p| p.short_addr == state.nodes[i].short_addr)
+        })
+        .collect();
+
+    let mut direct: Vec<&MessageEntry> = vec![];
+    let mut relayed: Vec<&MessageEntry> = vec![];
+
+    for m in state.messages.iter() {
+        if m.from_idx == node_idx || m.to_idx == node_idx {
+            direct.push(m);
+        } else if peer_indices.contains(&m.from_idx) || peer_indices.contains(&m.to_idx) {
+            relayed.push(m);
+        }
+    }
+
+    // Split inner vertically: top half = direct, bottom half = relayed.
+    let half = inner.height / 2;
+    let direct_area = Rect { height: half, ..inner };
+    let relay_area = Rect {
+        y: inner.y + half,
+        height: inner.height.saturating_sub(half),
+        ..inner
+    };
+
+    // ── Direct messages ───────────────────────────────────────────────────────
+    let direct_body = half.saturating_sub(1) as usize;
+    let mut d_lines: Vec<Line> = vec![Line::styled(
+        " ── Direct ──",
+        Style::default().fg(Color::DarkGray),
+    )];
+    let skip = direct.len().saturating_sub(direct_body);
+    for m in direct.iter().skip(skip) {
+        d_lines.push(format_msg_line(m, node_idx));
+    }
+    frame.render_widget(Paragraph::new(d_lines), direct_area);
+
+    // ── Relayed (via this node's peers) ───────────────────────────────────────
+    let relay_body = inner.height.saturating_sub(half).saturating_sub(1) as usize;
+    let mut r_lines: Vec<Line> = vec![Line::styled(
+        " ── Relayed (peer traffic) ──",
+        Style::default().fg(Color::DarkGray),
+    )];
+    let skip = relayed.len().saturating_sub(relay_body);
+    for m in relayed.iter().skip(skip) {
+        r_lines.push(Line::styled(
+            format!(
+                "  t={:3}s  {} → {}  [{}]  {}",
+                m.time_secs,
+                m.from_idx,
+                if m.to_idx >= MAX_NODES { "all".to_string() } else { m.to_idx.to_string() },
+                m.kind.as_str(),
+                m.body,
+            ),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    frame.render_widget(Paragraph::new(r_lines), relay_area);
+}
+
+fn format_msg_line(m: &MessageEntry, node_idx: usize) -> Line<'static> {
+    let to = if m.to_idx >= MAX_NODES {
+        "all".to_string()
+    } else {
+        m.to_idx.to_string()
+    };
+    let style = if m.from_idx == node_idx {
+        Style::default().fg(Color::Cyan)   // outbound
+    } else {
+        Style::default().fg(Color::Green)  // inbound
+    };
+    Line::styled(
+        format!(
+            "  t={:3}s  {} → {}  [{}]  {}",
+            m.time_secs, m.from_idx, to, m.kind.as_str(), m.body
+        ),
+        style,
+    )
 }
 
 // ── Bottom panel: Messages / Logs tabs ────────────────────────────────────────

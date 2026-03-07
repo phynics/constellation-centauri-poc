@@ -148,7 +148,7 @@ connection_manager.send_packet(&peer.transport_addr, &encrypted[..len]).await?;
 
 ## Success Criteria Status
 
-From POC_IMPLEMENTATION_PLAN.md:
+From [poc-plan.md](poc-plan.md):
 
 - ✅ Node boots and initializes identity
 - ✅ Routing table and shared state created

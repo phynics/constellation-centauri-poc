@@ -43,6 +43,15 @@ Each cargo alias runs `--release --no-default-features --features=<chip> --targe
 - **Display**: `mipidsi` driver for ILI9486 SPI display
 - **Heap**: `esp-alloc` with a 72KB heap allocation
 
+## Documentation
+
+The project documentation is organized in the `docs/` directory:
+
+- **[Project Spec](docs/spec/protocol.md)**: High-level protocol and BLE layer specifications.
+- **[Testing Guide](docs/guides/hardware-testing.md)**: Steps to flash and test on ESP32-C6 hardware.
+- **[BLE Integration Status](docs/guides/ble-integration.md)**: Status and roadmap for the BLE transport.
+- **[Archive](docs/archive/)**: Historical design documents and summaries.
+
 ## Key Constraints
 
 - `#![no_std]` + `#![no_main]` — no standard library, no OS, no dynamic allocation outside `esp-alloc`

@@ -112,13 +112,20 @@ impl H2hInitiator for SimInitiator {
             if i == self.node_idx || i >= config.n_active {
                 continue;
             }
-            if config.link_enabled[self.node_idx][i] {
-                let _ = results.push(DiscoveryEvent {
-                    short_addr: node.short_addr,
-                    capabilities: node.capabilities,
-                    mac: node.mac,
-                });
+            if !config.link_enabled[self.node_idx][i] {
+                continue;
             }
+            // Apply drop_prob to advertising packets too, so a dropped link
+            // stops refreshing last_seen_ticks and trust decays naturally.
+            let drop = config.drop_prob[self.node_idx][i];
+            if drop > 0 && rand::thread_rng().gen_range(0u8..100) < drop {
+                continue;
+            }
+            let _ = results.push(DiscoveryEvent {
+                short_addr: node.short_addr,
+                capabilities: node.capabilities,
+                mac: node.mac,
+            });
         }
         results
     }
@@ -141,11 +148,8 @@ impl H2hInitiator for SimInitiator {
                 return Err(NetworkError::ConnectionFailed);
             }
             let drop = config.drop_prob[self.node_idx][peer_idx];
-            if drop > 0 {
-                let roll: u8 = rand::thread_rng().gen_range(0..=100);
-                if roll < drop {
-                    return Err(NetworkError::ConnectionFailed);
-                }
+            if drop > 0 && rand::thread_rng().gen_range(0u8..100) < drop {
+                return Err(NetworkError::ConnectionFailed);
             }
         }
 

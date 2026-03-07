@@ -35,6 +35,8 @@ pub async fn run_command_loop(
                         body: heapless_body,
                     };
                     medium.msg_inbox[to].send(msg).await;
+                    let mut state = tui_state.lock().unwrap();
+                    state.msgs_sent[from] = state.msgs_sent[from].saturating_add(1);
                 }
             }
 
@@ -60,8 +62,5 @@ pub async fn run_command_loop(
                 Timer::after(Duration::from_millis(50)).await;
             }
         }
-
-        // Suppress unused warning: tui_state is reserved for future per-command logging.
-        let _ = &tui_state;
     }
 }
