@@ -158,9 +158,6 @@ fn ed25519_to_x25519_public(ed25519_pubkey: &PubKey) -> Result<PublicKey, Crypto
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::crypto::identity::NodeIdentity;
-
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
         // This test would work in a std environment with proper RNG.

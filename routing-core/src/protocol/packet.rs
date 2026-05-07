@@ -1,5 +1,6 @@
 use crate::config::{BROADCAST_ADDR, DEFAULT_TTL, HEADER_SIZE, PROTOCOL_VERSION};
 use crate::crypto::identity::{verify, NodeIdentity, ShortAddr, Signature};
+use rand_core::RngCore;
 
 pub const PACKET_TYPE_HEARTBEAT: u8 = 0x01;
 pub const PACKET_TYPE_DATA: u8 = 0x02;
@@ -34,7 +35,7 @@ pub struct PacketHeader {
 impl PacketHeader {
     /// Serialize the header into a byte buffer.
     ///
-    /// Header layout (84 bytes):
+    /// Header layout (92 bytes):
     /// - version (4 bits) | packet_type (4 bits): 1 byte
     /// - flags: 1 byte
     /// - ttl: 1 byte
@@ -197,24 +198,22 @@ impl PacketHeader {
     }
 }
 
-/// Helper to build a complete packet (header + payload) and sign it.
+/// Helper to build a complete packet (header + payload) with an explicit
+/// caller-provided message ID and sign it.
 ///
 /// Returns the number of bytes written to `buf`.
-pub fn build_packet(
+pub fn build_packet_with_message_id(
     identity: &NodeIdentity,
     packet_type: u8,
     flags: u8,
     dst: ShortAddr,
+    message_id: [u8; 8],
     payload: &[u8],
     buf: &mut [u8],
 ) -> Result<usize, PacketError> {
     if buf.len() < HEADER_SIZE + payload.len() {
         return Err(PacketError::BufferTooSmall);
     }
-
-    // Generate random message ID (in real usage, use TRNG)
-    // For now, use a placeholder - will be replaced with RNG in Phase 5
-    let message_id = [0u8; 8]; // TODO: Use esp_hal::rng::Trng in main
 
     let mut header = PacketHeader {
         version: PROTOCOL_VERSION,
@@ -240,20 +239,265 @@ pub fn build_packet(
     Ok(header_len + payload.len())
 }
 
-/// Helper to build a broadcast packet.
-pub fn build_broadcast_packet(
+/// Helper to build a complete packet and generate its message ID from an RNG.
+pub fn build_packet_with_rng(
     identity: &NodeIdentity,
     packet_type: u8,
     flags: u8,
+    dst: ShortAddr,
+    rng: &mut impl RngCore,
     payload: &[u8],
     buf: &mut [u8],
 ) -> Result<usize, PacketError> {
-    build_packet(
+    let mut message_id = [0u8; 8];
+    rng.fill_bytes(&mut message_id);
+    build_packet_with_message_id(identity, packet_type, flags, dst, message_id, payload, buf)
+}
+
+/// Backwards-compatible packet builder name using RNG-backed message IDs.
+pub fn build_packet(
+    identity: &NodeIdentity,
+    packet_type: u8,
+    flags: u8,
+    dst: ShortAddr,
+    rng: &mut impl RngCore,
+    payload: &[u8],
+    buf: &mut [u8],
+) -> Result<usize, PacketError> {
+    build_packet_with_rng(identity, packet_type, flags, dst, rng, payload, buf)
+}
+
+/// Helper to build a broadcast packet with an explicit message ID.
+pub fn build_broadcast_packet_with_message_id(
+    identity: &NodeIdentity,
+    packet_type: u8,
+    flags: u8,
+    message_id: [u8; 8],
+    payload: &[u8],
+    buf: &mut [u8],
+) -> Result<usize, PacketError> {
+    build_packet_with_message_id(
         identity,
         packet_type,
         flags | FLAG_BROADCAST,
         BROADCAST_ADDR,
+        message_id,
         payload,
         buf,
     )
+}
+
+/// Helper to build a broadcast packet with an RNG-backed message ID.
+pub fn build_broadcast_packet_with_rng(
+    identity: &NodeIdentity,
+    packet_type: u8,
+    flags: u8,
+    rng: &mut impl RngCore,
+    payload: &[u8],
+    buf: &mut [u8],
+) -> Result<usize, PacketError> {
+    build_packet_with_rng(
+        identity,
+        packet_type,
+        flags | FLAG_BROADCAST,
+        BROADCAST_ADDR,
+        rng,
+        payload,
+        buf,
+    )
+}
+
+/// Backwards-compatible broadcast builder name using RNG-backed message IDs.
+pub fn build_broadcast_packet(
+    identity: &NodeIdentity,
+    packet_type: u8,
+    flags: u8,
+    rng: &mut impl RngCore,
+    payload: &[u8],
+    buf: &mut [u8],
+) -> Result<usize, PacketError> {
+    build_broadcast_packet_with_rng(identity, packet_type, flags, rng, payload, buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand_core::{impls, Error, RngCore};
+
+    struct FixedRng {
+        next: [u8; 8],
+    }
+
+    impl RngCore for FixedRng {
+        fn next_u32(&mut self) -> u32 {
+            impls::next_u32_via_fill(self)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            impls::next_u64_via_fill(self)
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            for (idx, byte) in dest.iter_mut().enumerate() {
+                *byte = self.next[idx % self.next.len()];
+            }
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Error> {
+            self.fill_bytes(dest);
+            Ok(())
+        }
+    }
+
+    fn identity(seed: u8) -> NodeIdentity {
+        let mut secret = [0u8; 32];
+        secret[0] = seed;
+        secret[31] = seed.wrapping_add(0x80);
+        NodeIdentity::from_bytes(&secret)
+    }
+
+    #[test]
+    fn header_serialize_deserialize_roundtrip() {
+        let header = PacketHeader {
+            version: PROTOCOL_VERSION,
+            packet_type: PACKET_TYPE_DATA,
+            flags: FLAG_ACK_REQUESTED,
+            ttl: 9,
+            hop_count: 2,
+            src: [0x11; 8],
+            dst: [0x22; 8],
+            message_id: [0x33; 8],
+            signature: [0x44; 64],
+        };
+        let mut buf = [0u8; HEADER_SIZE];
+
+        let written = header.serialize(&mut buf).unwrap();
+        let (decoded, payload) = PacketHeader::deserialize(&buf[..written]).unwrap();
+
+        assert_eq!(written, HEADER_SIZE);
+        assert!(payload.is_empty());
+        assert_eq!(decoded.version, header.version);
+        assert_eq!(decoded.packet_type, header.packet_type);
+        assert_eq!(decoded.flags, header.flags);
+        assert_eq!(decoded.ttl, header.ttl);
+        assert_eq!(decoded.hop_count, header.hop_count);
+        assert_eq!(decoded.src, header.src);
+        assert_eq!(decoded.dst, header.dst);
+        assert_eq!(decoded.message_id, header.message_id);
+        assert_eq!(decoded.signature, header.signature);
+    }
+
+    #[test]
+    fn build_packet_with_message_id_roundtrips_and_verifies() {
+        let identity = identity(0x01);
+        let dst = [0xAB; 8];
+        let message_id = [0x55; 8];
+        let payload = b"hello-mesh";
+        let mut buf = [0u8; 256];
+
+        let written = build_packet_with_message_id(
+            &identity,
+            PACKET_TYPE_DATA,
+            FLAG_ACK_REQUESTED,
+            dst,
+            message_id,
+            payload,
+            &mut buf,
+        )
+        .unwrap();
+
+        let (header, decoded_payload) = PacketHeader::deserialize(&buf[..written]).unwrap();
+
+        assert_eq!(decoded_payload, payload);
+        assert_eq!(header.dst, dst);
+        assert_eq!(header.message_id, message_id);
+        assert!(header.verify(&identity.pubkey(), decoded_payload));
+    }
+
+    #[test]
+    fn signature_fails_when_payload_is_modified() {
+        let identity = identity(0x02);
+        let payload = b"original";
+        let mut buf = [0u8; 256];
+
+        let written = build_packet_with_message_id(
+            &identity,
+            PACKET_TYPE_DATA,
+            0,
+            [0xBC; 8],
+            [0x66; 8],
+            payload,
+            &mut buf,
+        )
+        .unwrap();
+
+        let (header, _) = PacketHeader::deserialize(&buf[..written]).unwrap();
+        assert!(!header.verify(&identity.pubkey(), b"tampered"));
+    }
+
+    #[test]
+    fn signature_ignores_hop_count_changes() {
+        let identity = identity(0x03);
+        let payload = b"relayable";
+        let mut buf = [0u8; 256];
+
+        let written = build_packet_with_message_id(
+            &identity,
+            PACKET_TYPE_DATA,
+            0,
+            [0xCD; 8],
+            [0x77; 8],
+            payload,
+            &mut buf,
+        )
+        .unwrap();
+
+        let (mut header, decoded_payload) = PacketHeader::deserialize(&buf[..written]).unwrap();
+        header.hop_count = header.hop_count.saturating_add(1);
+
+        assert!(header.verify(&identity.pubkey(), decoded_payload));
+    }
+
+    #[test]
+    fn broadcast_builder_sets_broadcast_fields() {
+        let identity = identity(0x04);
+        let mut buf = [0u8; 256];
+
+        let written = build_broadcast_packet_with_message_id(
+            &identity,
+            PACKET_TYPE_HEARTBEAT,
+            FLAG_ACK_REQUESTED,
+            [0x88; 8],
+            b"hb",
+            &mut buf,
+        )
+        .unwrap();
+
+        let (header, payload) = PacketHeader::deserialize(&buf[..written]).unwrap();
+        assert_eq!(payload, b"hb");
+        assert_eq!(header.dst, BROADCAST_ADDR);
+        assert_ne!(header.flags & FLAG_BROADCAST, 0);
+        assert_eq!(header.message_id, [0x88; 8]);
+    }
+
+    #[test]
+    fn rng_backed_builder_uses_rng_message_id() {
+        let identity = identity(0x05);
+        let mut rng = FixedRng { next: [1, 2, 3, 4, 5, 6, 7, 8] };
+        let mut buf = [0u8; 256];
+
+        let written = build_packet(
+            &identity,
+            PACKET_TYPE_DATA,
+            0,
+            [0xDE; 8],
+            &mut rng,
+            b"payload",
+            &mut buf,
+        )
+        .unwrap();
+
+        let (header, _) = PacketHeader::deserialize(&buf[..written]).unwrap();
+        assert_eq!(header.message_id, [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
 }

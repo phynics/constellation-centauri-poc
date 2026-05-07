@@ -1,5 +1,9 @@
 # Proof of Concept Implementation Plan
 
+> Archive note: this document reflects the pre-workspace repository layout that
+> used a top-level `src/` tree. Active code now lives in `routing-core/`,
+> `firmware/`, and `sim/`, so path references below are historical.
+
 ## Goal
 
 Demonstrate two ESP32-C6 nodes discovering each other via BLE heartbeats and exchanging an encrypted, authenticated message. This validates the core protocol stack end-to-end: identity, packet format, bloom filter routing, BLE transport, and ECDH encryption.

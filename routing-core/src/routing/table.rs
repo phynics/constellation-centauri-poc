@@ -338,3 +338,339 @@ impl RoutingTable {
         self.recompute_bloom();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::h2h::H2hPayload;
+
+    fn pubkey(seed: u8) -> PubKey {
+        [seed; 32]
+    }
+
+    fn mac(seed: u8) -> [u8; 6] {
+        [seed; 6]
+    }
+
+    fn indirect_peer(seed: u8, hop_count: u8) -> PeerInfo {
+        PeerInfo {
+            pubkey: pubkey(seed),
+            capabilities: 0x2000 + seed as u16,
+            hop_count,
+        }
+    }
+
+    fn payload(
+        full_pubkey: Option<PubKey>,
+        capabilities: u16,
+        peer_infos: &[PeerInfo],
+    ) -> H2hPayload {
+        const NONE: Option<PeerInfo> = None;
+        let mut peers = [NONE; H2H_MAX_PEER_ENTRIES];
+        for (i, peer) in peer_infos.iter().enumerate() {
+            peers[i] = Some(peer.clone());
+        }
+
+        H2hPayload {
+            full_pubkey,
+            capabilities,
+            uptime_secs: 99,
+            peers,
+            peer_count: peer_infos.len() as u8,
+        }
+    }
+
+    fn direct_peer_entry(
+        pubkey: PubKey,
+        transport_addr: TransportAddr,
+        last_seen_ticks: u64,
+    ) -> PeerEntry {
+        PeerEntry {
+            short_addr: short_addr_of(&pubkey),
+            pubkey,
+            capabilities: 0x4444,
+            bloom: BloomFilter::new(),
+            transport_addr,
+            last_seen_ticks,
+            hop_count: 0,
+            trust: TRUST_DIRECT,
+            learned_from: [0u8; 8],
+        }
+    }
+
+    #[test]
+    fn update_peer_from_h2h_marks_direct_and_indirect_peers() {
+        let self_pubkey = pubkey(0x01);
+        let self_addr = short_addr_of(&self_pubkey);
+        let partner_pubkey = pubkey(0x02);
+        let partner_addr = short_addr_of(&partner_pubkey);
+        let transport = TransportAddr::ble(mac(0xA0));
+        let now = 12345;
+
+        let mut table = RoutingTable::new(self_addr);
+        let indirect = indirect_peer(0x03, 2);
+        let payload = payload(Some(partner_pubkey), 0x9001, &[indirect.clone()]);
+
+        table.update_peer_from_h2h(&payload, partner_addr, transport, now);
+
+        let partner = table.find_peer(&partner_addr).unwrap();
+        assert_eq!(partner.pubkey, partner_pubkey);
+        assert_eq!(partner.capabilities, 0x9001);
+        assert_eq!(partner.transport_addr, transport);
+        assert_eq!(partner.last_seen_ticks, now);
+        assert_eq!(partner.hop_count, 0);
+        assert_eq!(partner.trust, TRUST_DIRECT);
+        assert_eq!(partner.learned_from, [0u8; 8]);
+
+        let indirect_addr = short_addr_of(&indirect.pubkey);
+        let learned = table.find_peer(&indirect_addr).unwrap();
+        assert_eq!(learned.pubkey, indirect.pubkey);
+        assert_eq!(learned.capabilities, indirect.capabilities);
+        assert_eq!(learned.hop_count, indirect.hop_count + 1);
+        assert_eq!(learned.trust, TRUST_INDIRECT);
+        assert_eq!(learned.learned_from, partner_addr);
+    }
+
+    #[test]
+    fn update_peer_from_h2h_ignores_self_in_peer_list() {
+        let self_pubkey = pubkey(0x10);
+        let self_addr = short_addr_of(&self_pubkey);
+        let partner_pubkey = pubkey(0x11);
+        let partner_addr = short_addr_of(&partner_pubkey);
+        let transport = TransportAddr::ble(mac(0xB0));
+
+        let mut table = RoutingTable::new(self_addr);
+        let self_as_indirect = PeerInfo {
+            pubkey: self_pubkey,
+            capabilities: 0x7777,
+            hop_count: 1,
+        };
+        let payload = payload(Some(partner_pubkey), 0x1234, &[self_as_indirect]);
+
+        table.update_peer_from_h2h(&payload, partner_addr, transport, 50);
+
+        assert_eq!(table.peers.len(), 1);
+        assert!(table.find_peer(&self_addr).is_none());
+        assert!(table.find_peer(&partner_addr).is_some());
+    }
+
+    #[test]
+    fn indirect_update_does_not_downgrade_existing_direct_peer() {
+        let self_addr = short_addr_of(&pubkey(0x20));
+        let direct_pubkey = pubkey(0x21);
+        let direct_addr = short_addr_of(&direct_pubkey);
+        let original_transport = TransportAddr::ble(mac(0xC1));
+        let partner_pubkey = pubkey(0x22);
+        let partner_addr = short_addr_of(&partner_pubkey);
+
+        let mut table = RoutingTable::new(self_addr);
+        let _ = table.peers.push(direct_peer_entry(direct_pubkey, original_transport, 10));
+
+        let payload = payload(Some(partner_pubkey), 0xAAAA, &[PeerInfo {
+            pubkey: direct_pubkey,
+            capabilities: 0xBBBB,
+            hop_count: 4,
+        }]);
+
+        table.update_peer_from_h2h(&payload, partner_addr, TransportAddr::ble(mac(0xC2)), 100);
+
+        let direct = table.find_peer(&direct_addr).unwrap();
+        assert_eq!(direct.trust, TRUST_DIRECT);
+        assert_eq!(direct.hop_count, 0);
+        assert_eq!(direct.transport_addr, original_transport);
+        assert_eq!(direct.capabilities, 0x4444);
+        assert_eq!(direct.last_seen_ticks, 10);
+    }
+
+    #[test]
+    fn top_peers_for_excludes_partner_and_partner_learned_indirects() {
+        let self_addr = short_addr_of(&pubkey(0x30));
+        let partner_pubkey = pubkey(0x31);
+        let partner_addr = short_addr_of(&partner_pubkey);
+        let direct_other_pubkey = pubkey(0x32);
+        let direct_other_addr = short_addr_of(&direct_other_pubkey);
+        let indirect_from_partner = pubkey(0x33);
+        let indirect_from_partner_addr = short_addr_of(&indirect_from_partner);
+
+        let mut table = RoutingTable::new(self_addr);
+        let _ = table.peers.push(PeerEntry {
+            short_addr: partner_addr,
+            pubkey: partner_pubkey,
+            capabilities: 0x1111,
+            bloom: BloomFilter::new(),
+            transport_addr: TransportAddr::ble(mac(0xD1)),
+            last_seen_ticks: 100,
+            hop_count: 0,
+            trust: TRUST_DIRECT,
+            learned_from: [0u8; 8],
+        });
+        let _ = table.peers.push(PeerEntry {
+            short_addr: direct_other_addr,
+            pubkey: direct_other_pubkey,
+            capabilities: 0x2222,
+            bloom: BloomFilter::new(),
+            transport_addr: TransportAddr::ble(mac(0xD2)),
+            last_seen_ticks: 100,
+            hop_count: 0,
+            trust: TRUST_DIRECT,
+            learned_from: [0u8; 8],
+        });
+        let _ = table.peers.push(PeerEntry {
+            short_addr: indirect_from_partner_addr,
+            pubkey: indirect_from_partner,
+            capabilities: 0x3333,
+            bloom: BloomFilter::new(),
+            transport_addr: TransportAddr::ble([0u8; 6]),
+            last_seen_ticks: 100,
+            hop_count: 2,
+            trust: TRUST_INDIRECT,
+            learned_from: partner_addr,
+        });
+
+        let (selected, count) = table.top_peers_for(&partner_addr, 100, 0x1234_5678);
+
+        assert_eq!(count, 1);
+        let selected_peer = selected[0].as_ref().unwrap();
+        assert_eq!(selected_peer.pubkey, direct_other_pubkey);
+        assert!(selected[1..].iter().all(|entry| entry.is_none()));
+    }
+
+    #[test]
+    fn decay_marks_stale_peers_expired_without_removing_them() {
+        let self_addr = short_addr_of(&pubkey(0x40));
+        let stale_pubkey = pubkey(0x41);
+        let stale_addr = short_addr_of(&stale_pubkey);
+        let mut table = RoutingTable::new(self_addr);
+
+        let _ = table.peers.push(direct_peer_entry(
+            stale_pubkey,
+            TransportAddr::ble(mac(0xE1)),
+            10,
+        ));
+
+        table.decay(110, 100);
+
+        let peer = table.find_peer(&stale_addr).unwrap();
+        assert_eq!(peer.trust, TRUST_EXPIRED);
+        assert_eq!(table.peers.len(), 1);
+    }
+
+    #[test]
+    fn decay_removes_very_old_peers() {
+        let self_addr = short_addr_of(&pubkey(0x50));
+        let old_pubkey = pubkey(0x51);
+        let old_addr = short_addr_of(&old_pubkey);
+        let mut table = RoutingTable::new(self_addr);
+
+        let _ = table.peers.push(direct_peer_entry(
+            old_pubkey,
+            TransportAddr::ble(mac(0xE2)),
+            10,
+        ));
+
+        table.decay(310, 100);
+
+        assert!(table.find_peer(&old_addr).is_none());
+        assert!(table.peers.is_empty());
+    }
+
+    #[test]
+    fn compact_update_recovers_expired_peer_to_direct() {
+        let self_addr = short_addr_of(&pubkey(0x60));
+        let peer_pubkey = pubkey(0x61);
+        let peer_addr = short_addr_of(&peer_pubkey);
+        let mut table = RoutingTable::new(self_addr);
+
+        let _ = table.peers.push(PeerEntry {
+            short_addr: peer_addr,
+            pubkey: peer_pubkey,
+            capabilities: 0x1111,
+            bloom: BloomFilter::new(),
+            transport_addr: TransportAddr::ble(mac(0xE3)),
+            last_seen_ticks: 10,
+            hop_count: 2,
+            trust: TRUST_INDIRECT,
+            learned_from: short_addr_of(&pubkey(0x62)),
+        });
+
+        table.decay(110, 100);
+        assert_eq!(table.find_peer(&peer_addr).unwrap().trust, TRUST_EXPIRED);
+
+        let transport = TransportAddr::ble(mac(0xE4));
+        let inserted = table.update_peer_compact(peer_addr, 0x2222, transport, 250);
+
+        assert!(!inserted);
+        let peer = table.find_peer(&peer_addr).unwrap();
+        assert_eq!(peer.trust, TRUST_DIRECT);
+        assert_eq!(peer.hop_count, 0);
+        assert_eq!(peer.capabilities, 0x2222);
+        assert_eq!(peer.transport_addr, transport);
+        assert_eq!(peer.last_seen_ticks, 250);
+        assert_eq!(peer.learned_from, [0u8; 8]);
+    }
+
+    #[test]
+    fn h2h_update_recovers_expired_peer_to_direct_and_refreshes_indirects() {
+        let self_addr = short_addr_of(&pubkey(0x70));
+        let partner_pubkey = pubkey(0x71);
+        let partner_addr = short_addr_of(&partner_pubkey);
+        let indirect = indirect_peer(0x72, 1);
+        let indirect_addr = short_addr_of(&indirect.pubkey);
+        let mut table = RoutingTable::new(self_addr);
+
+        let _ = table.peers.push(PeerEntry {
+            short_addr: partner_addr,
+            pubkey: partner_pubkey,
+            capabilities: 0x3333,
+            bloom: BloomFilter::new(),
+            transport_addr: TransportAddr::ble(mac(0xE5)),
+            last_seen_ticks: 10,
+            hop_count: 4,
+            trust: TRUST_INDIRECT,
+            learned_from: short_addr_of(&pubkey(0x73)),
+        });
+
+        table.decay(110, 100);
+        assert_eq!(table.find_peer(&partner_addr).unwrap().trust, TRUST_EXPIRED);
+
+        let payload = payload(Some(partner_pubkey), 0x4444, &[indirect.clone()]);
+        let transport = TransportAddr::ble(mac(0xE6));
+        table.update_peer_from_h2h(&payload, partner_addr, transport, 250);
+
+        let partner = table.find_peer(&partner_addr).unwrap();
+        assert_eq!(partner.trust, TRUST_DIRECT);
+        assert_eq!(partner.hop_count, 0);
+        assert_eq!(partner.capabilities, 0x4444);
+        assert_eq!(partner.transport_addr, transport);
+        assert_eq!(partner.last_seen_ticks, 250);
+        assert_eq!(partner.learned_from, [0u8; 8]);
+
+        let indirect_peer = table.find_peer(&indirect_addr).unwrap();
+        assert_eq!(indirect_peer.trust, TRUST_INDIRECT);
+        assert_eq!(indirect_peer.hop_count, indirect.hop_count + 1);
+        assert_eq!(indirect_peer.learned_from, partner_addr);
+        assert_eq!(indirect_peer.last_seen_ticks, 250);
+    }
+
+    #[test]
+    fn decay_recomputes_bloom_after_removal() {
+        let self_addr = short_addr_of(&pubkey(0x80));
+        let old_pubkey = pubkey(0x81);
+        let old_addr = short_addr_of(&old_pubkey);
+        let mut table = RoutingTable::new(self_addr);
+
+        let _ = table.peers.push(direct_peer_entry(
+            old_pubkey,
+            TransportAddr::ble(mac(0xE7)),
+            10,
+        ));
+        table.recompute_bloom();
+        assert!(table.local_bloom.contains(&old_addr));
+        assert_eq!(table.find_routes(&old_addr).len(), 1);
+
+        table.decay(310, 100);
+
+        assert!(!table.local_bloom.contains(&old_addr));
+        assert!(table.find_routes(&old_addr).is_empty());
+    }
+}

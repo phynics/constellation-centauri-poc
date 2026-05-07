@@ -11,7 +11,7 @@ use embassy_time::{Duration, Instant, Timer};
 
 use crate::config::{H2H_CYCLE_SECS, TICK_HZ};
 use crate::crypto::identity::{NodeIdentity, ShortAddr, short_addr_of};
-use crate::network::{H2hInitiator, H2hResponder};
+use crate::network::{DiscoveryEvent, H2hInitiator, H2hResponder, MAX_SCAN_RESULTS};
 use crate::protocol::h2h::{self, H2hPayload};
 use crate::routing::table::RoutingTable;
 use crate::transport::TransportAddr;
@@ -61,6 +61,97 @@ pub async fn build_h2h_payload<M: RawMutex>(
         uptime_secs,
         peers,
         peer_count,
+    }
+}
+
+/// Apply discovery scan results into the routing table using compact peer updates.
+pub async fn apply_discovery_events<M: RawMutex>(
+    routing_table: &Mutex<M, RoutingTable>,
+    events: &heapless::Vec<DiscoveryEvent, MAX_SCAN_RESULTS>,
+) {
+    let mut table = routing_table.lock().await;
+    let now = Instant::now().as_ticks();
+    for event in events.iter() {
+        let transport = TransportAddr::ble(event.mac);
+        let is_new = table.update_peer_compact(
+            event.short_addr,
+            event.capabilities,
+            transport,
+            now,
+        );
+        if is_new {
+            log::info!(
+                "[central] New peer {:02x?} ({} total)",
+                &event.short_addr[..4],
+                table.peers.len()
+            );
+        }
+    }
+}
+
+/// Collect current H2H connection candidates for which this node is the initiator.
+pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
+    identity: &NodeIdentity,
+    routing_table: &Mutex<M, RoutingTable>,
+) -> heapless::Vec<(ShortAddr, [u8; 6]), 32> {
+    let our_addr = *identity.short_addr();
+    let table = routing_table.lock().await;
+    let mut v = heapless::Vec::new();
+    for peer in table.peers.iter() {
+        if peer.transport_addr.addr != [0u8; 6]
+            && h2h::is_initiator(&our_addr, &peer.short_addr)
+        {
+            let _ = v.push((peer.short_addr, peer.transport_addr.addr));
+        }
+    }
+    v
+}
+
+/// Perform immediate H2H exchanges for the current known initiator-side peers.
+///
+/// This skips slot waiting and is intended for deterministic testing / host-side
+/// orchestration. Runtime scheduling remains in `run_initiator_loop`.
+pub async fn run_initiator_h2h_once<M, I>(
+    initiator: &mut I,
+    identity: &NodeIdentity,
+    capabilities: u16,
+    routing_table: &Mutex<M, RoutingTable>,
+    uptime: &Mutex<M, u32>,
+) where
+    M: RawMutex,
+    I: H2hInitiator,
+{
+    let peer_snapshots = collect_h2h_peer_snapshots(identity, routing_table).await;
+
+    for (peer_addr, peer_mac) in peer_snapshots.iter() {
+        let payload = build_h2h_payload(
+            identity, capabilities, uptime, routing_table, peer_addr,
+        ).await;
+
+        match initiator.initiate_h2h(*peer_mac, &payload).await {
+            Ok(peer_payload) => {
+                let transport = TransportAddr::ble(*peer_mac);
+                let mut table = routing_table.lock().await;
+                table.update_peer_from_h2h(
+                    &peer_payload,
+                    *peer_addr,
+                    transport,
+                    Instant::now().as_ticks(),
+                );
+                log::info!(
+                    "[central] H2H done with {:02x?}, peers={}",
+                    &peer_addr[..4],
+                    table.peers.len()
+                );
+            }
+            Err(e) => {
+                log::warn!(
+                    "[central] H2H failed to {:02x?}: {:?}",
+                    &peer_addr[..4],
+                    e
+                );
+            }
+        }
     }
 }
 
@@ -172,41 +263,11 @@ where
         log::info!("[central] Discovery scan ({} ms)...", DISCOVERY_DURATION_MS);
         let events = initiator.scan(DISCOVERY_DURATION_MS).await;
 
-        {
-            let mut table = routing_table.lock().await;
-            let now = Instant::now().as_ticks();
-            for event in events.iter() {
-                let transport = TransportAddr::ble(event.mac);
-                let is_new = table.update_peer_compact(
-                    event.short_addr,
-                    event.capabilities,
-                    transport,
-                    now,
-                );
-                if is_new {
-                    log::info!(
-                        "[central] New peer {:02x?} ({} total)",
-                        &event.short_addr[..4],
-                        table.peers.len()
-                    );
-                }
-            }
-        }
+        apply_discovery_events(routing_table, &events).await;
 
         // ── Phase 2: H2H connections ──────────────────────────────────────
         let our_addr = *identity.short_addr();
-        let peer_snapshots: heapless::Vec<(ShortAddr, [u8; 6]), 32> = {
-            let table = routing_table.lock().await;
-            let mut v = heapless::Vec::new();
-            for peer in table.peers.iter() {
-                if peer.transport_addr.addr != [0u8; 6]
-                    && h2h::is_initiator(&our_addr, &peer.short_addr)
-                {
-                    let _ = v.push((peer.short_addr, peer.transport_addr.addr));
-                }
-            }
-            v
-        };
+        let peer_snapshots = collect_h2h_peer_snapshots(identity, routing_table).await;
 
         if !peer_snapshots.is_empty() {
             log::info!("[central] H2H cycle: {} peers to connect", peer_snapshots.len());

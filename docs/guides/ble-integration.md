@@ -77,7 +77,7 @@ Key files to study:
 
 ### Step 2: Initialize BLE Controller
 
-In `src/main.rs`, before spawning BLE tasks:
+In `firmware/src/main.rs`, before spawning BLE tasks:
 
 ```rust
 // Initialize BLE controller (pseudocode - adjust to actual trouble-host API)
@@ -94,7 +94,7 @@ spawner.spawn(gatt_task(heartbeat, incoming, outgoing, gatt_server)).ok();
 
 ### Step 3: Implement Advertising
 
-In `src/transport/ble.rs`, `ble_advertise_task`:
+In `firmware/src/transport/ble_network.rs`, in the advertising / peripheral-side BLE flow:
 
 ```rust
 pub async fn ble_advertise_task(

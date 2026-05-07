@@ -188,9 +188,9 @@ The BLE tasks currently log placeholder messages. To complete Phase 6, you need 
 
 ### 1. Integrate trouble-host BLE API
 
-Replace TODO comments in `src/transport/ble.rs`:
+Replace TODO comments in `firmware/src/transport/ble_network.rs` and related BLE wiring in `firmware/src/main.rs`:
 
-**Advertising Task:**
+**Advertising / peripheral H2H task:**
 ```rust
 // Current (line ~120):
 // TODO: Set advertising data using trouble-host API
@@ -202,7 +202,7 @@ Replace TODO comments in `src/transport/ble.rs`:
 // 4. Start advertising
 ```
 
-**Scanning Task:**
+**Scanning / initiator task:**
 ```rust
 // Current (line ~150):
 // TODO: Scan for advertising packets
@@ -216,7 +216,7 @@ Replace TODO comments in `src/transport/ble.rs`:
 // 6. Update routing table
 ```
 
-**GATT Task:**
+**Channel / response handling:**
 ```rust
 // Current (line ~185):
 // TODO: Handle GATT events

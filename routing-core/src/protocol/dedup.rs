@@ -26,3 +26,31 @@ impl SeenMessages {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_insert_is_not_seen_but_second_is() {
+        let mut seen = SeenMessages::new();
+        let id = [0x11; 8];
+
+        assert!(!seen.check_and_insert(&id));
+        assert!(seen.check_and_insert(&id));
+    }
+
+    #[test]
+    fn oldest_id_is_evicted_when_capacity_is_exceeded() {
+        let mut seen = SeenMessages::new();
+        let oldest = [0u8; 8];
+
+        assert!(!seen.check_and_insert(&oldest));
+        for i in 1..=SEEN_MESSAGES_CAPACITY {
+            let id = [i as u8; 8];
+            assert!(!seen.check_and_insert(&id));
+        }
+
+        assert!(!seen.check_and_insert(&oldest));
+    }
+}

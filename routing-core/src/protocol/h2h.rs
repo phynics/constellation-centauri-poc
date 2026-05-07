@@ -209,3 +209,122 @@ impl H2hPayload {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::H2H_CYCLE_SECS;
+
+    fn short(seed: u8) -> ShortAddr {
+        [seed, 0, 0, 0, 0, 0, 0, 0]
+    }
+
+    fn pubkey(seed: u8) -> PubKey {
+        [seed; 32]
+    }
+
+    fn payload_with_peer_count(peer_count: usize, include_pubkey: bool) -> H2hPayload {
+        const NONE: Option<PeerInfo> = None;
+        let mut peers = [NONE; H2H_MAX_PEER_ENTRIES];
+
+        for i in 0..peer_count.min(H2H_MAX_PEER_ENTRIES) {
+            peers[i] = Some(PeerInfo {
+                pubkey: pubkey((i + 1) as u8),
+                capabilities: 0x1000 + i as u16,
+                hop_count: i as u8,
+            });
+        }
+
+        H2hPayload {
+            full_pubkey: include_pubkey.then(|| pubkey(0xAA)),
+            capabilities: 0xBEEF,
+            uptime_secs: 42,
+            peers,
+            peer_count: peer_count as u8,
+        }
+    }
+
+    #[test]
+    fn initiator_selection_is_lexicographic() {
+        let lower = short(0x01);
+        let higher = short(0x02);
+
+        assert!(is_initiator(&lower, &higher));
+        assert!(!is_initiator(&higher, &lower));
+    }
+
+    #[test]
+    fn slot_offset_is_symmetric_and_in_range() {
+        let a = short(0x11);
+        let b = short(0x77);
+
+        let ab = slot_offset(&a, &b);
+        let ba = slot_offset(&b, &a);
+
+        assert_eq!(ab, ba);
+        assert!(ab < H2H_CYCLE_SECS);
+    }
+
+    #[test]
+    fn payload_roundtrip_with_full_pubkey() {
+        let payload = payload_with_peer_count(2, true);
+        let mut buf = [0u8; 512];
+
+        let written = payload.serialize(&mut buf).unwrap();
+        let decoded = H2hPayload::deserialize(&buf[..written]).unwrap();
+
+        assert_eq!(decoded.full_pubkey, payload.full_pubkey);
+        assert_eq!(decoded.capabilities, payload.capabilities);
+        assert_eq!(decoded.uptime_secs, payload.uptime_secs);
+        assert_eq!(decoded.peer_count, payload.peer_count);
+
+        for i in 0..payload.peer_count as usize {
+            let expected = payload.peers[i].as_ref().unwrap();
+            let actual = decoded.peers[i].as_ref().unwrap();
+            assert_eq!(actual.pubkey, expected.pubkey);
+            assert_eq!(actual.capabilities, expected.capabilities);
+            assert_eq!(actual.hop_count, expected.hop_count);
+        }
+    }
+
+    #[test]
+    fn payload_roundtrip_without_full_pubkey() {
+        let payload = payload_with_peer_count(3, false);
+        let mut buf = [0u8; 512];
+
+        let written = payload.serialize(&mut buf).unwrap();
+        let decoded = H2hPayload::deserialize(&buf[..written]).unwrap();
+
+        assert_eq!(decoded.full_pubkey, None);
+        assert_eq!(decoded.capabilities, payload.capabilities);
+        assert_eq!(decoded.uptime_secs, payload.uptime_secs);
+        assert_eq!(decoded.peer_count, payload.peer_count);
+    }
+
+    #[test]
+    fn deserialize_rejects_truncated_payload() {
+        let payload = payload_with_peer_count(1, true);
+        let mut buf = [0u8; 512];
+
+        let written = payload.serialize(&mut buf).unwrap();
+
+        assert!(matches!(
+            H2hPayload::deserialize(&buf[..written - 1]),
+            Err(PacketError::InvalidHeader)
+        ));
+    }
+
+    #[test]
+    fn deserialize_clamps_peer_count_to_capacity() {
+        let payload = payload_with_peer_count(H2H_MAX_PEER_ENTRIES, false);
+        let mut buf = [0u8; 512];
+        let written = payload.serialize(&mut buf).unwrap();
+
+        let peer_count_offset = 1 + 1 + 2 + 4;
+        buf[peer_count_offset] = (H2H_MAX_PEER_ENTRIES as u8).saturating_add(5);
+
+        let decoded = H2hPayload::deserialize(&buf[..written]).unwrap();
+
+        assert_eq!(decoded.peer_count as usize, H2H_MAX_PEER_ENTRIES);
+        assert!(decoded.peers[H2H_MAX_PEER_ENTRIES - 1].is_some());
+    }
+}
