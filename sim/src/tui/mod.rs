@@ -50,7 +50,8 @@ fn run_loop(
     loop {
         {
             let state = tui_state.lock().unwrap();
-            app.clamp_selection(state.traces.len());
+            let n_active = sim_config.lock().unwrap().n_active;
+            app.clamp_selection(state.traces.len(), n_active);
         }
 
         terminal.draw(|f| {

@@ -10,7 +10,7 @@ use ratatui::{
 
 use routing_core::node::roles::Capabilities;
 
-use super::app::{App, BottomTab, InputTarget, Mode};
+use super::app::{App, BottomTab, InputTarget, Mode, ViewMode};
 use crate::scenario;
 use crate::sim_state::{MessageTrace, SimConfig, TuiState, MAX_NODES};
 
@@ -32,9 +32,26 @@ pub fn render(frame: &mut Frame, app: &App, state: &TuiState, config: &SimConfig
     .split(vertical[1]);
 
     render_summary(frame, app, state, config, vertical[0]);
-    render_trace_list(frame, app, state, top[0]);
-    render_trace_detail(frame, app, state, top[1]);
-    render_trace_context(frame, app, state, config, top[2]);
+    match app.view_mode {
+        ViewMode::Trace => {
+            render_trace_list(frame, app, state, top[0]);
+            render_trace_detail(frame, app, state, top[1]);
+            let right =
+                Layout::vertical([Constraint::Length(14), Constraint::Fill(1)]).split(top[2]);
+            render_node_map(frame, app, state, config, right[0]);
+            render_trace_context(frame, app, state, config, right[1]);
+        }
+        ViewMode::Nodes => {
+            render_node_list(frame, app, state, config, top[0]);
+            render_node_editor(frame, app, state, config, top[1]);
+            render_node_context(frame, app, state, config, top[2]);
+        }
+        ViewMode::Links => {
+            render_link_list(frame, app, config, top[0]);
+            render_link_editor(frame, app, config, top[1]);
+            render_node_map(frame, app, state, config, top[2]);
+        }
+    }
     render_bottom_panel(frame, app, state, vertical[2]);
 
     if app.mode == Mode::InputMessage {
@@ -64,7 +81,7 @@ fn render_summary(frame: &mut Frame, app: &App, state: &TuiState, config: &SimCo
             trace.kind.as_str(),
             trace.from_idx,
             trace.to_idx,
-            delivery_status(trace)
+            trace.terminal_status.as_str()
         )
     } else {
         "selected=none".to_string()
@@ -80,7 +97,12 @@ fn render_summary(frame: &mut Frame, app: &App, state: &TuiState, config: &SimCo
         Line::from(format!(" {}", preset.description)),
         Line::styled(
             format!(
-                " traces={}  active={}  {}  [M] send  [R] scenario  [H] help",
+                " mode={}  traces={}  active={}  {}  [N] cycle modes  [M] send  [R] scenario  [H] help",
+                match app.view_mode {
+                    ViewMode::Trace => "trace",
+                    ViewMode::Nodes => "nodes",
+                    ViewMode::Links => "links",
+                },
                 state.traces.len(),
                 config.n_active,
                 trace_summary
@@ -127,7 +149,7 @@ fn render_trace_list(frame: &mut Frame, app: &App, state: &TuiState, area: Rect)
                 trace.kind.as_str(),
                 trace.from_idx,
                 trace.to_idx,
-                delivery_status(trace),
+                trace.terminal_status.as_str(),
                 trace.body.chars().take(20).collect::<String>(),
             );
 
@@ -175,14 +197,341 @@ fn render_trace_detail(frame: &mut Frame, app: &App, state: &TuiState, area: Rec
         )),
         Line::from(format!("Created: t={}s", trace.created_secs)),
         Line::from(format!(
+            "Terminal status: {}",
+            trace.terminal_status.as_str()
+        )),
+        Line::from(format!(
             "Delivered: {}",
             trace
                 .delivered_secs
                 .map(|secs| format!("t={}s", secs))
                 .unwrap_or_else(|| "pending".to_string())
         )),
-        Line::from(format!("Delivery model: direct sim inbox delivery")),
+        Line::from(format!("Message ID: {:02x?}", trace.message_id)),
+        Line::from(format!("TTL at send: {}", trace.ttl_at_send)),
+        Line::from("Propagation model: routed hop-by-hop using routing-core candidates"),
+        Line::raw(""),
+        Line::styled(
+            "Hop timeline",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
     ];
+    let mut lines = lines;
+    for event in trace
+        .events
+        .iter()
+        .rev()
+        .take(inner.height.saturating_sub(lines.len() as u16) as usize)
+        .rev()
+    {
+        lines.push(Line::from(format!(
+            "  t={}s node {}: {}",
+            event.time_secs, event.node_idx, event.message
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_node_list(
+    frame: &mut Frame,
+    app: &App,
+    state: &TuiState,
+    config: &SimConfig,
+    area: Rect,
+) {
+    let block = Block::default()
+        .title(" Nodes (↑↓ select) ")
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let items: Vec<ListItem> = (0..config.n_active)
+        .map(|idx| {
+            let selected = idx == app.selected_node;
+            let style = if selected {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            let label = format!(
+                "{:02} {:<8} caps={:<8} peers={:<2} {}",
+                idx,
+                config.node_types[idx].as_str(),
+                capability_short(config.capabilities[idx]),
+                state.nodes[idx].peers.len(),
+                if state.nodes[idx].active {
+                    "active"
+                } else {
+                    "inactive"
+                }
+            );
+            ListItem::new(label).style(style)
+        })
+        .collect();
+
+    frame.render_widget(List::new(items), inner);
+}
+
+fn render_node_editor(
+    frame: &mut Frame,
+    app: &App,
+    state: &TuiState,
+    config: &SimConfig,
+    area: Rect,
+) {
+    let block = Block::default()
+        .title(" Node editor ")
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if app.selected_node >= config.n_active {
+        frame.render_widget(Paragraph::new("No active node selected."), inner);
+        return;
+    }
+
+    let idx = app.selected_node;
+    let behavior = config.node_behaviors[idx];
+    let lines = vec![
+        Line::styled(
+            format!("Node {}", idx),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from(format!("Type: {}", config.node_types[idx].as_str())),
+        Line::from(format!(
+            "Capabilities: {}",
+            capability_long(config.capabilities[idx])
+        )),
+        Line::from(format!("Peers now: {}", state.nodes[idx].peers.len())),
+        Line::from(format!("Uptime now: {}s", state.nodes[idx].uptime_secs)),
+        Line::raw(""),
+        Line::styled(
+            "Capability toggles",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from("  [1] route  [2] store  [3] app  [4] bridge  [5] low-energy  [6] mobile"),
+        Line::styled(
+            "Behavior toggles",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from(format!(
+            "  [A] advertise={}  [C] scan={}  [I] initiate={}",
+            on_off(behavior.advertise),
+            on_off(behavior.scan),
+            on_off(behavior.initiate_h2h)
+        )),
+        Line::from(format!(
+            "  [O] respond={}   [E] emit_sensor={}",
+            on_off(behavior.respond_h2h),
+            on_off(behavior.emit_sensor)
+        )),
+        Line::from("  [T] cycle type  [Z] activate next node  [X] deactivate selected tail node"),
+    ];
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_node_context(
+    frame: &mut Frame,
+    app: &App,
+    state: &TuiState,
+    config: &SimConfig,
+    area: Rect,
+) {
+    let block = Block::default()
+        .title(" Node context ")
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if app.selected_node >= config.n_active {
+        frame.render_widget(Paragraph::new("No active node selected."), inner);
+        return;
+    }
+
+    let idx = app.selected_node;
+    let node = &state.nodes[idx];
+    let mut lines = vec![Line::styled(
+        "Known peers",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )];
+    for peer in node
+        .peers
+        .iter()
+        .take(inner.height.saturating_sub(6) as usize)
+    {
+        let peer_idx = state
+            .nodes
+            .iter()
+            .position(|candidate| candidate.short_addr == peer.short_addr)
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "?".to_string());
+        lines.push(Line::from(format!(
+            " node {}  trust={} hop={} {:02x?}",
+            peer_idx,
+            peer.trust,
+            peer.hop_count,
+            &peer.short_addr[..4]
+        )));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "Edit notes",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    ));
+    lines.push(Line::from("Changes here update SimConfig directly."));
+    lines.push(Line::from(
+        "Use scenarios/H2H scans to see routing-core react.",
+    ));
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_link_list(frame: &mut Frame, app: &App, config: &SimConfig, area: Rect) {
+    let block = Block::default()
+        .title(" Links (←→ node, ↑↓ peer) ")
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if app.selected_link_node >= config.n_active {
+        frame.render_widget(Paragraph::new("No active node selected."), inner);
+        return;
+    }
+
+    let items: Vec<ListItem> = (0..config.n_active)
+        .filter(|peer| *peer != app.selected_link_node)
+        .enumerate()
+        .map(|(row, peer)| {
+            let selected = row == app.selected_link_peer_row;
+            let style = if selected {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            let label = format!(
+                "{} → {}  {}  drop={}%",
+                app.selected_link_node,
+                peer,
+                if config.link_enabled[app.selected_link_node][peer] {
+                    "enabled "
+                } else {
+                    "disabled"
+                },
+                config.drop_prob[app.selected_link_node][peer]
+            );
+            ListItem::new(label).style(style)
+        })
+        .collect();
+
+    frame.render_widget(List::new(items), inner);
+}
+
+fn render_link_editor(frame: &mut Frame, app: &App, config: &SimConfig, area: Rect) {
+    let block = Block::default()
+        .title(" Link editor ")
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some((from, to)) = selected_link_pair(app, config) else {
+        frame.render_widget(Paragraph::new("No link selected."), inner);
+        return;
+    };
+
+    let lines = vec![
+        Line::styled(
+            format!("{} → {}", from, to),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from(format!(
+            "Enabled: {}",
+            on_off(config.link_enabled[from][to])
+        )),
+        Line::from(format!("Drop probability: {}%", config.drop_prob[from][to])),
+        Line::raw(""),
+        Line::from("[Space] toggle link"),
+        Line::from("[P] set drop %"),
+        Line::from("[←→] change source node"),
+        Line::from("[↑↓] change peer row"),
+    ];
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_node_map(frame: &mut Frame, app: &App, state: &TuiState, config: &SimConfig, area: Rect) {
+    let block = Block::default()
+        .title(" Visual node map ")
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let selected_trace = selected_trace(state, app);
+    let hop_nodes: Vec<usize> = selected_trace
+        .map(|trace| trace.events.iter().map(|event| event.node_idx).collect())
+        .unwrap_or_default();
+
+    let node_ids: Vec<usize> = (0..config.n_active).collect();
+    let mut lines = vec![Line::styled(
+        "S=source D=destination *=path",
+        Style::default().fg(Color::DarkGray),
+    )];
+
+    for chunk in node_ids.chunks(5) {
+        let mut spans = Vec::new();
+        for idx in chunk {
+            let on_path = hop_nodes.contains(idx);
+            let is_src = selected_trace.map(|t| t.from_idx == *idx).unwrap_or(false);
+            let is_dst = selected_trace.map(|t| t.to_idx == *idx).unwrap_or(false);
+            let prefix = if is_src {
+                'S'
+            } else if is_dst {
+                'D'
+            } else if on_path {
+                '*'
+            } else {
+                ' '
+            };
+            let style = if *idx == app.selected_node && app.view_mode == ViewMode::Nodes {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else if *idx == app.selected_link_node && app.view_mode == ViewMode::Links {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else if on_path {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default()
+            };
+            spans.push(Span::styled(
+                format!(
+                    "{}{:02}[{:<5}]  ",
+                    prefix,
+                    idx,
+                    capability_short(config.capabilities[*idx])
+                ),
+                style,
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
@@ -303,14 +652,27 @@ fn render_bottom_panel(frame: &mut Frame, app: &App, state: &TuiState, area: Rec
         ..inner
     };
 
-    let (timeline_style, logs_style) = match app.bottom_tab {
-        BottomTab::Timeline => (tab_style_active, tab_style_inactive),
-        BottomTab::Logs => (tab_style_inactive, tab_style_active),
+    let timeline_style = if app.bottom_tab == BottomTab::Timeline {
+        tab_style_active
+    } else {
+        tab_style_inactive
+    };
+    let graph_style = if app.bottom_tab == BottomTab::Graph {
+        tab_style_active
+    } else {
+        tab_style_inactive
+    };
+    let logs_style = if app.bottom_tab == BottomTab::Logs {
+        tab_style_active
+    } else {
+        tab_style_inactive
     };
 
     let tabs = Line::from(vec![
         Span::raw(" "),
         Span::styled(" Timeline ", timeline_style),
+        Span::raw("  "),
+        Span::styled(" Graph ", graph_style),
         Span::raw("  "),
         Span::styled(" Logs ", logs_style),
         Span::styled("   [G] switch", Style::default().fg(Color::DarkGray)),
@@ -320,27 +682,51 @@ fn render_bottom_panel(frame: &mut Frame, app: &App, state: &TuiState, area: Rec
     match app.bottom_tab {
         BottomTab::Timeline => {
             if let Some(trace) = selected_trace(state, app) {
-                let delivered = trace
-                    .delivered_secs
-                    .map(|secs| {
-                        format!(
-                            "t={}s: destination {} consumed inbox item",
-                            secs, trace.to_idx
-                        )
+                let visible = body_area.height as usize;
+                let lines: Vec<Line> = trace
+                    .events
+                    .iter()
+                    .rev()
+                    .take(visible)
+                    .rev()
+                    .map(|event| {
+                        Line::from(format!(
+                            "t={}s  node {}  {}",
+                            event.time_secs, event.node_idx, event.message
+                        ))
                     })
-                    .unwrap_or_else(|| {
-                        "pending: destination has not consumed the inbox item yet".to_string()
-                    });
+                    .collect();
+                frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body_area);
+            } else {
+                frame.render_widget(Paragraph::new("No selected trace."), body_area);
+            }
+        }
+        BottomTab::Graph => {
+            if let Some(trace) = selected_trace(state, app) {
+                let hops: Vec<String> = trace
+                    .events
+                    .iter()
+                    .map(|event| event.node_idx.to_string())
+                    .collect();
+                let path = if hops.is_empty() {
+                    trace.from_idx.to_string()
+                } else {
+                    hops.join(" -> ")
+                };
                 let lines = vec![
+                    Line::styled(
+                        "Selected trace path",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Line::from(format!(
-                        "t={}s: trace #{} created at source node {}",
-                        trace.created_secs, trace.id, trace.from_idx
+                        "src={}  dst={}  status={}",
+                        trace.from_idx,
+                        trace.to_idx,
+                        trace.terminal_status.as_str()
                     )),
-                    Line::from(format!(
-                        "t={}s: direct enqueue to destination inbox {}",
-                        trace.created_secs, trace.to_idx
-                    )),
-                    Line::from(delivered),
+                    Line::from(path),
                 ];
                 frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body_area);
             } else {
@@ -370,9 +756,7 @@ fn render_bottom_panel(frame: &mut Frame, app: &App, state: &TuiState, area: Rec
     }
 
     frame.render_widget(
-        Paragraph::new(
-            " [↑↓] Select trace   [M] Send message   [R] Scenario   [H] Help   [Q] Quit",
-        )
+        Paragraph::new(" [↑↓] Select   [N] Nodes/Traces   [M] Send   [R] Scenario   [G] Timeline/Logs   [H] Help")
         .style(Style::default().fg(Color::DarkGray)),
         hint_area,
     );
@@ -380,6 +764,7 @@ fn render_bottom_panel(frame: &mut Frame, app: &App, state: &TuiState, area: Rec
 
 fn render_input_overlay(frame: &mut Frame, app: &App, area: Rect) {
     let prompt = match app.input_target {
+        InputTarget::DropProb { from, to } => format!("Drop % for {} → {}: ", from, to),
         InputTarget::MessageFrom => "Message from node #: ".to_string(),
         InputTarget::MessageTo => "Message to node #: ".to_string(),
         InputTarget::MessageBody { from, to } => format!("Message {} → {}: ", from, to),
@@ -470,8 +855,10 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Line::from("Follow one selected message trace from creation to delivery."),
-        Line::from("This pass uses the simulator's current direct inbox delivery model."),
+        Line::from(
+            "Follow one selected message trace hop by hop through routing-core-backed forwarding.",
+        ),
+        Line::from("Switch to Nodes mode to edit node capabilities and behavior flags."),
         Line::raw(""),
         Line::styled(
             "Keys",
@@ -479,12 +866,23 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Line::from("  ↑↓  select trace"),
+        Line::from("  ↑↓  select trace or node"),
+        Line::from("  N   switch Trace / Nodes mode"),
         Line::from("  M   compose/send manual message"),
         Line::from("  R   switch scenario"),
         Line::from("  G   timeline/logs"),
         Line::from("  H   toggle help"),
         Line::from("  Q   quit"),
+        Line::raw(""),
+        Line::styled(
+            "Node edit keys",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from("  [1]-[6] toggle route/store/app/bridge/low-energy/mobile"),
+        Line::from("  [A][C][I][O][E] toggle advertise/scan/initiate/respond/emit_sensor"),
+        Line::from("  [T] cycle type   [Z] activate next node   [X] deactivate selected tail node"),
         Line::raw(""),
         Line::styled(
             "Capability codes",
@@ -502,12 +900,21 @@ fn selected_trace<'a>(state: &'a TuiState, app: &App) -> Option<&'a MessageTrace
     state.traces.get(app.selected_trace)
 }
 
-fn delivery_status(trace: &MessageTrace) -> &'static str {
-    if trace.delivered_secs.is_some() {
-        "delivered"
-    } else {
-        "pending"
+fn selected_link_pair(app: &App, config: &SimConfig) -> Option<(usize, usize)> {
+    if app.selected_link_node >= config.n_active {
+        return None;
     }
+    let mut row = 0usize;
+    for peer in 0..config.n_active {
+        if peer == app.selected_link_node {
+            continue;
+        }
+        if row == app.selected_link_peer_row {
+            return Some((app.selected_link_node, peer));
+        }
+        row += 1;
+    }
+    None
 }
 
 fn capability_short(bits: u16) -> String {

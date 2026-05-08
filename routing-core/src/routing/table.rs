@@ -317,6 +317,36 @@ impl RoutingTable {
         indices
     }
 
+    /// Return forwarding candidates for a destination using current routing knowledge.
+    ///
+    /// The direct destination is preferred when known and still has a usable
+    /// transport address. Otherwise, candidates are derived from neighbors whose
+    /// direct entry or bloom filter claims they know the destination.
+    pub fn forwarding_candidates(&self, dst: &ShortAddr) -> Vec<(ShortAddr, TransportAddr), 8> {
+        let mut candidates = Vec::new();
+
+        if let Some(peer) = self.find_peer(dst) {
+            if peer.trust > TRUST_EXPIRED && peer.transport_addr.addr != [0u8; 6] {
+                let _ = candidates.push((peer.short_addr, peer.transport_addr));
+                return candidates;
+            }
+        }
+
+        for idx in self.find_routes(dst).iter().copied() {
+            if let Some(peer) = self.peers.get(idx) {
+                if peer.trust == TRUST_EXPIRED || peer.transport_addr.addr == [0u8; 6] {
+                    continue;
+                }
+                let candidate = (peer.short_addr, peer.transport_addr);
+                if !candidates.iter().any(|existing| existing.0 == candidate.0) {
+                    let _ = candidates.push(candidate);
+                }
+            }
+        }
+
+        candidates
+    }
+
     pub fn recompute_bloom(&mut self) {
         self.local_bloom.clear();
         self.local_bloom.insert(&self.self_addr);
@@ -686,5 +716,42 @@ mod tests {
 
         assert!(!table.local_bloom.contains(&old_addr));
         assert!(table.find_routes(&old_addr).is_empty());
+    }
+
+    #[test]
+    fn forwarding_candidates_prefers_direct_destination() {
+        let self_addr = short_addr_of(&pubkey(0x82));
+        let dst_pubkey = pubkey(0x83);
+        let dst_addr = short_addr_of(&dst_pubkey);
+        let dst_transport = TransportAddr::ble(mac(0xE8));
+        let mut table = RoutingTable::new(self_addr);
+
+        let _ = table
+            .peers
+            .push(direct_peer_entry(dst_pubkey, dst_transport, 10));
+
+        let candidates = table.forwarding_candidates(&dst_addr);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0, dst_addr);
+        assert_eq!(candidates[0].1, dst_transport);
+    }
+
+    #[test]
+    fn forwarding_candidates_uses_bloom_routes_when_no_direct_destination_exists() {
+        let self_addr = short_addr_of(&pubkey(0x84));
+        let via_pubkey = pubkey(0x85);
+        let via_addr = short_addr_of(&via_pubkey);
+        let dst_addr = short_addr_of(&pubkey(0x86));
+        let mut table = RoutingTable::new(self_addr);
+
+        let mut via = direct_peer_entry(via_pubkey, TransportAddr::ble(mac(0xE9)), 10);
+        via.bloom.insert(&dst_addr);
+        let _ = table.peers.push(via);
+
+        let candidates = table.forwarding_candidates(&dst_addr);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0, via_addr);
     }
 }

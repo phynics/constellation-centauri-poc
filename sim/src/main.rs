@@ -88,7 +88,14 @@ async fn run_node(
             Arc::clone(&sim_config),
         ),
         run_heartbeat_loop(uptime, routing_table),
-        message_task::run_message_loop(node_idx, medium, Arc::clone(&tui_state)),
+        message_task::run_message_loop(
+            node_idx,
+            medium,
+            routing_table,
+            all_nodes,
+            Arc::clone(&sim_config),
+            Arc::clone(&tui_state),
+        ),
         message_task::run_sensor_loop(node_idx, medium, sim_config, tui_state),
     )
     .await;

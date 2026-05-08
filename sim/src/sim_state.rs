@@ -60,6 +60,36 @@ impl MessageKind {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum TraceStatus {
+    Pending,
+    Delivered,
+    NoRoute,
+    TtlExpired,
+    Dropped,
+    Deduped,
+}
+
+impl TraceStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TraceStatus::Pending => "pending",
+            TraceStatus::Delivered => "delivered",
+            TraceStatus::NoRoute => "no-route",
+            TraceStatus::TtlExpired => "ttl-expired",
+            TraceStatus::Dropped => "dropped",
+            TraceStatus::Deduped => "deduped",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct TraceEvent {
+    pub time_secs: u32,
+    pub node_idx: usize,
+    pub message: String,
+}
+
 // ── Snapshots (written by embassy, read by TUI) ───────────────────────────────
 
 #[derive(Clone, Default)]
@@ -94,6 +124,10 @@ pub struct MessageTrace {
     pub target_caps: u16,
     pub link_enabled_at_send: bool,
     pub drop_prob_at_send: u8,
+    pub message_id: [u8; 8],
+    pub ttl_at_send: u8,
+    pub terminal_status: TraceStatus,
+    pub events: Vec<TraceEvent>,
 }
 
 pub struct TuiState {
@@ -130,6 +164,8 @@ impl TuiState {
         target_caps: u16,
         link_enabled_at_send: bool,
         drop_prob_at_send: u8,
+        message_id: [u8; 8],
+        ttl_at_send: u8,
     ) -> u64 {
         let id = self.next_trace_id;
         self.next_trace_id = self.next_trace_id.saturating_add(1);
@@ -150,6 +186,14 @@ impl TuiState {
             target_caps,
             link_enabled_at_send,
             drop_prob_at_send,
+            message_id,
+            ttl_at_send,
+            terminal_status: TraceStatus::Pending,
+            events: vec![TraceEvent {
+                time_secs: self.elapsed_secs,
+                node_idx: from_idx,
+                message: format!("trace created for {} → {}", from_idx, to_idx),
+            }],
         });
 
         id
@@ -159,6 +203,26 @@ impl TuiState {
         let now = self.elapsed_secs;
         if let Some(trace) = self.traces.iter_mut().find(|trace| trace.id == trace_id) {
             trace.delivered_secs = Some(now);
+            trace.terminal_status = TraceStatus::Delivered;
+        }
+    }
+
+    pub fn push_trace_event(&mut self, trace_id: u64, node_idx: usize, message: impl Into<String>) {
+        let now = self.elapsed_secs;
+        if let Some(trace) = self.traces.iter_mut().find(|trace| trace.id == trace_id) {
+            trace.events.push(TraceEvent {
+                time_secs: now,
+                node_idx,
+                message: message.into(),
+            });
+        }
+    }
+
+    pub fn set_trace_terminal_status(&mut self, trace_id: u64, status: TraceStatus) {
+        if let Some(trace) = self.traces.iter_mut().find(|trace| trace.id == trace_id) {
+            if trace.terminal_status != TraceStatus::Delivered {
+                trace.terminal_status = status;
+            }
         }
     }
 

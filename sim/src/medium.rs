@@ -37,6 +37,12 @@ pub struct SimH2hResponse {
 /// Application-level data message delivered between nodes.
 pub struct SimDataMessage {
     pub trace_id: u64,
+    pub from_idx: usize,
+    pub to_idx: usize,
+    pub sender_idx: usize,
+    pub message_id: [u8; 8],
+    pub ttl: u8,
+    pub hop_count: u8,
 }
 
 /// Per-node mailboxes.  All channels use `CriticalSectionRawMutex` so they work

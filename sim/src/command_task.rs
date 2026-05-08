@@ -10,6 +10,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex as AsyncMutex;
 use embassy_time::{Duration, Timer};
 
+use routing_core::config::DEFAULT_TTL;
 use routing_core::routing::table::RoutingTable;
 
 use crate::medium::SimMedium;
@@ -48,6 +49,7 @@ pub async fn run_command_loop(
 
                     let trace_id = {
                         let mut state = tui_state.lock().unwrap();
+                        let message_id = trace_id_to_message_id(state.next_trace_id);
                         state.create_trace(
                             from,
                             to,
@@ -57,11 +59,28 @@ pub async fn run_command_loop(
                             target_caps,
                             link_enabled_at_send,
                             drop_prob_at_send,
+                            message_id,
+                            DEFAULT_TTL,
                         )
                     };
 
-                    let msg = crate::medium::SimDataMessage { trace_id };
-                    medium.msg_inbox[to].send(msg).await;
+                    let message_id = trace_id_to_message_id(trace_id);
+
+                    let msg = crate::medium::SimDataMessage {
+                        trace_id,
+                        from_idx: from,
+                        to_idx: to,
+                        sender_idx: from,
+                        message_id,
+                        ttl: DEFAULT_TTL,
+                        hop_count: 0,
+                    };
+                    medium.msg_inbox[from].send(msg).await;
+                    tui_state.lock().unwrap().push_trace_event(
+                        trace_id,
+                        from,
+                        format!("manual message queued at source for destination {}", to),
+                    );
                     let mut state = tui_state.lock().unwrap();
                     state.msgs_sent[from] = state.msgs_sent[from].saturating_add(1);
                 }
@@ -115,4 +134,8 @@ pub async fn run_command_loop(
             }
         }
     }
+}
+
+fn trace_id_to_message_id(trace_id: u64) -> [u8; 8] {
+    trace_id.to_le_bytes()
 }
