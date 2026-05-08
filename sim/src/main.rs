@@ -15,22 +15,23 @@
 use std::sync::{Arc, Mutex};
 
 use embassy_executor::Spawner;
-use embassy_futures::join::{join, join3, join5};
+use embassy_futures::join::{join, join5};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex as AsyncMutex;
 use static_cell::StaticCell;
 
 use rand::{RngCore, SeedableRng as _};
 
-use routing_core::behavior::{run_heartbeat_loop, run_initiator_loop, run_responder_loop};
+use routing_core::behavior::run_heartbeat_loop;
 use routing_core::crypto::identity::NodeIdentity;
-use routing_core::node::roles::Capabilities;
 use routing_core::routing::table::RoutingTable;
 
+mod behavior;
 mod command_task;
 mod medium;
 mod message_task;
 mod network;
+mod scenario;
 mod sim_state;
 mod snapshot_task;
 mod tui;
@@ -39,7 +40,6 @@ mod tui_logger;
 use medium::SimMedium;
 use network::{SimInitiator, SimNodeInfo, SimResponder};
 use sim_state::{SimCommand, SimConfig, TuiState, DEFAULT_NODES, MAX_NODES};
-
 
 // =============================================================================
 // Static storage — allocated once, accessible for the program lifetime.
@@ -50,7 +50,8 @@ static IDENTITIES: StaticCell<[NodeIdentity; MAX_NODES]> = StaticCell::new();
 static NODE_INFOS: StaticCell<[SimNodeInfo; MAX_NODES]> = StaticCell::new();
 static ROUTING_TABLES: StaticCell<[AsyncMutex<CriticalSectionRawMutex, RoutingTable>; MAX_NODES]> =
     StaticCell::new();
-static UPTIMES: StaticCell<[AsyncMutex<CriticalSectionRawMutex, u32>; MAX_NODES]> = StaticCell::new();
+static UPTIMES: StaticCell<[AsyncMutex<CriticalSectionRawMutex, u32>; MAX_NODES]> =
+    StaticCell::new();
 
 // =============================================================================
 // Per-node combined behavior task
@@ -66,15 +67,26 @@ async fn run_node(
     sim_config: Arc<Mutex<SimConfig>>,
     tui_state: Arc<Mutex<TuiState>>,
 ) {
-    let capabilities = Capabilities(Capabilities::ROUTE | Capabilities::APPLICATION).0;
-
-    let mut responder = SimResponder::new(node_idx, medium, all_nodes);
-    let mut initiator =
-        SimInitiator::new(node_idx, medium, all_nodes, Arc::clone(&sim_config));
+    let mut responder = SimResponder::new(node_idx, medium, all_nodes, Arc::clone(&sim_config));
+    let mut initiator = SimInitiator::new(node_idx, medium, all_nodes, Arc::clone(&sim_config));
 
     join5(
-        run_responder_loop(&mut responder, identity, capabilities, routing_table, uptime),
-        run_initiator_loop(&mut initiator, identity, capabilities, routing_table, uptime),
+        behavior::run_responder_loop_dynamic(
+            node_idx,
+            &mut responder,
+            identity,
+            routing_table,
+            uptime,
+            Arc::clone(&sim_config),
+        ),
+        behavior::run_initiator_loop_dynamic(
+            node_idx,
+            &mut initiator,
+            identity,
+            routing_table,
+            uptime,
+            Arc::clone(&sim_config),
+        ),
         run_heartbeat_loop(uptime, routing_table),
         message_task::run_message_loop(node_idx, medium, Arc::clone(&tui_state)),
         message_task::run_sensor_loop(node_idx, medium, sim_config, tui_state),
@@ -114,8 +126,14 @@ async fn embassy_main(
 
     join(
         join(
-            join5(node!(0), node!(1), node!(2), node!(3), node!(4)),
-            join3(node!(5), node!(6), node!(7)),
+            join(
+                join5(node!(0), node!(1), node!(2), node!(3), node!(4)),
+                join5(node!(5), node!(6), node!(7), node!(8), node!(9)),
+            ),
+            join(
+                join5(node!(10), node!(11), node!(12), node!(13), node!(14)),
+                join5(node!(15), node!(16), node!(17), node!(18), node!(19)),
+            ),
         ),
         join(
             snapshot_task::run_snapshot_loop(
@@ -125,7 +143,14 @@ async fn embassy_main(
                 Arc::clone(&sim_config),
                 Arc::clone(&tui_state),
             ),
-            command_task::run_command_loop(cmd_rx, medium, sim_config, tui_state),
+            command_task::run_command_loop(
+                cmd_rx,
+                medium,
+                sim_config,
+                tui_state,
+                routing_tables,
+                uptimes,
+            ),
         ),
     )
     .await;
@@ -146,7 +171,9 @@ fn main() {
 
     // ── Shared state ──────────────────────────────────────────────────────────
     let tui_state = Arc::new(Mutex::new(TuiState::default()));
-    let sim_config = Arc::new(Mutex::new(SimConfig::default()));
+    let sim_config = Arc::new(Mutex::new(scenario::build_config(
+        scenario::default_scenario(),
+    )));
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<SimCommand>();
     let cmd_rx = Arc::new(Mutex::new(cmd_rx));
 
@@ -167,11 +194,7 @@ fn main() {
             mac[0] = i as u8;
             mac[1..6].copy_from_slice(&short_addr[1..6]);
             log::info!("Node {}: short_addr={:02x?}", i, &short_addr[..4]);
-            SimNodeInfo {
-                short_addr,
-                capabilities: Capabilities(Capabilities::ROUTE | Capabilities::APPLICATION).0,
-                mac,
-            }
+            SimNodeInfo { short_addr, mac }
         }));
 
     let routing_tables: &'static [AsyncMutex<CriticalSectionRawMutex, RoutingTable>; MAX_NODES] =

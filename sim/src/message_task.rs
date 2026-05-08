@@ -6,7 +6,7 @@ use embassy_time::{Duration, Timer};
 use rand::Rng as _;
 
 use crate::medium::SimMedium;
-use crate::sim_state::{MessageEntry, MessageKind, NodeType, SimConfig, TuiState, MAX_NODES};
+use crate::sim_state::{MessageKind, NodeType, SimConfig, TuiState, MAX_NODES};
 
 /// Receives application messages from `msg_inbox[node_idx]` and logs them.
 pub async fn run_message_loop(
@@ -18,14 +18,7 @@ pub async fn run_message_loop(
         let msg = medium.msg_inbox[node_idx].receive().await;
 
         let mut state = tui_state.lock().unwrap();
-        let entry = MessageEntry {
-            time_secs: state.elapsed_secs,
-            from_idx: msg.from_idx,
-            to_idx: msg.to_idx,
-            kind: msg.kind,
-            body: msg.body.as_str().to_string(),
-        };
-        state.push_message(entry);
+        state.mark_trace_delivered(msg.trace_id);
         state.msgs_received[node_idx] = state.msgs_received[node_idx].saturating_add(1);
     }
 }
@@ -41,14 +34,20 @@ pub async fn run_sensor_loop(
     tui_state: Arc<Mutex<TuiState>>,
 ) -> ! {
     loop {
-        let (interval, sensor_auto, n_active, node_type) = {
+        let (interval, sensor_auto, n_active, node_type, emit_sensor) = {
             let cfg = sim_config.lock().unwrap();
-            (cfg.sensor_interval_secs, cfg.sensor_auto, cfg.n_active, cfg.node_types[node_idx])
+            (
+                cfg.sensor_interval_secs,
+                cfg.sensor_auto,
+                cfg.n_active,
+                cfg.node_types[node_idx],
+                cfg.node_behaviors[node_idx].emit_sensor,
+            )
         };
 
         Timer::after(Duration::from_secs(interval)).await;
 
-        if !sensor_auto || node_idx >= n_active {
+        if !sensor_auto || node_idx >= n_active || !emit_sensor {
             continue;
         }
         if !matches!(node_type, NodeType::Sensor | NodeType::FullNode) {
@@ -68,18 +67,33 @@ pub async fn run_sensor_loop(
 
         let temp: f32 = 20.0 + rand::thread_rng().gen_range(0.0f32..10.0);
         let body_str = format!("{:.1}°C", temp);
-        let mut body = heapless::String::<64>::new();
-        let _ = body.push_str(&body_str);
-
-        let msg = crate::medium::SimDataMessage {
-            from_idx: node_idx,
-            to_idx: target_idx,
-            kind: MessageKind::Temperature,
-            body,
-        };
-
         // Deliver to target's inbox (message_loop on that node logs it).
         if target_idx < MAX_NODES {
+            let (source_caps, target_caps, link_enabled_at_send, drop_prob_at_send) = {
+                let cfg = sim_config.lock().unwrap();
+                (
+                    cfg.capabilities[node_idx],
+                    cfg.capabilities[target_idx],
+                    cfg.link_enabled[node_idx][target_idx],
+                    cfg.drop_prob[node_idx][target_idx],
+                )
+            };
+
+            let trace_id = {
+                let mut state = tui_state.lock().unwrap();
+                state.create_trace(
+                    node_idx,
+                    target_idx,
+                    MessageKind::Temperature,
+                    body_str.clone(),
+                    source_caps,
+                    target_caps,
+                    link_enabled_at_send,
+                    drop_prob_at_send,
+                )
+            };
+
+            let msg = crate::medium::SimDataMessage { trace_id };
             medium.msg_inbox[target_idx].send(msg).await;
             let mut state = tui_state.lock().unwrap();
             state.msgs_sent[node_idx] = state.msgs_sent[node_idx].saturating_add(1);

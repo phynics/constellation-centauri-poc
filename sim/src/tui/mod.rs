@@ -1,8 +1,8 @@
 //! TUI entry point — runs on the main thread using crossterm + ratatui.
 
 use std::io;
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::{
@@ -48,6 +48,11 @@ fn run_loop(
     cmd_tx: &Sender<SimCommand>,
 ) -> io::Result<()> {
     loop {
+        {
+            let state = tui_state.lock().unwrap();
+            app.clamp_selection(state.traces.len());
+        }
+
         terminal.draw(|f| {
             // Grab snapshots of shared state for this render frame.
             let state = tui_state.lock().unwrap();
@@ -57,7 +62,7 @@ fn run_loop(
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
-                if app.handle_key(key, sim_config, cmd_tx) {
+                if app.handle_key(key, sim_config, cmd_tx, tui_state) {
                     break;
                 }
             }

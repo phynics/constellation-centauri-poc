@@ -6,12 +6,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use heapless::Vec;
 use embassy_time::{Duration, Timer};
+use heapless::Vec;
 use rand::Rng as _;
 
 use routing_core::network::{
-    DiscoveryEvent, H2hInitiator, H2hResponder, InboundH2h, MAX_SCAN_RESULTS, NetworkError,
+    DiscoveryEvent, H2hInitiator, H2hResponder, InboundH2h, NetworkError, MAX_SCAN_RESULTS,
 };
 use routing_core::protocol::h2h::H2hPayload;
 
@@ -25,7 +25,6 @@ use crate::sim_state::{SimConfig, MAX_NODES};
 /// Static info about every simulated node, shared with all `SimInitiator`s.
 pub struct SimNodeInfo {
     pub short_addr: [u8; 8],
-    pub capabilities: u16,
     /// MAC used on the simulated medium.  Convention: `mac[0] = node_index`.
     pub mac: [u8; 6],
 }
@@ -36,6 +35,7 @@ pub struct SimResponder {
     node_idx: usize,
     medium: &'static SimMedium,
     all_nodes: &'static [SimNodeInfo; MAX_NODES],
+    sim_config: Arc<Mutex<SimConfig>>,
     pending_sender: Option<usize>,
 }
 
@@ -44,8 +44,15 @@ impl SimResponder {
         node_idx: usize,
         medium: &'static SimMedium,
         all_nodes: &'static [SimNodeInfo; MAX_NODES],
+        sim_config: Arc<Mutex<SimConfig>>,
     ) -> Self {
-        Self { node_idx, medium, all_nodes, pending_sender: None }
+        Self {
+            node_idx,
+            medium,
+            all_nodes,
+            sim_config,
+            pending_sender: None,
+        }
     }
 }
 
@@ -53,22 +60,44 @@ impl H2hResponder for SimResponder {
     async fn receive_h2h(&mut self) -> Result<InboundH2h, NetworkError> {
         let req = self.medium.h2h_req[self.node_idx].receive().await;
 
+        let respond_h2h = {
+            let cfg = self.sim_config.lock().unwrap();
+            self.node_idx < cfg.n_active && cfg.node_behaviors[self.node_idx].respond_h2h
+        };
+
+        if !respond_h2h {
+            self.medium.h2h_resp[req.sender_idx]
+                .send(SimH2hResponse {
+                    result: Err(NetworkError::ConnectionFailed),
+                })
+                .await;
+            return Err(NetworkError::ConnectionFailed);
+        }
+
         let peer_payload = deserialize_payload(&req.payload_bytes, req.payload_len)
             .ok_or(NetworkError::ProtocolError)?;
 
         let peer_mac = self.all_nodes[req.sender_idx].mac;
         self.pending_sender = Some(req.sender_idx);
 
-        Ok(InboundH2h { peer_mac, peer_payload })
+        Ok(InboundH2h {
+            peer_mac,
+            peer_payload,
+        })
     }
 
     async fn send_h2h_response(&mut self, payload: &H2hPayload) -> Result<(), NetworkError> {
-        let sender_idx = self.pending_sender.take().ok_or(NetworkError::ProtocolError)?;
+        let sender_idx = self
+            .pending_sender
+            .take()
+            .ok_or(NetworkError::ProtocolError)?;
 
         let (bytes, len) = serialize_payload(payload).ok_or(NetworkError::ProtocolError)?;
 
         self.medium.h2h_resp[sender_idx]
-            .send(SimH2hResponse { result: Ok((bytes, len)) })
+            .send(SimH2hResponse {
+                result: Ok((bytes, len)),
+            })
             .await;
 
         Ok(())
@@ -91,7 +120,12 @@ impl SimInitiator {
         all_nodes: &'static [SimNodeInfo; MAX_NODES],
         sim_config: Arc<Mutex<SimConfig>>,
     ) -> Self {
-        Self { node_idx, medium, all_nodes, sim_config }
+        Self {
+            node_idx,
+            medium,
+            all_nodes,
+            sim_config,
+        }
     }
 }
 
@@ -103,13 +137,16 @@ impl H2hInitiator for SimInitiator {
         let config = self.sim_config.lock().unwrap();
 
         // Inactive nodes don't scan.
-        if self.node_idx >= config.n_active {
+        if self.node_idx >= config.n_active || !config.node_behaviors[self.node_idx].scan {
             return Vec::new();
         }
 
         let mut results = Vec::new();
         for (i, node) in self.all_nodes.iter().enumerate() {
             if i == self.node_idx || i >= config.n_active {
+                continue;
+            }
+            if !config.node_behaviors[i].advertise {
                 continue;
             }
             if !config.link_enabled[self.node_idx][i] {
@@ -123,7 +160,7 @@ impl H2hInitiator for SimInitiator {
             }
             let _ = results.push(DiscoveryEvent {
                 short_addr: node.short_addr,
-                capabilities: node.capabilities,
+                capabilities: config.capabilities[i],
                 mac: node.mac,
             });
         }
@@ -144,7 +181,13 @@ impl H2hInitiator for SimInitiator {
         // Check config: inactive peer or simulated packet drop.
         {
             let config = self.sim_config.lock().unwrap();
-            if peer_idx >= config.n_active {
+            if self.node_idx >= config.n_active || peer_idx >= config.n_active {
+                return Err(NetworkError::ConnectionFailed);
+            }
+            if !config.node_behaviors[self.node_idx].initiate_h2h {
+                return Err(NetworkError::ConnectionFailed);
+            }
+            if !config.node_behaviors[peer_idx].respond_h2h {
                 return Err(NetworkError::ConnectionFailed);
             }
             if !config.link_enabled[self.node_idx][peer_idx] {
@@ -199,11 +242,7 @@ mod tests {
         mac[0] = idx as u8;
         mac[1] = idx as u8 + 0x10;
 
-        SimNodeInfo {
-            short_addr,
-            capabilities: 0x1000 + idx as u16,
-            mac,
-        }
+        SimNodeInfo { short_addr, mac }
     }
 
     fn test_nodes() -> &'static [SimNodeInfo; MAX_NODES] {
@@ -231,11 +270,7 @@ mod tests {
             let mut mac = [0u8; 6];
             mac[0] = i as u8;
             mac[1..6].copy_from_slice(&short_addr[1..6]);
-            SimNodeInfo {
-                short_addr,
-                capabilities: 0x1000 + i as u16,
-                mac,
-            }
+            SimNodeInfo { short_addr, mac }
         })))
     }
 
@@ -356,15 +391,28 @@ mod tests {
         let expected_response_peer_count = response_payload.peer_count;
 
         let responder_thread = std::thread::spawn({
+            let config = Arc::clone(&config);
             move || {
-                let mut responder = SimResponder::new(1, medium, nodes);
+                let mut responder = SimResponder::new(1, medium, nodes, config);
                 block_on(async {
                     let inbound = responder.receive_h2h().await.unwrap();
                     assert_eq!(inbound.peer_mac, nodes[0].mac);
-                    assert_eq!(inbound.peer_payload.full_pubkey, request_payload.full_pubkey);
-                    assert_eq!(inbound.peer_payload.capabilities, request_payload.capabilities);
-                    assert_eq!(inbound.peer_payload.uptime_secs, request_payload.uptime_secs);
-                    responder.send_h2h_response(&response_payload).await.unwrap();
+                    assert_eq!(
+                        inbound.peer_payload.full_pubkey,
+                        request_payload.full_pubkey
+                    );
+                    assert_eq!(
+                        inbound.peer_payload.capabilities,
+                        request_payload.capabilities
+                    );
+                    assert_eq!(
+                        inbound.peer_payload.uptime_secs,
+                        request_payload.uptime_secs
+                    );
+                    responder
+                        .send_h2h_response(&response_payload)
+                        .await
+                        .unwrap();
                 });
             }
         });
@@ -405,7 +453,7 @@ mod tests {
                 let inserted = b_table.peers.push(routing_core::routing::table::PeerEntry {
                     pubkey: identities[node_c].pubkey(),
                     short_addr: nodes[node_c].short_addr,
-                    capabilities: nodes[node_c].capabilities,
+                    capabilities: config.lock().unwrap().capabilities[node_c],
                     bloom: routing_core::routing::bloom::BloomFilter::new(),
                     transport_addr: TransportAddr::ble(nodes[node_c].mac),
                     last_seen_ticks: 1,
@@ -417,19 +465,27 @@ mod tests {
             }
 
             let mut initiator = SimInitiator::new(node_a, medium, nodes, Arc::clone(&config));
-            let mut responder = SimResponder::new(node_b, medium, nodes);
+            let mut responder = SimResponder::new(node_b, medium, nodes, Arc::clone(&config));
 
             let scan_results = initiator.scan(0).await;
             apply_discovery_events(&routing_tables[node_a], &scan_results).await;
 
             let response = routing_core::behavior::build_h2h_payload(
                 &identities[node_b],
-                nodes[node_b].capabilities,
+                {
+                    let cfg = config.lock().unwrap();
+                    cfg.capabilities[node_b]
+                },
                 &uptimes[node_b],
                 &routing_tables[node_b],
                 identities[node_a].short_addr(),
             )
             .await;
+
+            let initiator_caps = {
+                let cfg = config.lock().unwrap();
+                cfg.capabilities[node_a]
+            };
 
             let responder_thread = std::thread::spawn(move || {
                 block_on(async {
@@ -442,7 +498,7 @@ mod tests {
             run_initiator_h2h_once(
                 &mut initiator,
                 &identities[node_a],
-                nodes[node_a].capabilities,
+                initiator_caps,
                 &routing_tables[node_a],
                 &uptimes[node_a],
             )
@@ -494,7 +550,9 @@ mod tests {
             let disabled_scan = initiator.scan(0).await;
             assert!(disabled_scan.is_empty());
 
-            let disabled_h2h = initiator.initiate_h2h(nodes[node_b].mac, &test_payload(0x55)).await;
+            let disabled_h2h = initiator
+                .initiate_h2h(nodes[node_b].mac, &test_payload(0x55))
+                .await;
             assert!(matches!(disabled_h2h, Err(NetworkError::ConnectionFailed)));
 
             {
@@ -508,14 +566,22 @@ mod tests {
 
             let response = routing_core::behavior::build_h2h_payload(
                 &identities[node_b],
-                nodes[node_b].capabilities,
+                {
+                    let cfg = config.lock().unwrap();
+                    cfg.capabilities[node_b]
+                },
                 &uptimes[node_b],
                 &routing_tables[node_b],
                 identities[node_a].short_addr(),
             )
             .await;
 
-            let mut responder = SimResponder::new(node_b, medium, nodes);
+            let initiator_caps = {
+                let cfg = config.lock().unwrap();
+                cfg.capabilities[node_a]
+            };
+
+            let mut responder = SimResponder::new(node_b, medium, nodes, Arc::clone(&config));
             let responder_thread = std::thread::spawn(move || {
                 block_on(async {
                     let inbound = responder.receive_h2h().await.unwrap();
@@ -527,7 +593,7 @@ mod tests {
             run_initiator_h2h_once(
                 &mut initiator,
                 &identities[node_a],
-                nodes[node_a].capabilities,
+                initiator_caps,
                 &routing_tables[node_a],
                 &uptimes[node_a],
             )
@@ -540,5 +606,31 @@ mod tests {
             assert_eq!(b_entry.trust, TRUST_DIRECT);
             assert_eq!(b_entry.pubkey, identities[node_b].pubkey());
         });
+    }
+
+    #[test]
+    fn scan_excludes_non_advertising_peers() {
+        let medium = test_medium();
+        let nodes = test_nodes();
+        let config = test_config(2);
+        config.lock().unwrap().node_behaviors[1].advertise = false;
+
+        let mut initiator = SimInitiator::new(0, medium, nodes, config);
+        let results = block_on(initiator.scan(0));
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn initiate_h2h_fails_when_responder_behavior_is_disabled() {
+        let medium = test_medium();
+        let nodes = test_nodes();
+        let config = test_config(2);
+        config.lock().unwrap().node_behaviors[1].respond_h2h = false;
+
+        let mut initiator = SimInitiator::new(0, medium, nodes, config);
+        let result = block_on(initiator.initiate_h2h(nodes[1].mac, &test_payload(0x21)));
+
+        assert!(matches!(result, Err(NetworkError::ConnectionFailed)));
     }
 }

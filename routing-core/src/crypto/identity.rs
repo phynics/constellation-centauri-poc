@@ -1,6 +1,6 @@
-use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier};
-use sha2::{Sha256, Digest};
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::{CryptoRngCore, RngCore};
+use sha2::{Digest, Sha256};
 
 pub type PubKey = [u8; 32];
 pub type ShortAddr = [u8; 8];

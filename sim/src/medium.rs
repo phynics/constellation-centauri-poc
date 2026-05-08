@@ -12,10 +12,10 @@
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 
-use routing_core::protocol::h2h::H2hPayload;
 use routing_core::network::NetworkError;
+use routing_core::protocol::h2h::H2hPayload;
 
-use crate::sim_state::{MAX_NODES, MessageKind};
+use crate::sim_state::MAX_NODES;
 
 /// Maximum H2H payload size in bytes.  Must be >= H2hPayload::max_size() = 321.
 const PAYLOAD_BUF: usize = 512;
@@ -36,10 +36,7 @@ pub struct SimH2hResponse {
 
 /// Application-level data message delivered between nodes.
 pub struct SimDataMessage {
-    pub from_idx: usize,
-    pub to_idx: usize,
-    pub kind: MessageKind,
-    pub body: heapless::String<64>,
+    pub trace_id: u64,
 }
 
 /// Per-node mailboxes.  All channels use `CriticalSectionRawMutex` so they work
@@ -57,16 +54,70 @@ impl SimMedium {
     pub const fn new() -> Self {
         Self {
             h2h_req: [
-                Channel::new(), Channel::new(), Channel::new(), Channel::new(),
-                Channel::new(), Channel::new(), Channel::new(), Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
             ],
             h2h_resp: [
-                Channel::new(), Channel::new(), Channel::new(), Channel::new(),
-                Channel::new(), Channel::new(), Channel::new(), Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
             ],
             msg_inbox: [
-                Channel::new(), Channel::new(), Channel::new(), Channel::new(),
-                Channel::new(), Channel::new(), Channel::new(), Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
+                Channel::new(),
             ],
         }
     }

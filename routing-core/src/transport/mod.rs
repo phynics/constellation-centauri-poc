@@ -10,6 +10,9 @@ pub struct TransportAddr {
 impl TransportAddr {
     /// Create a BLE transport address.
     pub const fn ble(mac: [u8; 6]) -> Self {
-        Self { addr_type: 0, addr: mac }
+        Self {
+            addr_type: 0,
+            addr: mac,
+        }
     }
 }

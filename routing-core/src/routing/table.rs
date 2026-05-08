@@ -1,10 +1,10 @@
-use heapless::Vec;
-use crate::config::{MAX_PEERS, H2H_MAX_PEER_ENTRIES, TICK_HZ};
-use crate::crypto::identity::{PubKey, ShortAddr, short_addr_of};
+use crate::config::{H2H_MAX_PEER_ENTRIES, MAX_PEERS, TICK_HZ};
+use crate::crypto::identity::{short_addr_of, PubKey, ShortAddr};
 use crate::protocol::dedup::SeenMessages;
 use crate::protocol::h2h::{H2hPayload, PeerInfo};
 use crate::routing::bloom::BloomFilter;
 use crate::transport::TransportAddr;
+use heapless::Vec;
 
 /// Scaling factor for integer weight computation (avoids floats).
 const WEIGHT_SCALE: u64 = 10_000;
@@ -69,12 +69,12 @@ impl RoutingTable {
         // Resolve pubkey: use provided value if present, otherwise keep existing
         let resolved_pubkey = match payload.full_pubkey {
             Some(pk) => pk,
-            None => {
-                self.peers.iter()
-                    .find(|p| p.short_addr == short_addr)
-                    .map(|p| p.pubkey)
-                    .unwrap_or([0u8; 32])
-            }
+            None => self
+                .peers
+                .iter()
+                .find(|p| p.short_addr == short_addr)
+                .map(|p| p.pubkey)
+                .unwrap_or([0u8; 32]),
         };
 
         // Update the direct peer
@@ -109,7 +109,11 @@ impl RoutingTable {
                 }
                 let hop = pi.hop_count.saturating_add(1);
 
-                if let Some(entry) = self.peers.iter_mut().find(|p| p.short_addr == pi_short_addr) {
+                if let Some(entry) = self
+                    .peers
+                    .iter_mut()
+                    .find(|p| p.short_addr == pi_short_addr)
+                {
                     // Only update if our existing info is stale or lower trust
                     if entry.trust <= TRUST_INDIRECT {
                         entry.pubkey = pi.pubkey;
@@ -125,7 +129,10 @@ impl RoutingTable {
                         short_addr: pi_short_addr,
                         capabilities: pi.capabilities,
                         bloom: BloomFilter::new(),
-                        transport_addr: TransportAddr { addr_type: 0, addr: [0u8; 6] },
+                        transport_addr: TransportAddr {
+                            addr_type: 0,
+                            addr: [0u8; 6],
+                        },
                         last_seen_ticks: now_ticks,
                         hop_count: hop,
                         trust: TRUST_INDIRECT,
@@ -266,7 +273,8 @@ impl RoutingTable {
 
             // Fallback: pick the first unpicked candidate
             let idx = selected.unwrap_or_else(|| {
-                candidates.iter()
+                candidates
+                    .iter()
                     .find(|&&(i, _)| !picked[i])
                     .map(|&(i, _)| i)
                     .unwrap_or(0)
@@ -464,13 +472,19 @@ mod tests {
         let partner_addr = short_addr_of(&partner_pubkey);
 
         let mut table = RoutingTable::new(self_addr);
-        let _ = table.peers.push(direct_peer_entry(direct_pubkey, original_transport, 10));
+        let _ = table
+            .peers
+            .push(direct_peer_entry(direct_pubkey, original_transport, 10));
 
-        let payload = payload(Some(partner_pubkey), 0xAAAA, &[PeerInfo {
-            pubkey: direct_pubkey,
-            capabilities: 0xBBBB,
-            hop_count: 4,
-        }]);
+        let payload = payload(
+            Some(partner_pubkey),
+            0xAAAA,
+            &[PeerInfo {
+                pubkey: direct_pubkey,
+                capabilities: 0xBBBB,
+                hop_count: 4,
+            }],
+        );
 
         table.update_peer_from_h2h(&payload, partner_addr, TransportAddr::ble(mac(0xC2)), 100);
 

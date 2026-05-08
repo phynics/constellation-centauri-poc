@@ -1,5 +1,5 @@
-use routing_core::crypto::identity::NodeIdentity;
 use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
+use routing_core::crypto::identity::NodeIdentity;
 
 /// Magic bytes to identify a provisioned node.
 /// "CSTL" (Constellation) in ASCII.
@@ -98,7 +98,8 @@ pub fn save_identity<S: NorFlash>(
     // Reserved bytes remain 0x00
 
     // Write secret key
-    buf[SECRET_KEY_OFFSET..SECRET_KEY_OFFSET + 32].copy_from_slice(identity.signing_key().as_bytes());
+    buf[SECRET_KEY_OFFSET..SECRET_KEY_OFFSET + 32]
+        .copy_from_slice(identity.signing_key().as_bytes());
 
     // Note: For PoC, we skip erase operation due to partition configuration complexity.
     // In production, configure a dedicated NVS partition in partition table.
@@ -106,7 +107,7 @@ pub fn save_identity<S: NorFlash>(
 
     // Attempt to write (may fail without erase, but won't crash)
     match storage.write(MAGIC_OFFSET as u32, &buf) {
-        Ok(_) => {}, // Success - flash supports in-place write or was pre-erased
+        Ok(_) => {} // Success - flash supports in-place write or was pre-erased
         Err(_) => return Err(StorageError::WriteFailed),
     }
 

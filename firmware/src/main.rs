@@ -42,10 +42,7 @@ use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
 use bt_hci::cmd::le::{
-    LeAddDeviceToFilterAcceptList,
-    LeClearFilterAcceptList,
-    LeCreateConn,
-    LeSetScanEnable,
+    LeAddDeviceToFilterAcceptList, LeClearFilterAcceptList, LeCreateConn, LeSetScanEnable,
     LeSetScanParams,
 };
 use bt_hci::controller::{ControllerCmdAsync, ControllerCmdSync};
@@ -58,9 +55,7 @@ use routing_core::crypto::identity::NodeIdentity;
 use routing_core::node::roles::Capabilities;
 use routing_core::routing::table::RoutingTable;
 
-use transport::ble_network::{
-    parse_discovery_from_adv, BleInitiator, BleResponder, DiscoveryInfo,
-};
+use transport::ble_network::{parse_discovery_from_adv, BleInitiator, BleResponder, DiscoveryInfo};
 
 // =============================================================================
 // Constants
@@ -122,8 +117,8 @@ async fn main(_spawner: Spawner) {
 
     println!("Initializing BLE controller...");
     let bluetooth = peripherals.BT;
-    let connector = BleConnector::new(bluetooth, Default::default())
-        .expect("Failed to create BLE connector");
+    let connector =
+        BleConnector::new(bluetooth, Default::default()).expect("Failed to create BLE connector");
     let controller: ExternalController<_, 20> = ExternalController::new(connector);
 
     let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
@@ -154,12 +149,8 @@ async fn main(_spawner: Spawner) {
 
     let capabilities = Capabilities(Capabilities::ROUTE | Capabilities::APPLICATION);
 
-    let mut ble_responder = BleResponder::new(
-        peripheral,
-        &stack,
-        *identity.short_addr(),
-        capabilities.0,
-    );
+    let mut ble_responder =
+        BleResponder::new(peripheral, &stack, *identity.short_addr(), capabilities.0);
 
     let mut ble_initiator = BleInitiator::new(central, &stack, address, discovery_rx);
 
@@ -202,7 +193,9 @@ impl EventHandler for ConstellationScanHandler {
                 continue;
             }
             if let Some(info) = parse_discovery_from_adv(report.data) {
-                let _ = self.discovery_rx.try_send((report.addr, report.addr_kind, info));
+                let _ = self
+                    .discovery_rx
+                    .try_send((report.addr, report.addr_kind, info));
             }
         }
     }

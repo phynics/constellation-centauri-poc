@@ -14,7 +14,7 @@
 //!
 //! Both nodes compute the same values with no coordination.
 
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 use crate::config::{H2H_CYCLE_SECS, H2H_MAX_PEER_ENTRIES};
 use crate::crypto::identity::{PubKey, ShortAddr};
@@ -85,7 +85,11 @@ impl H2hPayload {
 
     pub fn serialize(&self, buf: &mut [u8]) -> Result<usize, PacketError> {
         let has_pubkey = self.full_pubkey.is_some();
-        let header_size = if has_pubkey { Self::HEADER_WITH_PUBKEY } else { Self::HEADER_MIN };
+        let header_size = if has_pubkey {
+            Self::HEADER_WITH_PUBKEY
+        } else {
+            Self::HEADER_MIN
+        };
         let count = self.peer_count as usize;
         let needed = header_size + count * PEER_INFO_SIZE;
         if buf.len() < needed {

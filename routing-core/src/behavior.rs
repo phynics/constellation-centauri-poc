@@ -10,7 +10,7 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
 
 use crate::config::{H2H_CYCLE_SECS, TICK_HZ};
-use crate::crypto::identity::{NodeIdentity, ShortAddr, short_addr_of};
+use crate::crypto::identity::{short_addr_of, NodeIdentity, ShortAddr};
 use crate::network::{DiscoveryEvent, H2hInitiator, H2hResponder, MAX_SCAN_RESULTS};
 use crate::protocol::h2h::{self, H2hPayload};
 use crate::routing::table::RoutingTable;
@@ -41,14 +41,14 @@ pub async fn build_h2h_payload<M: RawMutex>(
     let (peers, peer_count, include_pubkey) = {
         let table = routing_table.lock().await;
 
-        let partner_knows_us = table.find_peer(partner_addr)
+        let partner_knows_us = table
+            .find_peer(partner_addr)
             .map(|e| e.pubkey != [0u8; 32])
             .unwrap_or(false);
 
         let addr_bytes = identity.short_addr();
-        let addr_u32 = u32::from_le_bytes([
-            addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3],
-        ]);
+        let addr_u32 =
+            u32::from_le_bytes([addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3]]);
         let seed = addr_u32 ^ (now as u32);
 
         let (peers, count) = table.top_peers_for(partner_addr, now, seed);
@@ -56,7 +56,11 @@ pub async fn build_h2h_payload<M: RawMutex>(
     };
 
     H2hPayload {
-        full_pubkey: if include_pubkey { Some(identity.pubkey()) } else { None },
+        full_pubkey: if include_pubkey {
+            Some(identity.pubkey())
+        } else {
+            None
+        },
         capabilities,
         uptime_secs,
         peers,
@@ -73,12 +77,8 @@ pub async fn apply_discovery_events<M: RawMutex>(
     let now = Instant::now().as_ticks();
     for event in events.iter() {
         let transport = TransportAddr::ble(event.mac);
-        let is_new = table.update_peer_compact(
-            event.short_addr,
-            event.capabilities,
-            transport,
-            now,
-        );
+        let is_new =
+            table.update_peer_compact(event.short_addr, event.capabilities, transport, now);
         if is_new {
             log::info!(
                 "[central] New peer {:02x?} ({} total)",
@@ -98,9 +98,7 @@ pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
     let table = routing_table.lock().await;
     let mut v = heapless::Vec::new();
     for peer in table.peers.iter() {
-        if peer.transport_addr.addr != [0u8; 6]
-            && h2h::is_initiator(&our_addr, &peer.short_addr)
-        {
+        if peer.transport_addr.addr != [0u8; 6] && h2h::is_initiator(&our_addr, &peer.short_addr) {
             let _ = v.push((peer.short_addr, peer.transport_addr.addr));
         }
     }
@@ -124,9 +122,8 @@ pub async fn run_initiator_h2h_once<M, I>(
     let peer_snapshots = collect_h2h_peer_snapshots(identity, routing_table).await;
 
     for (peer_addr, peer_mac) in peer_snapshots.iter() {
-        let payload = build_h2h_payload(
-            identity, capabilities, uptime, routing_table, peer_addr,
-        ).await;
+        let payload =
+            build_h2h_payload(identity, capabilities, uptime, routing_table, peer_addr).await;
 
         match initiator.initiate_h2h(*peer_mac, &payload).await {
             Ok(peer_payload) => {
@@ -145,11 +142,7 @@ pub async fn run_initiator_h2h_once<M, I>(
                 );
             }
             Err(e) => {
-                log::warn!(
-                    "[central] H2H failed to {:02x?}: {:?}",
-                    &peer_addr[..4],
-                    e
-                );
+                log::warn!("[central] H2H failed to {:02x?}: {:?}", &peer_addr[..4], e);
             }
         }
     }
@@ -186,7 +179,9 @@ where
                     Some(pk) => short_addr_of(&pk),
                     None => {
                         let table = routing_table.lock().await;
-                        table.peers.iter()
+                        table
+                            .peers
+                            .iter()
                             .find(|p| p.transport_addr.addr == inbound.peer_mac)
                             .map(|p| p.short_addr)
                             .unwrap_or([0u8; 8])
@@ -203,8 +198,13 @@ where
                 // reflects pre-exchange state (avoids echoing their own peers
                 // back to them in the same exchange).
                 let response = build_h2h_payload(
-                    identity, capabilities, uptime, routing_table, &partner_short,
-                ).await;
+                    identity,
+                    capabilities,
+                    uptime,
+                    routing_table,
+                    &partner_short,
+                )
+                .await;
 
                 // Update routing table with peer's payload.
                 {
@@ -216,10 +216,7 @@ where
                         transport,
                         Instant::now().as_ticks(),
                     );
-                    log::info!(
-                        "[periph] H2H done, peers={}",
-                        table.peers.len()
-                    );
+                    log::info!("[periph] H2H done, peers={}", table.peers.len());
                 }
 
                 if let Err(e) = responder.send_h2h_response(&response).await {
@@ -270,7 +267,10 @@ where
         let peer_snapshots = collect_h2h_peer_snapshots(identity, routing_table).await;
 
         if !peer_snapshots.is_empty() {
-            log::info!("[central] H2H cycle: {} peers to connect", peer_snapshots.len());
+            log::info!(
+                "[central] H2H cycle: {} peers to connect",
+                peer_snapshots.len()
+            );
         }
 
         for (peer_addr, peer_mac) in peer_snapshots.iter() {
@@ -281,11 +281,14 @@ where
                 Timer::at(target_time).await;
             }
 
-            log::info!("[central] H2H → {:02x?} (slot {}s)", &peer_addr[..4], offset);
+            log::info!(
+                "[central] H2H → {:02x?} (slot {}s)",
+                &peer_addr[..4],
+                offset
+            );
 
-            let payload = build_h2h_payload(
-                identity, capabilities, uptime, routing_table, peer_addr,
-            ).await;
+            let payload =
+                build_h2h_payload(identity, capabilities, uptime, routing_table, peer_addr).await;
 
             match initiator.initiate_h2h(*peer_mac, &payload).await {
                 Ok(peer_payload) => {
@@ -304,11 +307,7 @@ where
                     );
                 }
                 Err(e) => {
-                    log::warn!(
-                        "[central] H2H failed to {:02x?}: {:?}",
-                        &peer_addr[..4],
-                        e
-                    );
+                    log::warn!("[central] H2H failed to {:02x?}: {:?}", &peer_addr[..4], e);
                 }
             }
         }

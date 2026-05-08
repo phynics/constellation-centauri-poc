@@ -1,6 +1,6 @@
 use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::fs;
+use std::hash::{Hash, Hasher};
 
 fn main() {
     println!("cargo:rustc-link-arg-bins=-Tlinkall.x");

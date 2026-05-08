@@ -1,5 +1,5 @@
-use heapless::Deque;
 use crate::config::SEEN_MESSAGES_CAPACITY;
+use heapless::Deque;
 
 pub struct SeenMessages {
     ring: Deque<[u8; 8], SEEN_MESSAGES_CAPACITY>,
@@ -7,9 +7,7 @@ pub struct SeenMessages {
 
 impl SeenMessages {
     pub const fn new() -> Self {
-        Self {
-            ring: Deque::new(),
-        }
+        Self { ring: Deque::new() }
     }
 
     /// Returns `true` if the message was already seen. Inserts it if not.

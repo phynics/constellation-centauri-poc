@@ -148,9 +148,7 @@ fn ed25519_to_x25519_secret(ed25519_secret: &[u8; 32]) -> StaticSecret {
 /// Process: Decompress Edwards point -> convert to Montgomery u-coordinate
 fn ed25519_to_x25519_public(ed25519_pubkey: &PubKey) -> Result<PublicKey, CryptoError> {
     let compressed = CompressedEdwardsY(*ed25519_pubkey);
-    let edwards_point = compressed
-        .decompress()
-        .ok_or(CryptoError::InvalidPoint)?;
+    let edwards_point = compressed.decompress().ok_or(CryptoError::InvalidPoint)?;
 
     let montgomery = edwards_point.to_montgomery();
     Ok(PublicKey::from(montgomery.to_bytes()))

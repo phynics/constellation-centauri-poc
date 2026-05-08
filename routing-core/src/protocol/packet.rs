@@ -483,7 +483,9 @@ mod tests {
     #[test]
     fn rng_backed_builder_uses_rng_message_id() {
         let identity = identity(0x05);
-        let mut rng = FixedRng { next: [1, 2, 3, 4, 5, 6, 7, 8] };
+        let mut rng = FixedRng {
+            next: [1, 2, 3, 4, 5, 6, 7, 8],
+        };
         let mut buf = [0u8; 256];
 
         let written = build_packet(

@@ -3,9 +3,9 @@
 //! These traits decouple the routing algorithm from the physical transport
 //! (BLE on firmware, in-memory channels on the simulator).
 
-use heapless::Vec;
 use crate::crypto::identity::ShortAddr;
 use crate::protocol::h2h::H2hPayload;
+use heapless::Vec;
 
 /// Maximum scan results returned per `scan()` call.
 pub const MAX_SCAN_RESULTS: usize = 16;

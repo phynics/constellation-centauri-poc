@@ -2,8 +2,10 @@
 
 use std::collections::VecDeque;
 
-pub const MAX_NODES: usize = 8;
-pub const DEFAULT_NODES: usize = 5;
+use routing_core::node::roles::Capabilities;
+
+pub const MAX_NODES: usize = 20;
+pub const DEFAULT_NODES: usize = 12;
 
 // ── NodeType ──────────────────────────────────────────────────────────────────
 
@@ -17,6 +19,7 @@ pub enum NodeType {
 }
 
 impl NodeType {
+    #[allow(dead_code)]
     pub fn cycle(self) -> Self {
         match self {
             NodeType::FullNode => NodeType::Router,
@@ -26,6 +29,7 @@ impl NodeType {
         }
     }
 
+    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             NodeType::FullNode => "Router+App",
@@ -70,26 +74,34 @@ pub struct NodeSnapshot {
     pub active: bool,
     pub short_addr: [u8; 8],
     pub uptime_secs: u32,
+    pub capabilities: u16,
     #[allow(dead_code)]
     pub node_type: NodeType,
     pub peers: heapless::Vec<PeerSnapshot, 32>,
 }
 
 #[derive(Clone)]
-pub struct MessageEntry {
-    pub time_secs: u32,
+pub struct MessageTrace {
+    pub id: u64,
+    pub created_secs: u32,
+    pub delivered_secs: Option<u32>,
     pub from_idx: usize,
     /// `MAX_NODES` means broadcast.
     pub to_idx: usize,
     pub kind: MessageKind,
     pub body: String,
+    pub source_caps: u16,
+    pub target_caps: u16,
+    pub link_enabled_at_send: bool,
+    pub drop_prob_at_send: u8,
 }
 
 pub struct TuiState {
     pub nodes: [NodeSnapshot; MAX_NODES],
     /// Capped at 200 entries.
-    pub messages: VecDeque<MessageEntry>,
+    pub traces: VecDeque<MessageTrace>,
     pub elapsed_secs: u32,
+    pub next_trace_id: u64,
     pub msgs_sent: [u32; MAX_NODES],
     pub msgs_received: [u32; MAX_NODES],
 }
@@ -98,8 +110,9 @@ impl Default for TuiState {
     fn default() -> Self {
         Self {
             nodes: core::array::from_fn(|_| NodeSnapshot::default()),
-            messages: VecDeque::new(),
+            traces: VecDeque::new(),
             elapsed_secs: 0,
+            next_trace_id: 1,
             msgs_sent: [0; MAX_NODES],
             msgs_received: [0; MAX_NODES],
         }
@@ -107,15 +120,80 @@ impl Default for TuiState {
 }
 
 impl TuiState {
-    pub fn push_message(&mut self, entry: MessageEntry) {
-        if self.messages.len() >= 200 {
-            self.messages.pop_front();
+    pub fn create_trace(
+        &mut self,
+        from_idx: usize,
+        to_idx: usize,
+        kind: MessageKind,
+        body: String,
+        source_caps: u16,
+        target_caps: u16,
+        link_enabled_at_send: bool,
+        drop_prob_at_send: u8,
+    ) -> u64 {
+        let id = self.next_trace_id;
+        self.next_trace_id = self.next_trace_id.saturating_add(1);
+
+        if self.traces.len() >= 200 {
+            self.traces.pop_front();
         }
-        self.messages.push_back(entry);
+
+        self.traces.push_back(MessageTrace {
+            id,
+            created_secs: self.elapsed_secs,
+            delivered_secs: None,
+            from_idx,
+            to_idx,
+            kind,
+            body,
+            source_caps,
+            target_caps,
+            link_enabled_at_send,
+            drop_prob_at_send,
+        });
+
+        id
+    }
+
+    pub fn mark_trace_delivered(&mut self, trace_id: u64) {
+        let now = self.elapsed_secs;
+        if let Some(trace) = self.traces.iter_mut().find(|trace| trace.id == trace_id) {
+            trace.delivered_secs = Some(now);
+        }
+    }
+
+    pub fn reset_runtime(&mut self) {
+        self.traces.clear();
+        self.elapsed_secs = 0;
+        self.next_trace_id = 1;
+        self.msgs_sent = [0; MAX_NODES];
+        self.msgs_received = [0; MAX_NODES];
+        self.nodes = core::array::from_fn(|_| NodeSnapshot::default());
     }
 }
 
 // ── SimConfig (written by TUI, read by embassy) ───────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct NodeBehavior {
+    pub advertise: bool,
+    pub scan: bool,
+    pub initiate_h2h: bool,
+    pub respond_h2h: bool,
+    pub emit_sensor: bool,
+}
+
+impl Default for NodeBehavior {
+    fn default() -> Self {
+        Self {
+            advertise: true,
+            scan: true,
+            initiate_h2h: true,
+            respond_h2h: true,
+            emit_sensor: true,
+        }
+    }
+}
 
 pub struct SimConfig {
     pub n_active: usize,
@@ -123,7 +201,9 @@ pub struct SimConfig {
     pub link_enabled: [[bool; MAX_NODES]; MAX_NODES],
     /// Simulated packet drop probability (0–100 %) per directed pair.
     pub drop_prob: [[u8; MAX_NODES]; MAX_NODES],
+    pub capabilities: [u16; MAX_NODES],
     pub node_types: [NodeType; MAX_NODES],
+    pub node_behaviors: [NodeBehavior; MAX_NODES],
     pub sensor_auto: bool,
     pub sensor_interval_secs: u64,
 }
@@ -138,7 +218,11 @@ impl Default for SimConfig {
             n_active: DEFAULT_NODES,
             link_enabled,
             drop_prob: [[0u8; MAX_NODES]; MAX_NODES],
+            capabilities: core::array::from_fn(|_| {
+                Capabilities(Capabilities::ROUTE | Capabilities::APPLICATION).0
+            }),
             node_types: core::array::from_fn(|_| NodeType::default()),
+            node_behaviors: core::array::from_fn(|_| NodeBehavior::default()),
             sensor_auto: false,
             sensor_interval_secs: 5,
         }
@@ -154,6 +238,9 @@ pub enum SimCommand {
         kind: MessageKind,
         body: String,
     },
+    #[allow(dead_code)]
     AddNode,
+    #[allow(dead_code)]
     RemoveNode(usize),
+    ApplyScenario(crate::scenario::ScenarioId),
 }

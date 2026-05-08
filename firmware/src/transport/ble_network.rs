@@ -10,25 +10,22 @@
 use embassy_time::{Duration, Instant, Timer};
 use heapless::Vec;
 
-use trouble_host::prelude::*;
 use bt_hci::cmd::le::{
-    LeAddDeviceToFilterAcceptList,
-    LeClearFilterAcceptList,
-    LeCreateConn,
-    LeSetScanEnable,
+    LeAddDeviceToFilterAcceptList, LeClearFilterAcceptList, LeCreateConn, LeSetScanEnable,
     LeSetScanParams,
 };
 use bt_hci::controller::{ControllerCmdAsync, ControllerCmdSync};
+use trouble_host::prelude::*;
 
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::with_timeout;
 
-use routing_core::network::{
-    DiscoveryEvent, H2hInitiator, H2hResponder, InboundH2h, MAX_SCAN_RESULTS, NetworkError,
-};
-use routing_core::config::{H2H_MTU, H2H_PSM, H2H_CONNECTION_TIMEOUT_SECS};
+use routing_core::config::{H2H_CONNECTION_TIMEOUT_SECS, H2H_MTU, H2H_PSM};
 use routing_core::crypto::identity::{short_addr_of, ShortAddr};
+use routing_core::network::{
+    DiscoveryEvent, H2hInitiator, H2hResponder, InboundH2h, NetworkError, MAX_SCAN_RESULTS,
+};
 use routing_core::protocol::h2h::H2hPayload;
 
 use crate::CONSTELLATION_COMPANY_ID;
@@ -63,7 +60,10 @@ pub fn deserialize_discovery(data: &[u8]) -> Option<DiscoveryInfo> {
     let mut short_addr = [0u8; 8];
     short_addr.copy_from_slice(&data[0..8]);
     let capabilities = u16::from_le_bytes([data[8], data[9]]);
-    Some(DiscoveryInfo { short_addr, capabilities })
+    Some(DiscoveryInfo {
+        short_addr,
+        capabilities,
+    })
 }
 
 pub fn parse_discovery_from_adv(data: &[u8]) -> Option<DiscoveryInfo> {
@@ -101,7 +101,10 @@ pub struct BleResponder<'stack, C: Controller> {
     identity_short: ShortAddr,
     capabilities: u16,
     /// Open connection + channel from the last `receive_h2h` call.
-    pending: Option<(Connection<'stack, DefaultPacketPool>, L2capChannel<'stack, DefaultPacketPool>)>,
+    pending: Option<(
+        Connection<'stack, DefaultPacketPool>,
+        L2capChannel<'stack, DefaultPacketPool>,
+    )>,
 }
 
 impl<'stack, C: Controller> BleResponder<'stack, C> {
@@ -111,7 +114,13 @@ impl<'stack, C: Controller> BleResponder<'stack, C> {
         identity_short: ShortAddr,
         capabilities: u16,
     ) -> Self {
-        Self { peripheral, stack, identity_short, capabilities, pending: None }
+        Self {
+            peripheral,
+            stack,
+            identity_short,
+            capabilities,
+            pending: None,
+        }
     }
 }
 
@@ -123,7 +132,8 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
         loop {
             // Build advertisement
             let mut disc_buf = [0u8; DISCOVERY_PAYLOAD_SIZE];
-            if serialize_discovery(&self.identity_short, self.capabilities, &mut disc_buf).is_none() {
+            if serialize_discovery(&self.identity_short, self.capabilities, &mut disc_buf).is_none()
+            {
                 Timer::after(Duration::from_secs(1)).await;
                 continue;
             }
@@ -147,7 +157,8 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
                 }
             };
 
-            let advertiser = match self.peripheral
+            let advertiser = match self
+                .peripheral
                 .advertise(
                     &Default::default(),
                     Advertisement::ConnectableScannableUndirected {
@@ -173,22 +184,24 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
                 }
             };
 
-            log::debug!("[periph] Connection from {:02x?}", conn.peer_address().raw());
+            log::debug!(
+                "[periph] Connection from {:02x?}",
+                conn.peer_address().raw()
+            );
 
             let l2cap_config = L2capChannelConfig {
                 mtu: Some(H2H_MTU),
                 ..Default::default()
             };
 
-            let mut channel = match L2capChannel::accept(
-                self.stack, &conn, &[H2H_PSM], &l2cap_config,
-            ).await {
-                Ok(ch) => ch,
-                Err(e) => {
-                    log::warn!("[periph] L2CAP accept error: {:?}", e);
-                    continue;
-                }
-            };
+            let mut channel =
+                match L2capChannel::accept(self.stack, &conn, &[H2H_PSM], &l2cap_config).await {
+                    Ok(ch) => ch,
+                    Err(e) => {
+                        log::warn!("[periph] L2CAP accept error: {:?}", e);
+                        continue;
+                    }
+                };
 
             // Receive peer's payload
             let mut rx_buf = [0u8; 512];
@@ -214,13 +227,15 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
             // Store connection + channel for send_h2h_response
             self.pending = Some((conn, channel));
 
-            return Ok(InboundH2h { peer_mac, peer_payload });
+            return Ok(InboundH2h {
+                peer_mac,
+                peer_payload,
+            });
         }
     }
 
     async fn send_h2h_response(&mut self, payload: &H2hPayload) -> Result<(), NetworkError> {
-        let (conn, channel) =
-            self.pending.as_mut().ok_or(NetworkError::ProtocolError)?;
+        let (conn, channel) = self.pending.as_mut().ok_or(NetworkError::ProtocolError)?;
         let _ = conn; // keep conn alive while we use channel
 
         let mut tx_buf = [0u8; 512];
@@ -280,7 +295,12 @@ where
         our_addr: Address,
         discovery_rx: &'static Channel<NoopRawMutex, (BdAddr, AddrKind, DiscoveryInfo), 4>,
     ) -> Self {
-        Self { central: Some(central), stack, our_addr, discovery_rx }
+        Self {
+            central: Some(central),
+            stack,
+            our_addr,
+            discovery_rx,
+        }
     }
 }
 
@@ -346,7 +366,10 @@ where
         peer_mac: [u8; 6],
         our_payload: &H2hPayload,
     ) -> Result<H2hPayload, NetworkError> {
-        let central = self.central.as_mut().expect("BleInitiator: central missing during initiate_h2h");
+        let central = self
+            .central
+            .as_mut()
+            .expect("BleInitiator: central missing during initiate_h2h");
 
         let bd_addr = BdAddr(peer_mac);
         let connect_config = ConnectConfig {
@@ -358,13 +381,10 @@ where
             connect_params: Default::default(),
         };
 
-        let conn = central
-            .connect(&connect_config)
-            .await
-            .map_err(|e| {
-                log::warn!("[central] Connect failed: {:?}", e);
-                NetworkError::ConnectionFailed
-            })?;
+        let conn = central.connect(&connect_config).await.map_err(|e| {
+            log::warn!("[central] Connect failed: {:?}", e);
+            NetworkError::ConnectionFailed
+        })?;
 
         let l2cap_config = L2capChannelConfig {
             mtu: Some(H2H_MTU),
@@ -402,8 +422,8 @@ where
                 NetworkError::ConnectionFailed
             })?;
 
-        let peer_payload = H2hPayload::deserialize(&rx_buf[..rx_len])
-            .map_err(|_| NetworkError::ProtocolError)?;
+        let peer_payload =
+            H2hPayload::deserialize(&rx_buf[..rx_len]).map_err(|_| NetworkError::ProtocolError)?;
 
         // conn and channel drop here → BLE disconnect
         Ok(peer_payload)

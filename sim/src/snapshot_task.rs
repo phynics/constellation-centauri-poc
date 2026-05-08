@@ -13,9 +13,7 @@ use embassy_time::{Duration, Timer};
 use routing_core::crypto::identity::NodeIdentity;
 use routing_core::routing::table::RoutingTable;
 
-use crate::sim_state::{
-    NodeSnapshot, PeerSnapshot, SimConfig, TuiState, MAX_NODES,
-};
+use crate::sim_state::{NodeSnapshot, PeerSnapshot, SimConfig, TuiState, MAX_NODES};
 
 pub async fn run_snapshot_loop(
     routing_tables: &'static [AsyncMutex<CriticalSectionRawMutex, RoutingTable>; MAX_NODES],
@@ -29,11 +27,12 @@ pub async fn run_snapshot_loop(
         Timer::after(Duration::from_secs(1)).await;
         elapsed += 1;
 
-        let (n_active, node_types) = {
+        let (n_active, node_types, capabilities) = {
             let cfg = sim_config.lock().unwrap();
             let types: [crate::sim_state::NodeType; MAX_NODES] =
                 core::array::from_fn(|i| cfg.node_types[i]);
-            (cfg.n_active, types)
+            let capabilities: [u16; MAX_NODES] = core::array::from_fn(|i| cfg.capabilities[i]);
+            (cfg.n_active, types, capabilities)
         };
 
         let mut snapshots: [NodeSnapshot; MAX_NODES] =
@@ -65,6 +64,7 @@ pub async fn run_snapshot_loop(
                 active: true,
                 short_addr,
                 uptime_secs,
+                capabilities: capabilities[i],
                 node_type: node_types[i],
                 peers,
             };
