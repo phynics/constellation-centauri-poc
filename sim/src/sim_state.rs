@@ -84,11 +84,81 @@ impl TraceStatus {
 }
 
 #[derive(Clone)]
+pub enum TraceEventKind {
+    Queued,
+    Received { from_node: usize },
+    ObservedBroadcast,
+    Forwarded { to_node: usize },
+    Delivered,
+    Dropped { to_node: Option<usize> },
+    Blocked { to_node: usize },
+    NoRoute,
+    Deduped,
+    TtlExpired,
+}
+
+impl TraceEventKind {
+    pub fn describe(&self, node_idx: usize, ttl: u8, hop_count: u8) -> String {
+        match self {
+            TraceEventKind::Queued => format!(
+                "node {} queued packet locally (ttl={}, hop={})",
+                node_idx, ttl, hop_count
+            ),
+            TraceEventKind::Received { from_node } => format!(
+                "node {} received packet from {} (ttl={}, hop={})",
+                node_idx, from_node, ttl, hop_count
+            ),
+            TraceEventKind::ObservedBroadcast => {
+                format!(
+                    "node {} observed broadcast (ttl={}, hop={})",
+                    node_idx, ttl, hop_count
+                )
+            }
+            TraceEventKind::Forwarded { to_node } => format!(
+                "node {} forwarded packet to {} (ttl={}, hop={})",
+                node_idx, to_node, ttl, hop_count
+            ),
+            TraceEventKind::Delivered => format!(
+                "node {} delivered packet locally (ttl={}, hop={})",
+                node_idx, ttl, hop_count
+            ),
+            TraceEventKind::Dropped { to_node } => match to_node {
+                Some(to_node) => format!(
+                    "node {} dropped packet on edge to {} (ttl={}, hop={})",
+                    node_idx, to_node, ttl, hop_count
+                ),
+                None => format!(
+                    "node {} dropped packet (ttl={}, hop={})",
+                    node_idx, ttl, hop_count
+                ),
+            },
+            TraceEventKind::Blocked { to_node } => format!(
+                "node {} blocked edge to {} (ttl={}, hop={})",
+                node_idx, to_node, ttl, hop_count
+            ),
+            TraceEventKind::NoRoute => format!(
+                "node {} found no route (ttl={}, hop={})",
+                node_idx, ttl, hop_count
+            ),
+            TraceEventKind::Deduped => format!(
+                "node {} rejected duplicate packet (ttl={}, hop={})",
+                node_idx, ttl, hop_count
+            ),
+            TraceEventKind::TtlExpired => format!(
+                "node {} hit ttl expiry (ttl={}, hop={})",
+                node_idx, ttl, hop_count
+            ),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct TraceEvent {
     pub time_secs: u32,
     pub node_idx: usize,
     pub ttl: u8,
     pub hop_count: u8,
+    pub kind: TraceEventKind,
     pub message: String,
 }
 
@@ -225,7 +295,12 @@ impl TuiState {
                 node_idx: from_idx,
                 ttl: ttl_at_send,
                 hop_count: 0,
-                message: format!("trace created for {} → {}", from_idx, to_idx),
+                kind: TraceEventKind::Queued,
+                message: if is_broadcast {
+                    format!("trace created for {} → broadcast", from_idx)
+                } else {
+                    format!("trace created for {} → {}", from_idx, to_idx)
+                },
             }],
         });
 
@@ -246,6 +321,7 @@ impl TuiState {
         node_idx: usize,
         ttl: u8,
         hop_count: u8,
+        kind: TraceEventKind,
         message: impl Into<String>,
     ) {
         let now = self.elapsed_secs;
@@ -255,6 +331,7 @@ impl TuiState {
                 node_idx,
                 ttl,
                 hop_count,
+                kind,
                 message: message.into(),
             });
         }

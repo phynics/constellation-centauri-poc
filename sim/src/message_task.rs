@@ -15,7 +15,9 @@ use routing_core::routing::table::RoutingTable;
 
 use crate::medium::{SimDataMessage, SimMedium};
 use crate::network::SimNodeInfo;
-use crate::sim_state::{MessageKind, NodeType, SimConfig, TraceStatus, TuiState, MAX_NODES};
+use crate::sim_state::{
+    MessageKind, NodeType, SimConfig, TraceEventKind, TraceStatus, TuiState, MAX_NODES,
+};
 
 /// Receives routed application messages, applies shared routing-core forwarding
 /// decisions, and records hop-by-hop trace events.
@@ -37,6 +39,9 @@ pub async fn run_message_loop(
                 node_idx,
                 msg.ttl,
                 msg.hop_count,
+                TraceEventKind::Received {
+                    from_node: msg.sender_idx,
+                },
                 format!(
                     "node {} received packet from {} (ttl={}, hop={})",
                     node_idx, msg.sender_idx, msg.ttl, msg.hop_count
@@ -51,6 +56,7 @@ pub async fn run_message_loop(
                 node_idx,
                 msg.ttl,
                 msg.hop_count,
+                TraceEventKind::TtlExpired,
                 "ttl exhausted before processing",
             );
             state.set_trace_terminal_status(msg.trace_id, TraceStatus::TtlExpired);
@@ -66,6 +72,7 @@ pub async fn run_message_loop(
                     node_idx,
                     msg.ttl,
                     msg.hop_count,
+                    TraceEventKind::Deduped,
                     "dedup rejected packet",
                 );
                 state.set_trace_terminal_status(msg.trace_id, TraceStatus::Deduped);
@@ -80,6 +87,7 @@ pub async fn run_message_loop(
                 node_idx,
                 msg.ttl,
                 msg.hop_count,
+                TraceEventKind::Delivered,
                 "destination consumed packet",
             );
             state.mark_trace_delivered(msg.trace_id);
@@ -95,15 +103,18 @@ pub async fn run_message_loop(
         let candidates: HeaplessVec<([u8; 8], routing_core::transport::TransportAddr), 8> = {
             let table = routing_table.lock().await;
             if msg.is_broadcast {
-                table
-                    .peers
-                    .iter()
-                    .filter(|peer| {
-                        peer.trust > routing_core::routing::table::TRUST_EXPIRED
-                            && peer.transport_addr.addr != [0u8; 6]
-                    })
-                    .map(|peer| (peer.short_addr, peer.transport_addr))
-                    .collect()
+                let mut peers = HeaplessVec::new();
+                for peer in table.peers.iter() {
+                    if peer.trust <= routing_core::routing::table::TRUST_EXPIRED
+                        || peer.transport_addr.addr == [0u8; 6]
+                    {
+                        continue;
+                    }
+                    if peers.push((peer.short_addr, peer.transport_addr)).is_err() {
+                        break;
+                    }
+                }
+                peers
             } else {
                 table.forwarding_candidates(&dst_addr)
             }
@@ -117,6 +128,7 @@ pub async fn run_message_loop(
                 node_idx,
                 msg.ttl,
                 msg.hop_count,
+                TraceEventKind::ObservedBroadcast,
                 "broadcast observed at node",
             );
         }
@@ -128,6 +140,7 @@ pub async fn run_message_loop(
                 node_idx,
                 msg.ttl,
                 msg.hop_count,
+                TraceEventKind::NoRoute,
                 "no forwarding candidate from routing table",
             );
             state.set_trace_terminal_status(
@@ -165,6 +178,7 @@ pub async fn run_message_loop(
                     node_idx,
                     msg.ttl,
                     msg.hop_count,
+                    TraceEventKind::Blocked { to_node: next_idx },
                     format!("candidate {} blocked by inactive/disabled link", next_idx),
                 );
                 continue;
@@ -178,6 +192,9 @@ pub async fn run_message_loop(
                     node_idx,
                     msg.ttl,
                     msg.hop_count,
+                    TraceEventKind::Dropped {
+                        to_node: Some(next_idx),
+                    },
                     format!(
                         "candidate {} dropped by simulated loss ({}%)",
                         next_idx, drop_prob
@@ -205,6 +222,7 @@ pub async fn run_message_loop(
                 node_idx,
                 msg.ttl.saturating_sub(1),
                 msg.hop_count.saturating_add(1),
+                TraceEventKind::Forwarded { to_node: next_idx },
                 format!(
                     "forwarded to node {} via {:02x?} toward peer {:02x?}",
                     next_idx,
@@ -221,6 +239,11 @@ pub async fn run_message_loop(
                 node_idx,
                 msg.ttl,
                 msg.hop_count,
+                if msg.ttl <= 1 {
+                    TraceEventKind::TtlExpired
+                } else {
+                    TraceEventKind::NoRoute
+                },
                 "no candidate accepted packet",
             );
             if msg.ttl <= 1 {
@@ -328,6 +351,7 @@ pub async fn run_sensor_loop(
                 node_idx,
                 DEFAULT_TTL,
                 0,
+                TraceEventKind::Queued,
                 format!(
                     "sensor message queued at source for destination {}",
                     target_idx

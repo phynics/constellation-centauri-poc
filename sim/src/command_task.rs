@@ -18,7 +18,7 @@ use routing_core::routing::table::RoutingTable;
 use crate::medium::SimMedium;
 use crate::network::SimNodeInfo;
 use crate::scenario;
-use crate::sim_state::{SimCommand, SimConfig, TuiState, MAX_NODES};
+use crate::sim_state::{SimCommand, SimConfig, TraceEventKind, TuiState, MAX_NODES};
 
 pub async fn run_command_loop(
     cmd_rx: Arc<Mutex<Receiver<SimCommand>>>,
@@ -109,6 +109,7 @@ pub async fn run_command_loop(
                         from,
                         DEFAULT_TTL,
                         0,
+                        TraceEventKind::Queued,
                         if is_broadcast {
                             "manual broadcast queued at source".to_string()
                         } else {

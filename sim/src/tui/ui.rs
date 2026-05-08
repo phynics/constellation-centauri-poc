@@ -12,7 +12,7 @@ use routing_core::node::roles::Capabilities;
 
 use super::app::{App, BottomTab, InputTarget, Mode, ViewMode};
 use crate::scenario;
-use crate::sim_state::{MessageTrace, SimConfig, TuiState, MAX_NODES};
+use crate::sim_state::{MessageTrace, SimConfig, TraceEventKind, TuiState, MAX_NODES};
 
 pub fn render(frame: &mut Frame, app: &App, state: &TuiState, config: &SimConfig) {
     let area = frame.area();
@@ -483,83 +483,147 @@ fn render_node_map(frame: &mut Frame, app: &App, state: &TuiState, config: &SimC
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let selected_trace = selected_trace(state, app);
-    let hop_nodes: Vec<usize> = selected_trace
-        .map(|trace| trace.events.iter().map(|event| event.node_idx).collect())
-        .unwrap_or_default();
-
-    let node_ids: Vec<usize> = (0..config.n_active).collect();
-    let mut lines = vec![Line::styled(
-        "S=source D=destination B=broadcast *=path",
-        Style::default().fg(Color::DarkGray),
-    )];
-
-    for chunk in node_ids.chunks(5) {
-        let mut spans = Vec::new();
-        for idx in chunk {
-            let on_path = hop_nodes.contains(idx);
-            let is_src = selected_trace.map(|t| t.from_idx == *idx).unwrap_or(false);
-            let is_dst = selected_trace.map(|t| t.to_idx == *idx).unwrap_or(false);
-            let is_broadcast = selected_trace.map(|t| t.is_broadcast).unwrap_or(false);
-            let prefix = if is_src {
-                'S'
-            } else if is_broadcast && on_path {
-                'B'
-            } else if is_dst {
-                'D'
-            } else if on_path {
-                '*'
-            } else {
-                ' '
-            };
-            let style = if *idx == app.selected_node && app.view_mode == ViewMode::Nodes {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else if *idx == app.selected_link_node && app.view_mode == ViewMode::Links {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else if on_path {
-                Style::default().fg(Color::Green)
-            } else {
-                Style::default()
-            };
-            spans.push(Span::styled(
-                format!(
-                    "{}{:02}[{:<5}]  ",
-                    prefix,
-                    idx,
-                    capability_short(config.capabilities[*idx])
-                ),
-                style,
-            ));
-        }
-        lines.push(Line::from(spans));
+    if inner.width < 12 || inner.height < 8 {
+        frame.render_widget(
+            Paragraph::new("Map area too small.").style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
     }
+
+    let selected_trace = selected_trace(state, app);
+    let hop_nodes: Vec<usize> = selected_trace.map(trace_path_nodes).unwrap_or_default();
+
+    let legend_height = 3u16;
+    let map_height = inner.height.saturating_sub(legend_height).max(4);
+    let map_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: map_height,
+    };
+    let legend_area = Rect {
+        x: inner.x,
+        y: inner.y + map_height,
+        width: inner.width,
+        height: inner.height.saturating_sub(map_height),
+    };
+
+    let mut canvas = vec![vec![' '; map_area.width as usize]; map_area.height as usize];
+    let mut styles =
+        vec![vec![Style::default(); map_area.width as usize]; map_area.height as usize];
+    let positions = node_positions(config.n_active, map_area.width, map_area.height);
 
     if let Some(trace) = selected_trace {
-        let path = trace
-            .events
-            .iter()
-            .map(|event| format!("{}(h{},t{})", event.node_idx, event.hop_count, event.ttl))
-            .collect::<Vec<_>>()
-            .join(" -> ");
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            if trace.is_broadcast {
-                "Broadcast fan-out"
-            } else {
-                "Path"
-            },
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
-        lines.push(Line::from(path));
+        for (from, to) in trace_hop_edges(trace) {
+            if from < positions.len() && to < positions.len() {
+                draw_link(
+                    &mut canvas,
+                    &mut styles,
+                    positions[from],
+                    positions[to],
+                    if trace.is_broadcast {
+                        Style::default().fg(Color::LightBlue)
+                    } else {
+                        Style::default().fg(Color::Green)
+                    },
+                );
+            }
+        }
     }
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    for idx in 0..config.n_active {
+        let (x, y) = positions[idx];
+        let on_path = hop_nodes.contains(&idx);
+        let is_src = selected_trace.map(|t| t.from_idx == idx).unwrap_or(false);
+        let is_dst = selected_trace.map(|t| t.to_idx == idx).unwrap_or(false);
+        let is_broadcast = selected_trace.map(|t| t.is_broadcast).unwrap_or(false);
+        let marker = if is_src {
+            'S'
+        } else if is_broadcast && on_path {
+            'B'
+        } else if is_dst {
+            'D'
+        } else if on_path {
+            '*'
+        } else if idx == app.selected_node && app.view_mode == ViewMode::Nodes {
+            '!'
+        } else if idx == app.selected_link_node && app.view_mode == ViewMode::Links {
+            '!'
+        } else {
+            'o'
+        };
+        let style = if idx == app.selected_node && app.view_mode == ViewMode::Nodes {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else if idx == app.selected_link_node && app.view_mode == ViewMode::Links {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if is_src {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else if is_dst {
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD)
+        } else if is_broadcast && on_path {
+            Style::default()
+                .fg(Color::LightBlue)
+                .add_modifier(Modifier::BOLD)
+        } else if on_path {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        put_str(
+            &mut canvas,
+            &mut styles,
+            x,
+            y,
+            &format!("{}{:02}", marker, idx),
+            style,
+        );
+        if y + 1 < map_area.height as usize {
+            put_str(
+                &mut canvas,
+                &mut styles,
+                x,
+                y + 1,
+                &capability_short(config.capabilities[idx]),
+                Style::default().fg(Color::DarkGray),
+            );
+        }
+    }
+
+    let map_lines: Vec<Line> = canvas
+        .iter()
+        .enumerate()
+        .map(|(y, row)| {
+            let spans = row
+                .iter()
+                .enumerate()
+                .map(|(x, ch)| Span::styled(ch.to_string(), styles[y][x]))
+                .collect::<Vec<_>>();
+            Line::from(spans)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(map_lines), map_area);
+
+    let mut legend = vec![Line::styled(
+        "S source  D dest  B broadcast-seen  * path  ! selected",
+        Style::default().fg(Color::DarkGray),
+    )];
+    if let Some(trace) = selected_trace {
+        legend.push(Line::from(trace_path_descriptions(trace).join(" -> ")));
+    }
+    frame.render_widget(
+        Paragraph::new(legend).wrap(Wrap { trim: false }),
+        legend_area,
+    );
 }
 
 fn render_trace_context(
@@ -585,25 +649,50 @@ fn render_trace_context(
     };
 
     let src_node = &state.nodes[trace.from_idx.min(MAX_NODES - 1)];
-    let dst_node = &state.nodes[trace.to_idx.min(MAX_NODES - 1)];
-    let current_link = config.link_enabled[trace.from_idx][trace.to_idx];
-    let current_drop = config.drop_prob[trace.from_idx][trace.to_idx];
-    let dst_peer = src_node
-        .peers
-        .iter()
-        .find(|peer| peer.short_addr == dst_node.short_addr);
-    let dst_visible_from_src = dst_peer
-        .map(|peer| {
-            if peer.hop_count == 0 {
-                "direct"
-            } else {
-                "indirect"
-            }
-        })
-        .unwrap_or("not seen");
-    let dst_trust = dst_peer
-        .map(|peer| peer.trust.to_string())
-        .unwrap_or_else(|| "n/a".to_string());
+    let (
+        current_link,
+        current_drop,
+        dst_visible_from_src,
+        dst_trust,
+        dst_caps_now,
+        dst_uptime_now,
+        dst_peers_now,
+    ) = if trace.is_broadcast {
+        (
+            true,
+            0,
+            "fan-out".to_string(),
+            "n/a".to_string(),
+            "broadcast".to_string(),
+            0,
+            0,
+        )
+    } else {
+        let dst_node = &state.nodes[trace.to_idx.min(MAX_NODES - 1)];
+        let dst_peer = src_node
+            .peers
+            .iter()
+            .find(|peer| peer.short_addr == dst_node.short_addr);
+        (
+            config.link_enabled[trace.from_idx][trace.to_idx],
+            config.drop_prob[trace.from_idx][trace.to_idx],
+            dst_peer
+                .map(|peer| {
+                    if peer.hop_count == 0 {
+                        "direct".to_string()
+                    } else {
+                        "indirect".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "not seen".to_string()),
+            dst_peer
+                .map(|peer| peer.trust.to_string())
+                .unwrap_or_else(|| "n/a".to_string()),
+            capability_long(dst_node.capabilities),
+            dst_node.uptime_secs,
+            dst_node.peers.len(),
+        )
+    };
 
     let lines = vec![
         Line::styled(
@@ -629,17 +718,14 @@ fn render_trace_context(
         Line::from(format!("Current link enabled: {}", on_off(current_link))),
         Line::from(format!("Current drop probability: {}%", current_drop)),
         Line::from(format!("Src uptime now: {}s", src_node.uptime_secs)),
-        Line::from(format!("Dst uptime now: {}s", dst_node.uptime_secs)),
+        Line::from(format!("Dst uptime now: {}s", dst_uptime_now)),
         Line::from(format!(
             "Src caps now: {}",
             capability_long(src_node.capabilities)
         )),
-        Line::from(format!(
-            "Dst caps now: {}",
-            capability_long(dst_node.capabilities)
-        )),
+        Line::from(format!("Dst caps now: {}", dst_caps_now)),
         Line::from(format!("Src peers now: {}", src_node.peers.len())),
-        Line::from(format!("Dst peers now: {}", dst_node.peers.len())),
+        Line::from(format!("Dst peers now: {}", dst_peers_now)),
         Line::from(format!("Dst visible from src: {}", dst_visible_from_src)),
         Line::from(format!("Dst trust from src: {}", dst_trust)),
         Line::raw(""),
@@ -724,8 +810,11 @@ fn render_bottom_panel(frame: &mut Frame, app: &App, state: &TuiState, area: Rec
                     .rev()
                     .map(|event| {
                         Line::from(format!(
-                            "t={}s  node {}  {}",
-                            event.time_secs, event.node_idx, event.message
+                            "t={}s  {}",
+                            event.time_secs,
+                            event
+                                .kind
+                                .describe(event.node_idx, event.ttl, event.hop_count)
                         ))
                     })
                     .collect();
@@ -736,15 +825,11 @@ fn render_bottom_panel(frame: &mut Frame, app: &App, state: &TuiState, area: Rec
         }
         BottomTab::Graph => {
             if let Some(trace) = selected_trace(state, app) {
-                let hops: Vec<String> = trace
-                    .events
-                    .iter()
-                    .map(|event| event.node_idx.to_string())
-                    .collect();
-                let path = if hops.is_empty() {
+                let labels = trace_path_descriptions(trace);
+                let path = if labels.is_empty() {
                     trace.from_idx.to_string()
                 } else {
-                    hops.join(" -> ")
+                    labels.join(" -> ")
                 };
                 let lines = vec![
                     Line::styled(
@@ -992,6 +1077,171 @@ fn selected_trace<'a>(state: &'a TuiState, app: &App) -> Option<&'a MessageTrace
     filtered
         .get(app.selected_trace)
         .and_then(|idx| state.traces.get(*idx))
+}
+
+fn trace_hop_edges(trace: &MessageTrace) -> Vec<(usize, usize)> {
+    trace
+        .events
+        .iter()
+        .filter_map(|event| match event.kind {
+            TraceEventKind::Forwarded { to_node } => Some((event.node_idx, to_node)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn trace_path_nodes(trace: &MessageTrace) -> Vec<usize> {
+    let mut nodes = vec![trace.from_idx];
+    for (_, to_node) in trace_hop_edges(trace) {
+        if nodes.last().copied() != Some(to_node) {
+            nodes.push(to_node);
+        }
+    }
+    if trace.is_broadcast {
+        let mut broadcast_seen = trace
+            .events
+            .iter()
+            .filter(|event| matches!(event.kind, TraceEventKind::ObservedBroadcast))
+            .map(|event| event.node_idx)
+            .collect::<Vec<_>>();
+        broadcast_seen.sort_unstable();
+        broadcast_seen.dedup();
+        for node in broadcast_seen {
+            if !nodes.contains(&node) {
+                nodes.push(node);
+            }
+        }
+    } else if trace
+        .events
+        .iter()
+        .any(|event| matches!(event.kind, TraceEventKind::Delivered))
+        && trace.to_idx < MAX_NODES
+        && nodes.last().copied() != Some(trace.to_idx)
+    {
+        nodes.push(trace.to_idx);
+    }
+    nodes
+}
+
+fn trace_path_descriptions(trace: &MessageTrace) -> Vec<String> {
+    let mut labels = vec![format!("{}(src)", trace.from_idx)];
+    for event in trace.events.iter() {
+        match event.kind {
+            TraceEventKind::Forwarded { to_node } => {
+                labels.push(format!("{}(h{},t{})", to_node, event.hop_count, event.ttl));
+            }
+            TraceEventKind::Delivered if !trace.is_broadcast && trace.to_idx < MAX_NODES => {
+                if labels
+                    .last()
+                    .map(|s| s.starts_with(&trace.to_idx.to_string()))
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                labels.push(format!("{}(dst)", trace.to_idx));
+            }
+            _ => {}
+        }
+    }
+    if trace.is_broadcast {
+        let mut seen = trace
+            .events
+            .iter()
+            .filter(|event| matches!(event.kind, TraceEventKind::ObservedBroadcast))
+            .map(|event| event.node_idx)
+            .collect::<Vec<_>>();
+        seen.sort_unstable();
+        seen.dedup();
+        if !seen.is_empty() {
+            labels.push(format!("seen={:?}", seen));
+        }
+    }
+    labels
+}
+
+fn node_positions(n_active: usize, width: u16, height: u16) -> Vec<(usize, usize)> {
+    if n_active == 0 {
+        return vec![];
+    }
+
+    let cols = ((n_active as f32).sqrt().ceil() as usize).max(2);
+    let rows = n_active.div_ceil(cols);
+    let x_step = (width as usize).saturating_sub(4).max(1) / cols.max(1);
+    let y_step = (height as usize).saturating_sub(3).max(1) / rows.max(1);
+
+    (0..n_active)
+        .map(|idx| {
+            let col = idx % cols;
+            let row = idx / cols;
+            let x = 1 + col * x_step;
+            let y = 1 + row * y_step;
+            (
+                x.min(width.saturating_sub(4) as usize),
+                y.min(height.saturating_sub(2) as usize),
+            )
+        })
+        .collect()
+}
+
+fn draw_link(
+    canvas: &mut [Vec<char>],
+    styles: &mut [Vec<Style>],
+    from: (usize, usize),
+    to: (usize, usize),
+    style: Style,
+) {
+    let (mut x0, mut y0) = (from.0 as isize, from.1 as isize);
+    let (x1, y1) = (to.0 as isize, to.1 as isize);
+    let dx = (x1 - x0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let dy = -(y1 - y0).abs();
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+
+    loop {
+        if x0 >= 0
+            && y0 >= 0
+            && (y0 as usize) < canvas.len()
+            && (x0 as usize) < canvas[y0 as usize].len()
+            && canvas[y0 as usize][x0 as usize] == ' '
+        {
+            canvas[y0 as usize][x0 as usize] = if dx > -dy { '─' } else { '│' };
+            styles[y0 as usize][x0 as usize] = style;
+        }
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x0 += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+fn put_str(
+    canvas: &mut [Vec<char>],
+    styles: &mut [Vec<Style>],
+    x: usize,
+    y: usize,
+    text: &str,
+    style: Style,
+) {
+    if y >= canvas.len() {
+        return;
+    }
+    for (offset, ch) in text.chars().enumerate() {
+        let px = x + offset;
+        if px >= canvas[y].len() {
+            break;
+        }
+        canvas[y][px] = ch;
+        styles[y][px] = style;
+    }
 }
 
 fn selected_link_pair(app: &App, config: &SimConfig) -> Option<(usize, usize)> {
