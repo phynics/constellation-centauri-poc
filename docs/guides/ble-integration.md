@@ -7,6 +7,7 @@
 - BLE advertising with discovery payload (short_addr + capabilities)
 - BLE scanning for peer discovery
 - L2CAP Connection-Oriented Channel H2H exchange (initiator + responder)
+- Extended H2H sessions for low-power delayed delivery and router-to-router retained-message replication
 - Routing table updates from discovery and H2H
 - Identity generation and flash persistence
 - Build fingerprint for firmware equivalence checking
@@ -16,7 +17,6 @@
 - Encrypted message exchange (ECDH + ChaCha20-Poly1305)
 
 ❌ **Not Yet Implemented:**
-- Store-and-forward for low-energy nodes
 - WiFi/LoRa transport
 - Network key onboarding
 
@@ -56,6 +56,28 @@ The H2H (Heart2Heart) exchange is the core peer-state synchronization mechanism:
 2. **Slot scheduling**: deterministic slot offset from `SHA-256(lo || hi)`
 3. **Exchange**: initiator opens L2CAP CoC, sends payload, receives response
 4. **Routing update**: both peers update their routing tables with direct and indirect peer info
+
+### Extended Low-Power Delivery Sessions
+
+H2H now stays open after the initial sync exchange when the peers need to handle
+low-power delayed delivery.
+
+- **LPN wake path**: the low-power endpoint wakes a preferred router first, then
+  can fall back to other reachable routers if the preferred one is unavailable.
+- **Backup placement**: the preferred router is still chosen from local
+  freshness/quality, but retained-message replicas are only propagated to a
+  deterministic backup subset derived from the LPN identity.
+- **Router redundancy**: routers exchange retained-message replicas and
+  tombstones over typed follow-up H2H frames instead of a parallel protocol.
+
+The simulator trace model now records this explicitly with:
+
+- `Deferred`
+- `LpnWakeSync`
+- `PendingAnnounced`
+- `DeliveredFromStore`
+- `DeliveryConfirmed`
+- `ExpiredFromStore`
 
 ### H2H Payload
 

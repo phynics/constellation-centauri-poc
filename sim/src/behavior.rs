@@ -407,6 +407,20 @@ where
                                         node_idx,
                                         0,
                                         0,
+                                        TraceEventKind::LpnWakeSync {
+                                            router_node: peer_mac[0] as usize,
+                                        },
+                                        format!(
+                                            "LPN {} woke router {} for delayed-delivery sync",
+                                            node_idx,
+                                            peer_mac[0] as usize
+                                        ),
+                                    );
+                                    tui_state.lock().unwrap().push_trace_event(
+                                        trace_id,
+                                        node_idx,
+                                        0,
+                                        0,
                                         TraceEventKind::DeliveredFromStore {
                                             router_node: peer_mac[0] as usize,
                                         },

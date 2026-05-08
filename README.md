@@ -35,6 +35,7 @@ cd firmware && cargo check --no-default-features --features=esp32c6
 The simulator is the primary tool for debugging routing-core behavior. It runs the same shared protocol logic as the firmware, exposed through a ratatui TUI with:
 
 - **Trace debugger** — hop-by-hop message propagation traces with per-hop event timelines
+- **Delayed-delivery traces** — low-power wake/sync, retained-delivery, and fallback-router trace events
 - **Node editor** — live capability, behavior, and type editing per node
 - **Link editor** — toggle links and adjust drop probability
 - **Spatial map** — coordinate-based node layout with connector paths
@@ -112,6 +113,7 @@ sim/                   # Desktop simulator host
 
 - **Direct peers**: discovered via scan, updated via `update_peer_compact()` with `TRUST_DIRECT`
 - **Indirect peers**: learned from H2H exchange, stored with `learned_from` pointing to the direct partner, `TRUST_INDIRECT`
+- **Low-power delayed delivery**: low-energy endpoints wake a preferred router first, then fall back through a deterministic backup-router subset derived from the LPN identity; routers replicate retained messages only into that backup subset
 - **Forwarding**: `forwarding_candidates(dst)` resolves in order:
   1. Direct destination with usable transport
   2. Indirect destination via `learned_from` (the partner that taught us about this destination)

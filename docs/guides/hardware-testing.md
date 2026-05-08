@@ -82,6 +82,26 @@ The responder side:
 [periph] Routing table: 1 peers
 ```
 
+### Delayed Delivery for Low-Power Endpoints
+
+The BLE H2H session now remains open after the initial sync when low-power
+delivery is needed.
+
+- low-power endpoints wake a preferred router first
+- if the preferred router is unavailable, they can fall back to other reachable
+  routers
+- retained-message replicas are propagated only into a deterministic backup set
+  derived from the low-power destination identity
+
+In simulator traces this shows up as:
+
+- `Deferred`
+- `LpnWakeSync`
+- `PendingAnnounced`
+- `DeliveredFromStore`
+- `DeliveryConfirmed`
+- `ExpiredFromStore`
+
 ### Error Cases
 
 H2H failures now include specific reasons:
@@ -168,6 +188,7 @@ sudo usermod -a -G dialout $USER
 - BLE advertising with discovery payload
 - BLE scanning for peer discovery
 - L2CAP H2H exchange (initiator + responder)
+- Extended H2H sessions for delayed delivery to low-power endpoints
 - Routing table updates from discovery + H2H
 - Build fingerprint for firmware equivalence checks
 - Simulator with full routing-core behavior
@@ -177,6 +198,5 @@ sudo usermod -a -G dialout $USER
 - Encrypted message exchange
 
 ❌ **Not Yet Implemented:**
-- Store-and-forward for low-energy nodes
 - WiFi/LoRa transport
 - Network key onboarding

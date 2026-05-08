@@ -1104,6 +1104,7 @@ fn trace_hop_edges(trace: &MessageTrace) -> Vec<(usize, usize)> {
         .iter()
         .filter_map(|event| match event.kind {
             TraceEventKind::Forwarded { to_node } => Some((event.node_idx, to_node)),
+            TraceEventKind::DeliveredFromStore { router_node } => Some((router_node, event.node_idx)),
             _ => None,
         })
         .collect()
@@ -1114,6 +1115,16 @@ fn trace_path_nodes(trace: &MessageTrace) -> Vec<usize> {
     for (_, to_node) in trace_hop_edges(trace) {
         if nodes.last().copied() != Some(to_node) {
             nodes.push(to_node);
+        }
+    }
+    for event in trace.events.iter() {
+        if let TraceEventKind::LpnWakeSync { router_node } = event.kind {
+            if !nodes.contains(&router_node) {
+                nodes.push(router_node);
+            }
+            if !nodes.contains(&event.node_idx) {
+                nodes.push(event.node_idx);
+            }
         }
     }
     if trace.is_broadcast {
@@ -1148,6 +1159,12 @@ fn trace_path_descriptions(trace: &MessageTrace) -> Vec<String> {
         match event.kind {
             TraceEventKind::Forwarded { to_node } => {
                 labels.push(format!("{}(h{},t{})", to_node, event.hop_count, event.ttl));
+            }
+            TraceEventKind::LpnWakeSync { router_node } => {
+                labels.push(format!("{}(wake->{})", event.node_idx, router_node));
+            }
+            TraceEventKind::DeliveredFromStore { router_node } => {
+                labels.push(format!("{}(store->{})", router_node, event.node_idx));
             }
             TraceEventKind::Delivered if !trace.is_broadcast && trace.to_idx < MAX_NODES => {
                 if labels

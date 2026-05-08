@@ -236,6 +236,19 @@ impl SimHarness {
                                 initiator_idx,
                                 0,
                                 0,
+                                TraceEventKind::LpnWakeSync {
+                                    router_node: peer_idx,
+                                },
+                                format!(
+                                    "LPN {} woke router {} for delayed-delivery sync",
+                                    initiator_idx, peer_idx
+                                ),
+                            );
+                            self.runtime.tui_state.lock().unwrap().push_trace_event(
+                                trace_id,
+                                initiator_idx,
+                                0,
+                                0,
                                 TraceEventKind::DeliveredFromStore {
                                     router_node: peer_idx,
                                 },
