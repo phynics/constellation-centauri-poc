@@ -11,7 +11,8 @@ use crate::config_ops;
 use crate::runtime::SimRuntime;
 use crate::scenario::ScenarioId;
 use crate::sim_state::{
-    MessageKind, MessageTrace, SimCommand, SimConfig, TraceStatus, TuiState, MAX_NODES,
+    MessageKind, MessageTrace, SimCommand, SimConfig, TraceEventKind, TraceStatus, TuiState,
+    MAX_NODES,
 };
 
 pub struct SimHarness {
@@ -136,6 +137,112 @@ impl SimHarness {
             .iter()
             .find(|trace| trace.id == trace_id)
             .cloned()
+    }
+
+    pub fn trace_terminal_status(&self, trace_id: u64) -> Option<TraceStatus> {
+        self.trace(trace_id).map(|trace| trace.terminal_status)
+    }
+
+    pub fn forwarded_edges(&self, trace_id: u64) -> Vec<(usize, usize)> {
+        self.trace(trace_id)
+            .map(|trace| {
+                trace
+                    .events
+                    .iter()
+                    .filter_map(|event| match event.kind {
+                        TraceEventKind::Forwarded { to_node } => Some((event.node_idx, to_node)),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn trace_has_delivery(&self, trace_id: u64, node_idx: usize) -> bool {
+        self.trace(trace_id)
+            .map(|trace| {
+                trace.events.iter().any(|event| {
+                    matches!(event.kind, TraceEventKind::Delivered) && event.node_idx == node_idx
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn trace_has_blocked_edge(&self, trace_id: u64, from: usize, to: usize) -> bool {
+        self.trace(trace_id)
+            .map(|trace| {
+                trace.events.iter().any(|event| {
+                    matches!(event.kind, TraceEventKind::Blocked { to_node } if to_node == to)
+                        && event.node_idx == from
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn broadcast_observers(&self, trace_id: u64) -> Vec<usize> {
+        let mut observers = Vec::new();
+        if let Some(trace) = self.trace(trace_id) {
+            for event in &trace.events {
+                if matches!(event.kind, TraceEventKind::ObservedBroadcast)
+                    && !observers.contains(&event.node_idx)
+                {
+                    observers.push(event.node_idx);
+                }
+            }
+        }
+        observers
+    }
+
+    pub fn assert_terminal_status_one_of(&self, trace_id: u64, expected: &[TraceStatus]) {
+        let actual = self
+            .trace_terminal_status(trace_id)
+            .unwrap_or_else(|| panic!("missing trace {trace_id} when checking terminal status"));
+        assert!(
+            expected.contains(&actual),
+            "trace {} terminal status {:?} not in expected set {:?}",
+            trace_id,
+            actual,
+            expected
+        );
+    }
+
+    pub fn assert_forwarded_edges(&self, trace_id: u64, expected: &[(usize, usize)]) {
+        let actual = self.forwarded_edges(trace_id);
+        assert_eq!(
+            actual, expected,
+            "trace {} forwarded edge path mismatch",
+            trace_id
+        );
+    }
+
+    pub fn assert_delivered_to(&self, trace_id: u64, node_idx: usize) {
+        assert!(
+            self.trace_has_delivery(trace_id, node_idx),
+            "trace {} never delivered at node {}",
+            trace_id,
+            node_idx
+        );
+    }
+
+    pub fn assert_blocked_edge(&self, trace_id: u64, from: usize, to: usize) {
+        assert!(
+            self.trace_has_blocked_edge(trace_id, from, to),
+            "trace {} never recorded blocked edge {} -> {}",
+            trace_id,
+            from,
+            to
+        );
+    }
+
+    pub fn assert_broadcast_observed_by_at_least(&self, trace_id: u64, min_count: usize) {
+        let count = self.broadcast_observers(trace_id).len();
+        assert!(
+            count >= min_count,
+            "trace {} broadcast observed by {} nodes, expected at least {}",
+            trace_id,
+            count,
+            min_count
+        );
     }
 
     pub fn seed_all_direct_links(&self) {
