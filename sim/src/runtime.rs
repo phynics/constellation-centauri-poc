@@ -147,6 +147,7 @@ pub struct SimRuntime {
     pub node_infos: &'static [SimNodeInfo; MAX_NODES],
     pub routing_tables: &'static [AsyncMutex<CriticalSectionRawMutex, RoutingTable>; MAX_NODES],
     pub uptimes: &'static [AsyncMutex<CriticalSectionRawMutex, u32>; MAX_NODES],
+    pub medium: &'static SimMedium,
     pub store_forward_state: Arc<Mutex<StoreForwardState>>,
 }
 
@@ -232,6 +233,7 @@ impl SimRuntime {
             node_infos,
             routing_tables,
             uptimes,
+            medium,
             store_forward_state,
         }
     }

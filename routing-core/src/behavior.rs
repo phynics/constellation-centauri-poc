@@ -8,14 +8,40 @@
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
+use sha2::{Digest, Sha256};
 
-use crate::config::{H2H_CYCLE_SECS, TICK_HZ};
+use crate::config::{H2H_CYCLE_SECS, STORE_FORWARD_BACKUP_ROUTERS, TICK_HZ};
 use crate::crypto::identity::{short_addr_of, NodeIdentity, ShortAddr};
 use crate::network::{DiscoveryEvent, H2hInitiator, H2hResponder, MAX_SCAN_RESULTS};
 use crate::node::roles::Capabilities;
 use crate::protocol::h2h::{self, H2hPayload};
 use crate::routing::table::RoutingTable;
 use crate::transport::TransportAddr;
+
+/// Deterministic placement score for choosing backup routers for a low-power
+/// endpoint. Unlike the primary router choice, which is intentionally local and
+/// quality-driven, backup placement must be independently derivable by any
+/// router that knows the destination LPN and a candidate router address.
+pub fn backup_router_score_for_lpn(lpn_addr: &ShortAddr, router_addr: &ShortAddr) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(lpn_addr);
+    hasher.update(router_addr);
+    let digest = hasher.finalize();
+    u64::from_le_bytes([
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+    ])
+}
+
+pub fn sort_backup_routers_for_lpn<T, F>(lpn_addr: &ShortAddr, routers: &mut [T], router_addr: F)
+where
+    F: Fn(&T) -> ShortAddr,
+{
+    routers.sort_unstable_by(|a, b| {
+        backup_router_score_for_lpn(lpn_addr, &router_addr(b))
+            .cmp(&backup_router_score_for_lpn(lpn_addr, &router_addr(a)))
+            .then_with(|| router_addr(a).cmp(&router_addr(b)))
+    });
+}
 
 // ── Discovery scan duration ───────────────────────────────────────────────────
 
@@ -112,11 +138,11 @@ pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
     // the next-best reachable router in the same cycle without inventing a
     // second connection policy just for delayed delivery.
     if is_low_power_endpoint {
-        let mut routers: heapless::Vec<(ShortAddr, [u8; 6], u8, u64), 32> = heapless::Vec::new();
+        let mut routers: heapless::Vec<(ShortAddr, [u8; 6], u8, u64, bool), 32> = heapless::Vec::new();
 
         for peer in table.peers.iter() {
             if peer.transport_addr.addr == [0u8; 6]
-                || !Capabilities::is_store_router_bits(peer.capabilities)
+                || (peer.capabilities & Capabilities::ROUTE == 0)
             {
                 continue;
             }
@@ -126,16 +152,46 @@ pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
                 peer.transport_addr.addr,
                 peer.trust,
                 peer.last_seen_ticks,
+                Capabilities::is_store_router_bits(peer.capabilities),
             );
 
             let _ = routers.push(candidate);
         }
 
-        routers.sort_unstable_by(|a, b| {
-            b.2.cmp(&a.2)
-                .then_with(|| b.3.cmp(&a.3))
-                .then_with(|| a.0.cmp(&b.0))
-        });
+        let mut primary_idx = None;
+        for idx in 0..routers.len() {
+            let candidate = routers[idx];
+            let should_replace = match primary_idx {
+                None => true,
+                Some(best_idx) => {
+                    let best: (ShortAddr, [u8; 6], u8, u64, bool) = routers[best_idx];
+                    candidate.2 > best.2
+                        || (candidate.2 == best.2 && candidate.3 > best.3)
+                        || (candidate.2 == best.2
+                            && candidate.3 == best.3
+                            && candidate.0 < best.0)
+                }
+            };
+            if should_replace {
+                primary_idx = Some(idx);
+            }
+        }
+
+        if let Some(primary_idx) = primary_idx {
+            let primary = routers.swap_remove(primary_idx);
+            // Primary stays quality-driven from the LPN perspective, but all
+            // remaining routers are ordered by deterministic distance/score from
+            // the LPN address. That keeps fallback placement stable across the
+            // mesh even when the LPN's preferred router drops out.
+            routers.sort_unstable_by(|a, b| {
+                b.4.cmp(&a.4).then_with(|| {
+                    backup_router_score_for_lpn(&our_addr, &b.0)
+                        .cmp(&backup_router_score_for_lpn(&our_addr, &a.0))
+                        .then_with(|| a.0.cmp(&b.0))
+                })
+            });
+            let _ = v.push((primary.0, primary.1));
+        }
 
         for (peer_short, peer_mac, ..) in routers.into_iter() {
             let _ = v.push((peer_short, peer_mac));
@@ -162,6 +218,24 @@ pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
         }
     }
     v
+}
+
+pub fn is_backup_router_for_lpn(
+    lpn_addr: &ShortAddr,
+    candidate_router: &ShortAddr,
+    known_store_routers: &[ShortAddr],
+) -> bool {
+    let mut routers: heapless::Vec<ShortAddr, 32> = heapless::Vec::new();
+    for router in known_store_routers {
+        if !routers.iter().any(|existing| existing == router) {
+            let _ = routers.push(*router);
+        }
+    }
+    sort_backup_routers_for_lpn(lpn_addr, routers.as_mut_slice(), |addr| *addr);
+    routers
+        .iter()
+        .take(STORE_FORWARD_BACKUP_ROUTERS)
+        .any(|router| router == candidate_router)
 }
 
 /// Perform immediate H2H exchanges for the current known initiator-side peers.
@@ -424,5 +498,31 @@ where
         };
 
         log::info!("[heartbeat] Uptime: {}s, peers: {}", up, peers);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{backup_router_score_for_lpn, is_backup_router_for_lpn, sort_backup_routers_for_lpn};
+
+    #[test]
+    fn backup_router_scoring_is_deterministic() {
+        let lpn = [0x11; 8];
+        let router = [0x22; 8];
+        assert_eq!(
+            backup_router_score_for_lpn(&lpn, &router),
+            backup_router_score_for_lpn(&lpn, &router)
+        );
+    }
+
+    #[test]
+    fn backup_subset_is_derived_from_lpn_identity() {
+        let lpn = [0x42; 8];
+        let mut routers = [[0x01; 8], [0x02; 8], [0x03; 8], [0x04; 8]];
+        sort_backup_routers_for_lpn(&lpn, &mut routers, |addr| *addr);
+
+        assert!(is_backup_router_for_lpn(&lpn, &routers[0], &routers));
+        assert!(is_backup_router_for_lpn(&lpn, &routers[1], &routers));
+        assert!(!is_backup_router_for_lpn(&lpn, &routers[3], &routers));
     }
 }

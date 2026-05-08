@@ -2,12 +2,20 @@ use std::time::{Duration, Instant};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex as AsyncMutex;
+use embassy_time::with_timeout;
 
-use routing_core::protocol::h2h::{H2hPayload, PeerInfo};
+use routing_core::behavior::{
+    build_h2h_payload, is_backup_router_for_lpn,
+    run_initiator_h2h_once as run_shared_initiator_h2h_once,
+};
+use routing_core::network::H2hInitiator;
+use routing_core::node::roles::Capabilities;
+use routing_core::protocol::h2h::{H2hFrame, H2hPayload, PeerInfo, H2H_DELIVERY_BODY_MAX};
 use routing_core::routing::table::RoutingTable;
 use routing_core::transport::TransportAddr;
 
 use crate::config_ops;
+use crate::network::SimInitiator;
 use crate::runtime::SimRuntime;
 use crate::scenario::ScenarioId;
 use crate::sim_state::{
@@ -159,6 +167,208 @@ impl SimHarness {
             });
     }
 
+    pub fn run_initiator_h2h_once(&self, node_idx: usize) {
+        let mut initiator = SimInitiator::new(
+            node_idx,
+            self.runtime.medium,
+            self.runtime.node_infos,
+            self.runtime.sim_config.clone(),
+        );
+        pollster::block_on(async {
+            let capabilities = self.runtime.sim_config.lock().unwrap().capabilities[node_idx];
+            run_shared_initiator_h2h_once(
+                &mut initiator,
+                &self.runtime.identities[node_idx],
+                capabilities,
+                &self.runtime.routing_tables[node_idx],
+                &self.runtime.uptimes[node_idx],
+            )
+            .await;
+        });
+    }
+
+    pub fn run_h2h_session_with_peer(&self, initiator_idx: usize, peer_idx: usize) -> bool {
+        let mut initiator = SimInitiator::new(
+            initiator_idx,
+            self.runtime.medium,
+            self.runtime.node_infos,
+            self.runtime.sim_config.clone(),
+        );
+        pollster::block_on(async {
+            let capabilities = self.runtime.sim_config.lock().unwrap().capabilities[initiator_idx];
+            let peer_short = self.runtime.node_infos[peer_idx].short_addr;
+            let peer_mac = self.runtime.node_infos[peer_idx].mac;
+            let payload = build_h2h_payload(
+                &self.runtime.identities[initiator_idx],
+                capabilities,
+                &self.runtime.uptimes[initiator_idx],
+                &self.runtime.routing_tables[initiator_idx],
+                &peer_short,
+            )
+            .await;
+
+            let Ok(peer_payload) = initiator.initiate_h2h(peer_mac, &payload).await else {
+                let _ = initiator.finish_h2h_session().await;
+                return false;
+            };
+            {
+                let transport = TransportAddr::ble(peer_mac);
+                let mut table = self.runtime.routing_tables[initiator_idx].lock().await;
+                table.update_peer_from_h2h(
+                    &peer_payload,
+                    peer_short,
+                    transport,
+                    embassy_time::Instant::now().as_ticks(),
+                );
+            }
+
+            if Capabilities::is_low_power_endpoint_bits(capabilities) {
+                loop {
+                    match with_timeout(embassy_time::Duration::from_millis(500), initiator.receive_h2h_frame()).await {
+                        Ok(Ok(H2hFrame::DeliverySummary { pending_count, .. })) => {
+                            if pending_count == 0 {
+                                continue;
+                            }
+                        }
+                        Ok(Ok(H2hFrame::DeliveryData { trace_id, .. })) => {
+                            self.runtime.tui_state.lock().unwrap().push_trace_event(
+                                trace_id,
+                                initiator_idx,
+                                0,
+                                0,
+                                TraceEventKind::DeliveredFromStore {
+                                    router_node: peer_idx,
+                                },
+                                format!(
+                                    "LPN {} received retained delivery from router {}",
+                                    initiator_idx, peer_idx
+                                ),
+                            );
+                            self.runtime.tui_state.lock().unwrap().mark_trace_delivered(trace_id);
+                            let mut trace_ids = heapless::Vec::new();
+                            let _ = trace_ids.push(trace_id);
+                            let _ = initiator
+                                .send_h2h_frame(&H2hFrame::DeliveryAck { trace_ids })
+                                .await;
+                        }
+                        Ok(Ok(H2hFrame::SessionDone)) => break,
+                        Ok(Ok(_)) => {}
+                        Ok(Err(_)) | Err(_) => break,
+                    }
+                }
+            } else if Capabilities::is_store_router_bits(capabilities) {
+                loop {
+                    match with_timeout(embassy_time::Duration::from_millis(500), initiator.receive_h2h_frame()).await {
+                        Ok(Ok(H2hFrame::RetentionTombstone { trace_ids })) => {
+                            self.runtime
+                                .store_forward_state
+                                .lock()
+                                .unwrap()
+                                .apply_tombstones(trace_ids.as_slice());
+                        }
+                        Ok(Ok(H2hFrame::RetentionReplica {
+                            trace_id,
+                            message_id,
+                            source_idx,
+                            destination_idx,
+                            owner_router_idx,
+                            body,
+                        })) => {
+                            let retained = self.runtime.store_forward_state.lock().unwrap().retain_replica(
+                                RetainedMessage {
+                                    trace_id,
+                                    message_id,
+                                    from_idx: source_idx as usize,
+                                    to_idx: destination_idx as usize,
+                                    holder_idx: initiator_idx,
+                                    owner_router_idx: owner_router_idx as usize,
+                                    body: String::from_utf8_lossy(body.as_slice()).into_owned(),
+                                    enqueued_at_secs: self.runtime.tui_state.lock().unwrap().elapsed_secs,
+                                    announced: false,
+                                },
+                            );
+                            if retained {
+                                let mut trace_ids = heapless::Vec::new();
+                                let _ = trace_ids.push(trace_id);
+                                let _ = initiator.send_h2h_frame(&H2hFrame::RetentionAck { trace_ids }).await;
+                            }
+                        }
+                        Ok(Ok(H2hFrame::SessionDone)) => break,
+                        Ok(Ok(_)) => {}
+                        Ok(Err(_)) | Err(_) => break,
+                    }
+                }
+
+                let known_store_routers = {
+                    let table = self.runtime.routing_tables[initiator_idx].lock().await;
+                    let mut routers = Vec::new();
+                    routers.push(*self.runtime.identities[initiator_idx].short_addr());
+                    for peer in table.peers.iter() {
+                        if Capabilities::is_store_router_bits(peer.capabilities)
+                            && !routers.iter().any(|existing| *existing == peer.short_addr)
+                        {
+                            routers.push(peer.short_addr);
+                        }
+                    }
+                    routers
+                };
+
+                let tombstones = {
+                    let state = self.runtime.store_forward_state.lock().unwrap();
+                    state.tombstones().to_vec()
+                };
+                if !tombstones.is_empty() {
+                    let mut trace_ids = heapless::Vec::new();
+                    for trace_id in tombstones
+                        .iter()
+                        .take(routing_core::protocol::h2h::H2H_ACK_IDS_MAX)
+                    {
+                        let _ = trace_ids.push(*trace_id);
+                    }
+                    let _ = initiator
+                        .send_h2h_frame(&H2hFrame::RetentionTombstone { trace_ids })
+                        .await;
+                }
+
+                let replication_candidates = self
+                    .runtime
+                    .store_forward_state
+                    .lock()
+                    .unwrap()
+                    .replication_candidates(initiator_idx);
+
+                for entry in replication_candidates {
+                    let lpn_short = self.runtime.tui_state.lock().unwrap().node_short_addrs[entry.to_idx];
+                    if !is_backup_router_for_lpn(&lpn_short, &peer_short, known_store_routers.as_slice()) {
+                        continue;
+                    }
+                    let mut body = heapless::Vec::new();
+                    for byte in entry.body.as_bytes().iter().take(H2H_DELIVERY_BODY_MAX) {
+                        let _ = body.push(*byte);
+                    }
+                    let frame = H2hFrame::RetentionReplica {
+                        trace_id: entry.trace_id,
+                        message_id: entry.message_id,
+                        source_idx: entry.from_idx as u8,
+                        destination_idx: entry.to_idx as u8,
+                        owner_router_idx: entry.owner_router_idx as u8,
+                        body,
+                    };
+                    let _ = initiator.send_h2h_frame(&frame).await;
+                    match with_timeout(embassy_time::Duration::from_millis(500), initiator.receive_h2h_frame()).await {
+                        Ok(Ok(H2hFrame::RetentionAck { .. })) => {}
+                        Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {}
+                    }
+                }
+
+                let _ = initiator.send_h2h_frame(&H2hFrame::SessionDone).await;
+            }
+
+            let _ = initiator.finish_h2h_session().await;
+            true
+        })
+    }
+
     pub fn trace(&self, trace_id: u64) -> Option<MessageTrace> {
         self.state()
             .traces
@@ -184,6 +394,23 @@ impl SimHarness {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    pub fn retained_trace_exists_at_holder(&self, trace_id: u64, holder_idx: usize) -> bool {
+        self.runtime
+            .store_forward_state
+            .lock()
+            .unwrap()
+            .contains_trace_at_holder(trace_id, holder_idx)
+    }
+
+    pub fn wait_for_retained_trace_at_holder(
+        &self,
+        trace_id: u64,
+        holder_idx: usize,
+        timeout: Duration,
+    ) {
+        self.wait_until(timeout, || self.retained_trace_exists_at_holder(trace_id, holder_idx));
     }
 
     pub fn trace_has_delivery(&self, trace_id: u64, node_idx: usize) -> bool {

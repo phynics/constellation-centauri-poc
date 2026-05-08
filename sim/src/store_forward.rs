@@ -146,6 +146,12 @@ impl StoreForwardState {
             .iter()
             .any(|entry| entry.holder_idx == holder_idx && entry.to_idx == destination_idx)
     }
+
+    pub fn contains_trace_at_holder(&self, trace_id: u64, holder_idx: usize) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.trace_id == trace_id && entry.holder_idx == holder_idx)
+    }
 }
 
 /// Periodically expires retained messages that were never collected by a waking

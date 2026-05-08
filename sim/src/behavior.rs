@@ -13,6 +13,7 @@ use heapless::Vec as HeaplessVec;
 
 use routing_core::behavior::{
     apply_discovery_events, build_h2h_payload, collect_h2h_peer_snapshots,
+    is_backup_router_for_lpn,
 };
 use routing_core::config::H2H_CYCLE_SECS;
 use routing_core::crypto::identity::{short_addr_of, NodeIdentity};
@@ -191,15 +192,16 @@ where
                             .unwrap()
                             .ack_delivered(node_idx, acked.as_slice());
                     }
+
+                    // Close the LPN wake session explicitly so the initiator
+                    // loop can advance instead of waiting on another frame.
+                    let _ = responder.send_h2h_frame(&H2hFrame::SessionDone).await;
                 } else if Capabilities::is_store_router_bits(capabilities)
                     && Capabilities::is_store_router_bits(partner_caps)
                 {
-                    // Router-to-router redundancy path: the preferred/original
-                    // owner may opportunistically seed another store-capable
-                    // router with retained deliveries for future LPN wake-up.
-                    // This is deliberately lightweight for now: replicate inside
-                    // the existing H2H session rather than adding a dedicated
-                    // background replication transport.
+                    // Router-to-router redundancy path, responder phase.
+                    // The responder sends its retention state first, then keeps
+                    // the session open so the initiator can send its own phase.
                     let tombstones = {
                         let state = store_forward_state.lock().unwrap();
                         state.tombstones().to_vec()
@@ -219,7 +221,42 @@ where
                         .unwrap()
                         .replication_candidates(node_idx);
 
+                    let known_store_routers = {
+                        let table = routing_table.lock().await;
+                        let mut routers = Vec::new();
+                        if Capabilities::is_store_router_bits(capabilities) {
+                            routers.push(*identity.short_addr());
+                        }
+                        for peer in table.peers.iter() {
+                            if Capabilities::is_store_router_bits(peer.capabilities)
+                                && !routers.iter().any(|existing| *existing == peer.short_addr)
+                            {
+                                routers.push(peer.short_addr);
+                            }
+                        }
+                        routers
+                    };
+
                     for entry in replication_candidates {
+                        let lpn_short = if entry.to_idx < MAX_NODES {
+                            tui_state.lock().unwrap().node_short_addrs[entry.to_idx]
+                        } else {
+                            continue;
+                        };
+
+                        // Replicas are only seeded onto the deterministic
+                        // backup subset for this LPN. The owner may be chosen
+                        // by primary link quality, but backup placement must be
+                        // shared and stable so any router can reason about the
+                        // same fallback set.
+                        if !is_backup_router_for_lpn(
+                            &lpn_short,
+                            &partner_short,
+                            known_store_routers.as_slice(),
+                        ) {
+                            continue;
+                        }
+
                         let mut body = heapless::Vec::new();
                         for byte in entry.body.as_bytes().iter().take(H2H_DELIVERY_BODY_MAX) {
                             let _ = body.push(*byte);
@@ -246,9 +283,54 @@ where
                             Ok(_) => {}
                         }
                     }
+
+                    let _ = responder.send_h2h_frame(&H2hFrame::SessionDone).await;
+
+                    loop {
+                        match responder.receive_h2h_frame().await {
+                            Ok(H2hFrame::RetentionTombstone { trace_ids }) => {
+                                store_forward_state
+                                    .lock()
+                                    .unwrap()
+                                    .apply_tombstones(trace_ids.as_slice());
+                            }
+                            Ok(H2hFrame::RetentionReplica {
+                                trace_id,
+                                message_id,
+                                source_idx,
+                                destination_idx,
+                                owner_router_idx,
+                                body,
+                            }) => {
+                                let retained = store_forward_state.lock().unwrap().retain_replica(
+                                    crate::store_forward::RetainedMessage {
+                                        trace_id,
+                                        message_id,
+                                        from_idx: source_idx as usize,
+                                        to_idx: destination_idx as usize,
+                                        holder_idx: node_idx,
+                                        owner_router_idx: owner_router_idx as usize,
+                                        body: String::from_utf8_lossy(body.as_slice()).into_owned(),
+                                        enqueued_at_secs: tui_state.lock().unwrap().elapsed_secs,
+                                        announced: false,
+                                    },
+                                );
+
+                                if retained {
+                                    let mut trace_ids = heapless::Vec::new();
+                                    let _ = trace_ids.push(trace_id);
+                                    let _ = responder
+                                        .send_h2h_frame(&H2hFrame::RetentionAck { trace_ids })
+                                        .await;
+                                }
+                            }
+                            Ok(H2hFrame::SessionDone) => break,
+                            Ok(_) => {}
+                            Err(_) => break,
+                        }
+                    }
                 }
 
-                let _ = responder.send_h2h_frame(&H2hFrame::SessionDone).await;
                 let _ = responder.finish_h2h_session().await;
             }
             Err(e) => {
@@ -394,6 +476,85 @@ where
                                 Err(_) => break,
                             }
                         }
+
+                        let known_store_routers = {
+                            let table = routing_table.lock().await;
+                            let mut routers = Vec::new();
+                            if Capabilities::is_store_router_bits(capabilities) {
+                                routers.push(*identity.short_addr());
+                            }
+                            for peer in table.peers.iter() {
+                                if Capabilities::is_store_router_bits(peer.capabilities)
+                                    && !routers.iter().any(|existing| *existing == peer.short_addr)
+                                {
+                                    routers.push(peer.short_addr);
+                                }
+                            }
+                            routers
+                        };
+
+                        let tombstones = {
+                            let state = store_forward_state.lock().unwrap();
+                            state.tombstones().to_vec()
+                        };
+                        if !tombstones.is_empty() {
+                            let mut trace_ids = heapless::Vec::new();
+                            for trace_id in tombstones
+                                .iter()
+                                .take(routing_core::protocol::h2h::H2H_ACK_IDS_MAX)
+                            {
+                                let _ = trace_ids.push(*trace_id);
+                            }
+                            let _ = initiator
+                                .send_h2h_frame(&H2hFrame::RetentionTombstone { trace_ids })
+                                .await;
+                        }
+
+                        let replication_candidates = store_forward_state
+                            .lock()
+                            .unwrap()
+                            .replication_candidates(node_idx);
+
+                        for entry in replication_candidates {
+                            let lpn_short = if entry.to_idx < MAX_NODES {
+                                tui_state.lock().unwrap().node_short_addrs[entry.to_idx]
+                            } else {
+                                continue;
+                            };
+                            if !is_backup_router_for_lpn(
+                                &lpn_short,
+                                peer_addr,
+                                known_store_routers.as_slice(),
+                            ) {
+                                continue;
+                            }
+
+                            let mut body = heapless::Vec::new();
+                            for byte in entry.body.as_bytes().iter().take(H2H_DELIVERY_BODY_MAX) {
+                                let _ = body.push(*byte);
+                            }
+
+                            let frame = H2hFrame::RetentionReplica {
+                                trace_id: entry.trace_id,
+                                message_id: entry.message_id,
+                                source_idx: entry.from_idx as u8,
+                                destination_idx: entry.to_idx as u8,
+                                owner_router_idx: entry.owner_router_idx as u8,
+                                body,
+                            };
+
+                            if initiator.send_h2h_frame(&frame).await.is_err() {
+                                break;
+                            }
+
+                            match initiator.receive_h2h_frame().await {
+                                Ok(H2hFrame::RetentionAck { .. }) => {}
+                                Ok(H2hFrame::SessionDone) | Err(_) => break,
+                                Ok(_) => {}
+                            }
+                        }
+
+                        let _ = initiator.send_h2h_frame(&H2hFrame::SessionDone).await;
                     }
 
                     let _ = initiator.finish_h2h_session().await;

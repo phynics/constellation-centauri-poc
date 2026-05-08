@@ -16,6 +16,7 @@ pub const ROUTING_DECAY_FACTOR: u8 = 3;
 pub const LE_DELIVERY_WINDOW_SECS: u64 = 2;
 pub const STORE_FORWARD_MAX_PER_NODE: usize = 8;
 pub const STORE_FORWARD_MAX_AGE_SECS: u64 = 600;
+pub const STORE_FORWARD_BACKUP_ROUTERS: usize = 2;
 pub const MAX_PEERS: usize = 32;
 /// Embassy on ESP32 defaults to 1 MHz tick rate.
 pub const TICK_HZ: u64 = 1_000_000;
