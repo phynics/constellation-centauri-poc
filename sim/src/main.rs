@@ -205,6 +205,14 @@ fn main() {
             SimNodeInfo { short_addr, mac }
         }));
 
+    {
+        let mut state = tui_state.lock().unwrap();
+        state.node_short_addrs = core::array::from_fn(|i| node_infos[i].short_addr);
+        for i in 0..MAX_NODES {
+            state.nodes[i].short_addr = state.node_short_addrs[i];
+        }
+    }
+
     let routing_tables: &'static [AsyncMutex<CriticalSectionRawMutex, RoutingTable>; MAX_NODES] =
         ROUTING_TABLES.init(core::array::from_fn(|i| {
             AsyncMutex::new(RoutingTable::new(*identities[i].short_addr()))

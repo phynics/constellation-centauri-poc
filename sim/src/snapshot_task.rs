@@ -73,6 +73,7 @@ pub async fn run_snapshot_loop(
         // Write snapshot — skip this tick if TUI holds the lock.
         if let Ok(mut state) = tui_state.try_lock() {
             state.elapsed_secs = elapsed;
+            state.node_short_addrs = core::array::from_fn(|i| *identities[i].short_addr());
             state.nodes = snapshots;
         }
     }

@@ -317,6 +317,16 @@ impl RoutingTable {
         indices
     }
 
+    fn is_usable_transport_peer(peer: &PeerEntry) -> bool {
+        peer.trust > TRUST_EXPIRED && peer.transport_addr.addr != [0u8; 6]
+    }
+
+    fn usable_peer_by_short_addr(&self, short_addr: &ShortAddr) -> Option<&PeerEntry> {
+        self.peers
+            .iter()
+            .find(|peer| peer.short_addr == *short_addr && Self::is_usable_transport_peer(peer))
+    }
+
     /// Return forwarding candidates for a destination using current routing knowledge.
     ///
     /// The direct destination is preferred when known and still has a usable
@@ -326,15 +336,22 @@ impl RoutingTable {
         let mut candidates = Vec::new();
 
         if let Some(peer) = self.find_peer(dst) {
-            if peer.trust > TRUST_EXPIRED && peer.transport_addr.addr != [0u8; 6] {
+            if Self::is_usable_transport_peer(peer) {
                 let _ = candidates.push((peer.short_addr, peer.transport_addr));
                 return candidates;
+            }
+
+            if peer.trust == TRUST_INDIRECT {
+                if let Some(next_hop) = self.usable_peer_by_short_addr(&peer.learned_from) {
+                    let _ = candidates.push((next_hop.short_addr, next_hop.transport_addr));
+                    return candidates;
+                }
             }
         }
 
         for idx in self.find_routes(dst).iter().copied() {
             if let Some(peer) = self.peers.get(idx) {
-                if peer.trust == TRUST_EXPIRED || peer.transport_addr.addr == [0u8; 6] {
+                if !Self::is_usable_transport_peer(peer) {
                     continue;
                 }
                 let candidate = (peer.short_addr, peer.transport_addr);
@@ -753,5 +770,193 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0, via_addr);
+    }
+
+    #[test]
+    fn forwarding_candidates_resolves_indirect_destination_via_learned_from() {
+        let self_addr = short_addr_of(&pubkey(0x90));
+        let learned_from_pubkey = pubkey(0x91);
+        let learned_from_addr = short_addr_of(&learned_from_pubkey);
+        let indirect_pubkey = pubkey(0x92);
+        let indirect_addr = short_addr_of(&indirect_pubkey);
+        let transport = TransportAddr::ble(mac(0xF0));
+        let mut table = RoutingTable::new(self_addr);
+
+        let _ = table
+            .peers
+            .push(direct_peer_entry(learned_from_pubkey, transport, 10));
+        let _ = table.peers.push(PeerEntry {
+            short_addr: indirect_addr,
+            pubkey: indirect_pubkey,
+            capabilities: 0x5555,
+            bloom: BloomFilter::new(),
+            transport_addr: TransportAddr {
+                addr_type: 0,
+                addr: [0u8; 6],
+            },
+            last_seen_ticks: 20,
+            hop_count: 2,
+            trust: TRUST_INDIRECT,
+            learned_from: learned_from_addr,
+        });
+
+        let candidates = table.forwarding_candidates(&indirect_addr);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0, learned_from_addr);
+        assert_eq!(candidates[0].1, transport);
+    }
+
+    #[test]
+    fn forwarding_candidates_returns_empty_when_indirect_learned_from_is_unusable() {
+        let self_addr = short_addr_of(&pubkey(0x93));
+        let learned_from_pubkey = pubkey(0x94);
+        let learned_from_addr = short_addr_of(&learned_from_pubkey);
+        let indirect_pubkey = pubkey(0x95);
+        let indirect_addr = short_addr_of(&indirect_pubkey);
+        let mut table = RoutingTable::new(self_addr);
+
+        let _ = table.peers.push(PeerEntry {
+            short_addr: learned_from_addr,
+            pubkey: learned_from_pubkey,
+            capabilities: 0x1111,
+            bloom: BloomFilter::new(),
+            transport_addr: TransportAddr {
+                addr_type: 0,
+                addr: [0u8; 6],
+            },
+            last_seen_ticks: 10,
+            hop_count: 0,
+            trust: TRUST_DIRECT,
+            learned_from: [0u8; 8],
+        });
+        let _ = table.peers.push(PeerEntry {
+            short_addr: indirect_addr,
+            pubkey: indirect_pubkey,
+            capabilities: 0x2222,
+            bloom: BloomFilter::new(),
+            transport_addr: TransportAddr {
+                addr_type: 0,
+                addr: [0u8; 6],
+            },
+            last_seen_ticks: 20,
+            hop_count: 3,
+            trust: TRUST_INDIRECT,
+            learned_from: learned_from_addr,
+        });
+
+        let candidates = table.forwarding_candidates(&indirect_addr);
+
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn forwarding_candidates_falls_back_to_bloom_when_learned_from_is_unusable() {
+        let self_addr = short_addr_of(&pubkey(0x96));
+        let learned_from_pubkey = pubkey(0x97);
+        let learned_from_addr = short_addr_of(&learned_from_pubkey);
+        let bloom_via_pubkey = pubkey(0x98);
+        let bloom_via_addr = short_addr_of(&bloom_via_pubkey);
+        let indirect_pubkey = pubkey(0x99);
+        let indirect_addr = short_addr_of(&indirect_pubkey);
+        let mut table = RoutingTable::new(self_addr);
+
+        let _ = table.peers.push(PeerEntry {
+            short_addr: learned_from_addr,
+            pubkey: learned_from_pubkey,
+            capabilities: 0x1111,
+            bloom: BloomFilter::new(),
+            transport_addr: TransportAddr {
+                addr_type: 0,
+                addr: [0u8; 6],
+            },
+            last_seen_ticks: 10,
+            hop_count: 0,
+            trust: TRUST_DIRECT,
+            learned_from: [0u8; 8],
+        });
+        let mut bloom_via = direct_peer_entry(bloom_via_pubkey, TransportAddr::ble(mac(0xF1)), 15);
+        bloom_via.bloom.insert(&indirect_addr);
+        let _ = table.peers.push(bloom_via);
+        let _ = table.peers.push(PeerEntry {
+            short_addr: indirect_addr,
+            pubkey: indirect_pubkey,
+            capabilities: 0x2222,
+            bloom: BloomFilter::new(),
+            transport_addr: TransportAddr {
+                addr_type: 0,
+                addr: [0u8; 6],
+            },
+            last_seen_ticks: 20,
+            hop_count: 3,
+            trust: TRUST_INDIRECT,
+            learned_from: learned_from_addr,
+        });
+
+        let candidates = table.forwarding_candidates(&indirect_addr);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0, bloom_via_addr);
+    }
+
+    #[test]
+    fn forwarding_candidates_resolve_multiple_indirect_destinations_via_their_own_partners() {
+        let self_addr = short_addr_of(&pubkey(0xA0));
+        let partner_a_pubkey = pubkey(0xA1);
+        let partner_b_pubkey = pubkey(0xA2);
+        let partner_a_addr = short_addr_of(&partner_a_pubkey);
+        let partner_b_addr = short_addr_of(&partner_b_pubkey);
+        let indirect_a_pubkey = pubkey(0xA3);
+        let indirect_b_pubkey = pubkey(0xA4);
+        let indirect_a_addr = short_addr_of(&indirect_a_pubkey);
+        let indirect_b_addr = short_addr_of(&indirect_b_pubkey);
+        let mut table = RoutingTable::new(self_addr);
+
+        let _ = table.peers.push(direct_peer_entry(
+            partner_a_pubkey,
+            TransportAddr::ble(mac(0xF2)),
+            10,
+        ));
+        let _ = table.peers.push(direct_peer_entry(
+            partner_b_pubkey,
+            TransportAddr::ble(mac(0xF3)),
+            10,
+        ));
+        let _ = table.peers.push(PeerEntry {
+            short_addr: indirect_a_addr,
+            pubkey: indirect_a_pubkey,
+            capabilities: 0x3333,
+            bloom: BloomFilter::new(),
+            transport_addr: TransportAddr {
+                addr_type: 0,
+                addr: [0u8; 6],
+            },
+            last_seen_ticks: 20,
+            hop_count: 2,
+            trust: TRUST_INDIRECT,
+            learned_from: partner_a_addr,
+        });
+        let _ = table.peers.push(PeerEntry {
+            short_addr: indirect_b_addr,
+            pubkey: indirect_b_pubkey,
+            capabilities: 0x4444,
+            bloom: BloomFilter::new(),
+            transport_addr: TransportAddr {
+                addr_type: 0,
+                addr: [0u8; 6],
+            },
+            last_seen_ticks: 20,
+            hop_count: 2,
+            trust: TRUST_INDIRECT,
+            learned_from: partner_b_addr,
+        });
+
+        let candidates_a = table.forwarding_candidates(&indirect_a_addr);
+        let candidates_b = table.forwarding_candidates(&indirect_b_addr);
+
+        assert_eq!(candidates_a.len(), 1);
+        assert_eq!(candidates_a[0].0, partner_a_addr);
+        assert_eq!(candidates_b.len(), 1);
+        assert_eq!(candidates_b[0].0, partner_b_addr);
     }
 }

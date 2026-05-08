@@ -224,6 +224,7 @@ pub struct MessageTrace {
 }
 
 pub struct TuiState {
+    pub node_short_addrs: [[u8; 8]; MAX_NODES],
     pub nodes: [NodeSnapshot; MAX_NODES],
     /// Capped at 200 entries.
     pub traces: VecDeque<MessageTrace>,
@@ -236,6 +237,7 @@ pub struct TuiState {
 impl Default for TuiState {
     fn default() -> Self {
         Self {
+            node_short_addrs: [[0u8; 8]; MAX_NODES],
             nodes: core::array::from_fn(|_| NodeSnapshot::default()),
             traces: VecDeque::new(),
             elapsed_secs: 0,
@@ -364,7 +366,16 @@ impl TuiState {
         self.next_trace_id = 1;
         self.msgs_sent = [0; MAX_NODES];
         self.msgs_received = [0; MAX_NODES];
-        self.nodes = core::array::from_fn(|_| NodeSnapshot::default());
+        self.nodes = core::array::from_fn(|i| NodeSnapshot {
+            short_addr: self.node_short_addrs[i],
+            ..NodeSnapshot::default()
+        });
+    }
+
+    pub fn resolve_node_index(&self, short_addr: &[u8; 8]) -> Option<usize> {
+        self.node_short_addrs
+            .iter()
+            .position(|addr| addr == short_addr)
     }
 }
 

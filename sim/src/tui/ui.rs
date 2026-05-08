@@ -68,6 +68,7 @@ pub fn render(frame: &mut Frame, app: &App, state: &TuiState, config: &SimConfig
 fn render_summary(frame: &mut Frame, app: &App, state: &TuiState, config: &SimConfig, area: Rect) {
     let preset = app.current_scenario_preset();
     let selected = selected_trace(state, app);
+    let filtered_count = state.filtered_trace_indices(app.trace_filter).len();
     let block = Block::default()
         .title(" Trace debugger ")
         .borders(Borders::ALL);
@@ -97,13 +98,14 @@ fn render_summary(frame: &mut Frame, app: &App, state: &TuiState, config: &SimCo
         Line::from(format!(" {}", preset.description)),
         Line::styled(
             format!(
-                " mode={}  filter={}  traces={}  active={}  {}  [N] cycle modes  [F]ilter  [M] send  [R] scenario",
+                " mode={}  filter={}  traces={}/{}  active={}  {}  [N] cycle modes  [F]ilter  [M] send  [R] scenario",
                 match app.view_mode {
                     ViewMode::Trace => "trace",
                     ViewMode::Nodes => "nodes",
                     ViewMode::Links => "links",
                 },
                 app.trace_filter.as_str(),
+                filtered_count,
                 state.traces.len(),
                 config.n_active,
                 trace_summary
@@ -124,6 +126,24 @@ fn render_trace_list(frame: &mut Frame, app: &App, state: &TuiState, area: Rect)
     frame.render_widget(block, area);
 
     let filtered = state.filtered_trace_indices(app.trace_filter);
+    if filtered.is_empty() {
+        let message = if state.traces.is_empty() {
+            "No traces yet. Press [M] to inject a manual message.".to_string()
+        } else {
+            format!(
+                "No traces match filter '{}'. Press [F] to change filter.",
+                app.trace_filter.as_str()
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(message)
+                .wrap(Wrap { trim: false })
+                .style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    }
+
     let visible = inner.height as usize;
     let total = filtered.len();
     let start = total.saturating_sub(visible).min(app.selected_trace);
@@ -374,9 +394,7 @@ fn render_node_context(
         .take(inner.height.saturating_sub(6) as usize)
     {
         let peer_idx = state
-            .nodes
-            .iter()
-            .position(|candidate| candidate.short_addr == peer.short_addr)
+            .resolve_node_index(&peer.short_addr)
             .map(|i| i.to_string())
             .unwrap_or_else(|| "?".to_string());
         lines.push(Line::from(format!(
