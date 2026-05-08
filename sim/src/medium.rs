@@ -13,7 +13,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 
 use routing_core::network::NetworkError;
-use routing_core::protocol::h2h::H2hPayload;
+use routing_core::protocol::h2h::{H2hFrame, H2hPayload};
 
 use crate::sim_state::MAX_NODES;
 
@@ -31,6 +31,11 @@ pub struct SimH2hRequest {
 
 /// Response (or error) to an H2H request, placed in the initiator's response slot.
 pub struct SimH2hResponse {
+    pub result: Result<([u8; PAYLOAD_BUF], usize), NetworkError>,
+}
+
+/// Typed post-sync session frame passed over an already-established H2H link.
+pub struct SimH2hFrame {
     pub result: Result<([u8; PAYLOAD_BUF], usize), NetworkError>,
 }
 
@@ -53,6 +58,12 @@ pub struct SimMedium {
     pub h2h_req: [Channel<CriticalSectionRawMutex, SimH2hRequest, 1>; MAX_NODES],
     /// Response slot per node: responder pushes here; initiator reads its own slot.
     pub h2h_resp: [Channel<CriticalSectionRawMutex, SimH2hResponse, 1>; MAX_NODES],
+    /// Follow-up frames flowing from responder to initiator after the initial
+    /// sync response.
+    pub h2h_to_initiator: [Channel<CriticalSectionRawMutex, SimH2hFrame, 4>; MAX_NODES],
+    /// Follow-up frames flowing from initiator to responder after the initial
+    /// sync response.
+    pub h2h_to_responder: [Channel<CriticalSectionRawMutex, SimH2hFrame, 4>; MAX_NODES],
     /// Application data inbox per node.
     pub msg_inbox: [Channel<CriticalSectionRawMutex, SimDataMessage, 4>; MAX_NODES],
 }
@@ -104,6 +115,18 @@ impl SimMedium {
                 Channel::new(),
                 Channel::new(),
             ],
+            h2h_to_initiator: [
+                Channel::new(), Channel::new(), Channel::new(), Channel::new(), Channel::new(),
+                Channel::new(), Channel::new(), Channel::new(), Channel::new(), Channel::new(),
+                Channel::new(), Channel::new(), Channel::new(), Channel::new(), Channel::new(),
+                Channel::new(), Channel::new(), Channel::new(), Channel::new(), Channel::new(),
+            ],
+            h2h_to_responder: [
+                Channel::new(), Channel::new(), Channel::new(), Channel::new(), Channel::new(),
+                Channel::new(), Channel::new(), Channel::new(), Channel::new(), Channel::new(),
+                Channel::new(), Channel::new(), Channel::new(), Channel::new(), Channel::new(),
+                Channel::new(), Channel::new(), Channel::new(), Channel::new(), Channel::new(),
+            ],
             msg_inbox: [
                 Channel::new(),
                 Channel::new(),
@@ -142,4 +165,16 @@ pub fn serialize_payload(payload: &H2hPayload) -> Option<([u8; PAYLOAD_BUF], usi
 /// Deserialise an `H2hPayload` from a fixed buffer slice.
 pub fn deserialize_payload(bytes: &[u8; PAYLOAD_BUF], len: usize) -> Option<H2hPayload> {
     H2hPayload::deserialize(&bytes[..len]).ok()
+}
+
+pub fn serialize_frame(frame: &H2hFrame) -> Option<([u8; PAYLOAD_BUF], usize)> {
+    let mut buf = [0u8; PAYLOAD_BUF];
+    match frame.serialize(&mut buf) {
+        Ok(n) => Some((buf, n)),
+        Err(_) => None,
+    }
+}
+
+pub fn deserialize_frame(bytes: &[u8; PAYLOAD_BUF], len: usize) -> Option<H2hFrame> {
+    H2hFrame::deserialize(&bytes[..len]).ok()
 }

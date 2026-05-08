@@ -18,6 +18,10 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::boxed::Box;
+
 esp_bootloader_esp_idf::esp_app_desc!();
 
 // ---------------------------------------------------------------------------
@@ -41,17 +45,12 @@ use static_cell::StaticCell;
 
 use trouble_host::prelude::*;
 
-use bt_hci::cmd::le::{
-    LeAddDeviceToFilterAcceptList, LeClearFilterAcceptList, LeCreateConn, LeSetScanEnable,
-    LeSetScanParams,
-};
-use bt_hci::controller::{ControllerCmdAsync, ControllerCmdSync};
-
 pub mod node;
 pub mod transport;
 
 use routing_core::behavior::{run_heartbeat_loop, run_initiator_loop, run_responder_loop};
 use routing_core::crypto::identity::NodeIdentity;
+use routing_core::config::H2H_PSM;
 use routing_core::node::roles::Capabilities;
 use routing_core::routing::table::RoutingTable;
 
@@ -121,20 +120,24 @@ async fn main(_spawner: Spawner) {
         BleConnector::new(bluetooth, Default::default()).expect("Failed to create BLE connector");
     let controller: ExternalController<_, 20> = ExternalController::new(connector);
 
-    let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
+    let mut resources: HostResources<_, DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
         HostResources::new();
 
     let address = derive_ble_address(&identity);
     println!("BLE address: {:02x?}", address);
 
-    let stack = trouble_host::new(controller, &mut resources).set_random_address(address);
-
-    let Host {
-        mut peripheral,
-        central,
-        runner,
-        ..
-    } = stack.build();
+    let stack = Box::leak(Box::new(
+        trouble_host::new(controller, &mut resources)
+            .set_random_address(address)
+            // H2H now spans the initial sync exchange and any delayed-delivery
+            // follow-up frames, so the CoC SPSM must be registered explicitly on
+            // the stack builder using the current trouble-host API.
+            .register_l2cap_spsm(H2H_PSM)
+            .build(),
+    ));
+    let peripheral = stack.peripheral();
+    let central = stack.central();
+    let runner = stack.runner();
 
     // Shared state
     let routing_table = RoutingTable::new(*identity.short_addr());
@@ -149,8 +152,7 @@ async fn main(_spawner: Spawner) {
 
     let capabilities = Capabilities(Capabilities::ROUTE | Capabilities::APPLICATION);
 
-    let mut ble_responder =
-        BleResponder::new(peripheral, &stack, *identity.short_addr(), capabilities.0);
+    let mut ble_responder = BleResponder::new(peripheral, &stack, *identity.short_addr(), capabilities.0);
 
     let mut ble_initiator = BleInitiator::new(central, &stack, address, discovery_rx);
 

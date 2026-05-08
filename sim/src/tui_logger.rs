@@ -19,6 +19,12 @@ pub fn get_logs(n: usize) -> Vec<String> {
     buf.iter().rev().take(n).rev().cloned().collect()
 }
 
+/// Return all currently buffered log lines (oldest first).
+pub fn snapshot_logs() -> Vec<String> {
+    let buf = LOG_BUF.lock().unwrap();
+    buf.iter().cloned().collect()
+}
+
 struct TuiLogger;
 
 impl Log for TuiLogger {

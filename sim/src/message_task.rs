@@ -12,12 +12,14 @@ use routing_core::config::BROADCAST_ADDR;
 use routing_core::config::DEFAULT_TTL;
 use routing_core::protocol::packet::PACKET_TYPE_DATA;
 use routing_core::routing::table::RoutingTable;
+use routing_core::node::roles::Capabilities;
 
 use crate::medium::{SimDataMessage, SimMedium};
 use crate::network::SimNodeInfo;
 use crate::sim_state::{
     MessageKind, NodeType, SimConfig, TraceEventKind, TraceStatus, TuiState, MAX_NODES,
 };
+use crate::store_forward::{RetainedMessage, StoreForwardState};
 
 /// Receives routed application messages, applies shared routing-core forwarding
 /// decisions, and records hop-by-hop trace events.
@@ -28,6 +30,7 @@ pub async fn run_message_loop(
     all_nodes: &'static [SimNodeInfo; MAX_NODES],
     sim_config: Arc<Mutex<SimConfig>>,
     tui_state: Arc<Mutex<TuiState>>,
+    store_forward_state: Arc<Mutex<StoreForwardState>>,
 ) -> ! {
     loop {
         let msg = medium.msg_inbox[node_idx].receive().await;
@@ -134,6 +137,55 @@ pub async fn run_message_loop(
         }
 
         if candidates.is_empty() {
+            let destination_is_low_power = !msg.is_broadcast
+                && {
+                    let cfg = sim_config.lock().unwrap();
+                    Capabilities::is_low_power_endpoint_bits(cfg.capabilities[msg.to_idx])
+                };
+            let holder_caps = {
+                let cfg = sim_config.lock().unwrap();
+                cfg.capabilities[node_idx]
+            };
+
+            if destination_is_low_power && Capabilities::is_store_router_bits(holder_caps) {
+                let body = tui_state
+                    .lock()
+                    .unwrap()
+                    .traces
+                    .iter()
+                    .find(|trace| trace.id == msg.trace_id)
+                    .map(|trace| trace.body.clone())
+                    .unwrap_or_default();
+                let now_secs = tui_state.lock().unwrap().elapsed_secs;
+                let retained = store_forward_state.lock().unwrap().retain(RetainedMessage {
+                    trace_id: msg.trace_id,
+                    message_id: msg.message_id,
+                    from_idx: msg.from_idx,
+                    to_idx: msg.to_idx,
+                    holder_idx: node_idx,
+                    owner_router_idx: node_idx,
+                    body,
+                    enqueued_at_secs: now_secs,
+                    announced: false,
+                });
+
+                if retained {
+                    let mut state = tui_state.lock().unwrap();
+                    state.push_trace_event(
+                        msg.trace_id,
+                        node_idx,
+                        msg.ttl,
+                        msg.hop_count,
+                        TraceEventKind::Deferred,
+                        format!(
+                            "router {} retained packet for low-power destination {}",
+                            node_idx, msg.to_idx
+                        ),
+                    );
+                    continue;
+                }
+            }
+
             let mut state = tui_state.lock().unwrap();
             state.push_trace_event(
                 msg.trace_id,
@@ -233,6 +285,54 @@ pub async fn run_message_loop(
         }
 
         if !forwarded_any {
+            let destination_is_low_power = !msg.is_broadcast
+                && {
+                    let cfg = sim_config.lock().unwrap();
+                    Capabilities::is_low_power_endpoint_bits(cfg.capabilities[msg.to_idx])
+                };
+            let holder_caps = {
+                let cfg = sim_config.lock().unwrap();
+                cfg.capabilities[node_idx]
+            };
+
+            if destination_is_low_power && Capabilities::is_store_router_bits(holder_caps) {
+                let body = tui_state
+                    .lock()
+                    .unwrap()
+                    .traces
+                    .iter()
+                    .find(|trace| trace.id == msg.trace_id)
+                    .map(|trace| trace.body.clone())
+                    .unwrap_or_default();
+                let now_secs = tui_state.lock().unwrap().elapsed_secs;
+                let retained = store_forward_state.lock().unwrap().retain(RetainedMessage {
+                    trace_id: msg.trace_id,
+                    message_id: msg.message_id,
+                    from_idx: msg.from_idx,
+                    to_idx: msg.to_idx,
+                    holder_idx: node_idx,
+                    owner_router_idx: node_idx,
+                    body,
+                    enqueued_at_secs: now_secs,
+                    announced: false,
+                });
+                if retained {
+                    let mut state = tui_state.lock().unwrap();
+                    state.push_trace_event(
+                        msg.trace_id,
+                        node_idx,
+                        msg.ttl,
+                        msg.hop_count,
+                        TraceEventKind::Deferred,
+                        format!(
+                            "router {} retained packet for low-power destination {} after transient forward failure",
+                            node_idx, msg.to_idx
+                        ),
+                    );
+                    continue;
+                }
+            }
+
             let mut state = tui_state.lock().unwrap();
             state.push_trace_event(
                 msg.trace_id,

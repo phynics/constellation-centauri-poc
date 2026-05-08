@@ -14,6 +14,7 @@ use crate::sim_state::{
     MessageKind, MessageTrace, SimCommand, SimConfig, TraceEventKind, TraceStatus, TuiState,
     MAX_NODES,
 };
+use crate::store_forward::RetainedMessage;
 
 pub struct SimHarness {
     runtime: SimRuntime,
@@ -129,6 +130,33 @@ impl SimHarness {
 
     pub fn wait_for_trace_count(&self, expected: usize, timeout: Duration) {
         self.wait_until(timeout, || self.state().traces.len() >= expected);
+    }
+
+    pub fn seed_retained_delivery(
+        &self,
+        trace_id: u64,
+        from_idx: usize,
+        to_idx: usize,
+        holder_idx: usize,
+        owner_router_idx: usize,
+        body: impl Into<String>,
+    ) {
+        let now_secs = self.runtime.tui_state.lock().unwrap().elapsed_secs;
+        self.runtime
+            .store_forward_state
+            .lock()
+            .unwrap()
+            .retain_replica(RetainedMessage {
+                trace_id,
+                message_id: trace_id.to_le_bytes(),
+                from_idx,
+                to_idx,
+                holder_idx,
+                owner_router_idx,
+                body: body.into(),
+                enqueued_at_secs: now_secs,
+                announced: false,
+            });
     }
 
     pub fn trace(&self, trace_id: u64) -> Option<MessageTrace> {

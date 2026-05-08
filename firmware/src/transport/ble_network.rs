@@ -22,11 +22,11 @@ use embassy_sync::channel::Channel;
 use embassy_time::with_timeout;
 
 use routing_core::config::{H2H_CONNECTION_TIMEOUT_SECS, H2H_MTU, H2H_PSM};
-use routing_core::crypto::identity::{short_addr_of, ShortAddr};
+use routing_core::crypto::identity::ShortAddr;
 use routing_core::network::{
     DiscoveryEvent, H2hInitiator, H2hResponder, InboundH2h, NetworkError, MAX_SCAN_RESULTS,
 };
-use routing_core::protocol::h2h::H2hPayload;
+use routing_core::protocol::h2h::{H2hFrame, H2hPayload};
 
 use crate::CONSTELLATION_COMPANY_ID;
 
@@ -186,7 +186,7 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
 
             log::debug!(
                 "[periph] Connection from {:02x?}",
-                conn.peer_address().raw()
+                conn.peer_address().addr.raw()
             );
 
             let l2cap_config = L2capChannelConfig {
@@ -194,8 +194,12 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
                 ..Default::default()
             };
 
+            // trouble-host now models inbound CoC setup as a pending listener on
+            // the already-accepted BLE connection. Accepting here keeps the
+            // channel open across the whole H2H session, including delayed-
+            // delivery follow-up frames added above the base peer-sync exchange.
             let mut channel =
-                match L2capChannel::accept(self.stack, &conn, &[H2H_PSM], &l2cap_config).await {
+                match L2capChannel::listen(self.stack, &conn).accept(&l2cap_config).await {
                     Ok(ch) => ch,
                     Err(e) => {
                         log::warn!("[periph] L2CAP accept error: {:?}", e);
@@ -222,7 +226,7 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
             };
 
             let mut peer_mac = [0u8; 6];
-            peer_mac.copy_from_slice(conn.peer_address().raw());
+            peer_mac.copy_from_slice(conn.peer_address().addr.raw());
 
             // Store connection + channel for send_h2h_response
             self.pending = Some((conn, channel));
@@ -251,12 +255,49 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
                 NetworkError::ConnectionFailed
             })?;
 
+        Ok(())
+    }
+
+    async fn send_h2h_frame(&mut self, frame: &H2hFrame) -> Result<(), NetworkError> {
+        let (conn, channel) = self.pending.as_mut().ok_or(NetworkError::ProtocolError)?;
+        let _ = conn;
+
+        let mut tx_buf = [0u8; 512];
+        let tx_len = frame
+            .serialize(&mut tx_buf)
+            .map_err(|_| NetworkError::ProtocolError)?;
+
+        channel
+            .send(self.stack, &tx_buf[..tx_len])
+            .await
+            .map_err(|e| {
+                log::warn!("[periph] L2CAP frame send error: {:?}", e);
+                NetworkError::ConnectionFailed
+            })?;
+
+        Ok(())
+    }
+
+    async fn receive_h2h_frame(&mut self) -> Result<H2hFrame, NetworkError> {
+        let (conn, channel) = self.pending.as_mut().ok_or(NetworkError::ProtocolError)?;
+        let _ = conn;
+
+        let mut rx_buf = [0u8; 512];
+        let rx_len = channel
+            .receive(self.stack, &mut rx_buf)
+            .await
+            .map_err(|e| {
+                log::warn!("[periph] L2CAP frame rx error: {:?}", e);
+                NetworkError::ConnectionFailed
+            })?;
+
+        H2hFrame::deserialize(&rx_buf[..rx_len]).map_err(|_| NetworkError::ProtocolError)
+    }
+
+    async fn finish_h2h_session(&mut self) -> Result<(), NetworkError> {
         // Brief flush delay before dropping the connection.
         Timer::after(Duration::from_millis(200)).await;
-
-        // Drop pending → disconnects (conn dropped last due to order in tuple).
         self.pending = None;
-
         Ok(())
     }
 }
@@ -278,6 +319,10 @@ where
     stack: &'stack Stack<'stack, C, DefaultPacketPool>,
     our_addr: Address,
     discovery_rx: &'static Channel<NoopRawMutex, (BdAddr, AddrKind, DiscoveryInfo), 4>,
+    pending: Option<(
+        Connection<'stack, DefaultPacketPool>,
+        L2capChannel<'stack, DefaultPacketPool>,
+    )>,
 }
 
 impl<'stack, C> BleInitiator<'stack, C>
@@ -300,6 +345,7 @@ where
             stack,
             our_addr,
             discovery_rx,
+            pending: None,
         }
     }
 }
@@ -371,10 +417,10 @@ where
             .as_mut()
             .expect("BleInitiator: central missing during initiate_h2h");
 
-        let bd_addr = BdAddr(peer_mac);
+        let target = Address::random(peer_mac);
         let connect_config = ConnectConfig {
             scan_config: ScanConfig {
-                filter_accept_list: &[(AddrKind::RANDOM, &bd_addr)],
+                filter_accept_list: &[target],
                 timeout: Duration::from_secs(H2H_CONNECTION_TIMEOUT_SECS),
                 ..Default::default()
             },
@@ -425,7 +471,50 @@ where
         let peer_payload =
             H2hPayload::deserialize(&rx_buf[..rx_len]).map_err(|_| NetworkError::ProtocolError)?;
 
-        // conn and channel drop here → BLE disconnect
+        // Keep the session alive so higher layers can exchange delayed-delivery
+        // control/data frames before explicitly closing the connection.
+        self.pending = Some((conn, channel));
         Ok(peer_payload)
+    }
+
+    async fn send_h2h_frame(&mut self, frame: &H2hFrame) -> Result<(), NetworkError> {
+        let (conn, channel) = self.pending.as_mut().ok_or(NetworkError::ProtocolError)?;
+        let _ = conn;
+
+        let mut tx_buf = [0u8; 512];
+        let tx_len = frame
+            .serialize(&mut tx_buf)
+            .map_err(|_| NetworkError::ProtocolError)?;
+
+        channel
+            .send(self.stack, &tx_buf[..tx_len])
+            .await
+            .map_err(|e| {
+                log::warn!("[central] L2CAP frame send error: {:?}", e);
+                NetworkError::ConnectionFailed
+            })?;
+
+        Ok(())
+    }
+
+    async fn receive_h2h_frame(&mut self) -> Result<H2hFrame, NetworkError> {
+        let (conn, channel) = self.pending.as_mut().ok_or(NetworkError::ProtocolError)?;
+        let _ = conn;
+
+        let mut rx_buf = [0u8; 512];
+        let rx_len = channel
+            .receive(self.stack, &mut rx_buf)
+            .await
+            .map_err(|e| {
+                log::warn!("[central] L2CAP frame rx error: {:?}", e);
+                NetworkError::ConnectionFailed
+            })?;
+
+        H2hFrame::deserialize(&rx_buf[..rx_len]).map_err(|_| NetworkError::ProtocolError)
+    }
+
+    async fn finish_h2h_session(&mut self) -> Result<(), NetworkError> {
+        self.pending = None;
+        Ok(())
     }
 }

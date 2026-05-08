@@ -939,7 +939,7 @@ fn render_bottom_panel(frame: &mut Frame, app: &App, state: &TuiState, area: Rec
 
     frame.render_widget(
         Paragraph::new(
-            " [↑↓] Select   [N] Modes   [F] Filter   [M] Send   [R] Scenario   [G] Tabs   [H] Help",
+            " [↑↓] Select   [N] Modes   [F] Filter   [M] Send   [E] Export   [R] Scenario   [G] Tabs   [H] Help",
         )
         .style(Style::default().fg(Color::DarkGray)),
         hint_area,
@@ -1063,6 +1063,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from("  ↑↓  select trace or node"),
         Line::from("  N   switch Trace / Nodes mode"),
         Line::from("  M   compose/send manual message"),
+        Line::from("  E   export JSON config/traces/logs diagnostics"),
         Line::from("  R   switch scenario"),
         Line::from("  G   timeline/logs"),
         Line::from("  H   toggle help"),

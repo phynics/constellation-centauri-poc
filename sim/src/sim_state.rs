@@ -86,9 +86,15 @@ impl TraceStatus {
 #[derive(Clone)]
 pub enum TraceEventKind {
     Queued,
+    Deferred,
     Received { from_node: usize },
     ObservedBroadcast,
     Forwarded { to_node: usize },
+    LpnWakeSync { router_node: usize },
+    PendingAnnounced { count: usize },
+    DeliveredFromStore { router_node: usize },
+    DeliveryConfirmed { lpn_node: usize },
+    ExpiredFromStore,
     Delivered,
     Dropped { to_node: Option<usize> },
     Blocked { to_node: usize },
@@ -104,6 +110,10 @@ impl TraceEventKind {
                 "node {} queued packet locally (ttl={}, hop={})",
                 node_idx, ttl, hop_count
             ),
+            TraceEventKind::Deferred => format!(
+                "node {} retained packet for delayed delivery (ttl={}, hop={})",
+                node_idx, ttl, hop_count
+            ),
             TraceEventKind::Received { from_node } => format!(
                 "node {} received packet from {} (ttl={}, hop={})",
                 node_idx, from_node, ttl, hop_count
@@ -117,6 +127,26 @@ impl TraceEventKind {
             TraceEventKind::Forwarded { to_node } => format!(
                 "node {} forwarded packet to {} (ttl={}, hop={})",
                 node_idx, to_node, ttl, hop_count
+            ),
+            TraceEventKind::LpnWakeSync { router_node } => format!(
+                "node {} woke router {} for delayed-delivery sync (ttl={}, hop={})",
+                node_idx, router_node, ttl, hop_count
+            ),
+            TraceEventKind::PendingAnnounced { count } => format!(
+                "node {} announced {} pending deliveries (ttl={}, hop={})",
+                node_idx, count, ttl, hop_count
+            ),
+            TraceEventKind::DeliveredFromStore { router_node } => format!(
+                "node {} received retained packet from router {} (ttl={}, hop={})",
+                node_idx, router_node, ttl, hop_count
+            ),
+            TraceEventKind::DeliveryConfirmed { lpn_node } => format!(
+                "node {} confirmed retained delivery to {} (ttl={}, hop={})",
+                node_idx, lpn_node, ttl, hop_count
+            ),
+            TraceEventKind::ExpiredFromStore => format!(
+                "node {} expired retained delivery (ttl={}, hop={})",
+                node_idx, ttl, hop_count
             ),
             TraceEventKind::Delivered => format!(
                 "node {} delivered packet locally (ttl={}, hop={})",

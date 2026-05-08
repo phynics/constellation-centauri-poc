@@ -8,15 +8,17 @@ use std::sync::{Arc, Mutex};
 
 use embassy_time::{Duration, Timer};
 use heapless::Vec;
-use rand::Rng as _;
+use rand::{Rng as _, SeedableRng as _};
 
 use routing_core::network::{
     DiscoveryEvent, H2hInitiator, H2hResponder, InboundH2h, NetworkError, MAX_SCAN_RESULTS,
 };
-use routing_core::protocol::h2h::H2hPayload;
+use routing_core::node::roles::Capabilities;
+use routing_core::protocol::h2h::{H2hFrame, H2hPayload};
 
 use crate::medium::{
-    deserialize_payload, serialize_payload, SimH2hRequest, SimH2hResponse, SimMedium,
+    deserialize_frame, deserialize_payload, serialize_frame, serialize_payload, SimH2hFrame,
+    SimH2hRequest, SimH2hResponse, SimMedium,
 };
 use crate::sim_state::{SimConfig, MAX_NODES};
 
@@ -87,10 +89,7 @@ impl H2hResponder for SimResponder {
     }
 
     async fn send_h2h_response(&mut self, payload: &H2hPayload) -> Result<(), NetworkError> {
-        let sender_idx = self
-            .pending_sender
-            .take()
-            .ok_or(NetworkError::ProtocolError)?;
+        let sender_idx = self.pending_sender.ok_or(NetworkError::ProtocolError)?;
 
         let (bytes, len) = serialize_payload(payload).ok_or(NetworkError::ProtocolError)?;
 
@@ -102,6 +101,35 @@ impl H2hResponder for SimResponder {
 
         Ok(())
     }
+
+    async fn send_h2h_frame(&mut self, frame: &H2hFrame) -> Result<(), NetworkError> {
+        let sender_idx = self.pending_sender.ok_or(NetworkError::ProtocolError)?;
+        let (bytes, len) = serialize_frame(frame).ok_or(NetworkError::ProtocolError)?;
+
+        self.medium.h2h_to_initiator[sender_idx]
+            .send(SimH2hFrame {
+                result: Ok((bytes, len)),
+            })
+            .await;
+
+        Ok(())
+    }
+
+    async fn receive_h2h_frame(&mut self) -> Result<H2hFrame, NetworkError> {
+        let sender_idx = self.pending_sender.ok_or(NetworkError::ProtocolError)?;
+        let frame = self.medium.h2h_to_responder[self.node_idx].receive().await;
+        let (bytes, len) = frame.result?;
+
+        // The channel is per-responder node, but we still require that the
+        // responder has an active peer recorded before accepting a frame.
+        let _ = sender_idx;
+        deserialize_frame(&bytes, len).ok_or(NetworkError::ProtocolError)
+    }
+
+    async fn finish_h2h_session(&mut self) -> Result<(), NetworkError> {
+        self.pending_sender = None;
+        Ok(())
+    }
 }
 
 // ── SimInitiator ──────────────────────────────────────────────────────────────
@@ -111,6 +139,8 @@ pub struct SimInitiator {
     medium: &'static SimMedium,
     all_nodes: &'static [SimNodeInfo; MAX_NODES],
     sim_config: Arc<Mutex<SimConfig>>,
+    scan_round: usize,
+    pending_peer_idx: Option<usize>,
 }
 
 impl SimInitiator {
@@ -125,6 +155,8 @@ impl SimInitiator {
             medium,
             all_nodes,
             sim_config,
+            scan_round: 0,
+            pending_peer_idx: None,
         }
     }
 }
@@ -135,18 +167,27 @@ impl H2hInitiator for SimInitiator {
         Timer::after(Duration::from_millis(duration_ms)).await;
 
         let config = self.sim_config.lock().unwrap();
+        let self_caps = config.capabilities[self.node_idx];
+        let low_power_endpoint = is_low_power_endpoint(self_caps);
 
-        // Inactive nodes don't scan.
-        if self.node_idx >= config.n_active || !config.node_behaviors[self.node_idx].scan {
+        // Inactive nodes don't scan. Low-power endpoints are allowed to scan
+        // for uplink routers even when general scan behavior is disabled.
+        if self.node_idx >= config.n_active {
+            return Vec::new();
+        }
+        if !config.node_behaviors[self.node_idx].scan && !low_power_endpoint {
             return Vec::new();
         }
 
-        let mut results = Vec::new();
+        let mut candidate_indices = std::vec::Vec::new();
         for (i, node) in self.all_nodes.iter().enumerate() {
             if i == self.node_idx || i >= config.n_active {
                 continue;
             }
             if !config.node_behaviors[i].advertise {
+                continue;
+            }
+            if low_power_endpoint && config.capabilities[i] & Capabilities::ROUTE == 0 {
                 continue;
             }
             if !config.link_enabled[self.node_idx][i] {
@@ -158,9 +199,35 @@ impl H2hInitiator for SimInitiator {
             if drop > 0 && rand::thread_rng().gen_range(0u8..100) < drop {
                 continue;
             }
+            let _ = node;
+            candidate_indices.push(i);
+        }
+
+        let mut results = Vec::new();
+        if candidate_indices.len() <= MAX_SCAN_RESULTS {
+            for idx in candidate_indices {
+                let node = &self.all_nodes[idx];
+                let _ = results.push(DiscoveryEvent {
+                    short_addr: node.short_addr,
+                    capabilities: config.capabilities[idx],
+                    mac: node.mac,
+                });
+            }
+            return results;
+        }
+
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(
+            ((self.node_idx as u64) << 32) ^ self.scan_round as u64 ^ 0x51CA_515Au64,
+        );
+        self.scan_round = self.scan_round.wrapping_add(1);
+
+        for _ in 0..MAX_SCAN_RESULTS {
+            let pick = rng.gen_range(0..candidate_indices.len());
+            let idx = candidate_indices.swap_remove(pick);
+            let node = &self.all_nodes[idx];
             let _ = results.push(DiscoveryEvent {
                 short_addr: node.short_addr,
-                capabilities: config.capabilities[i],
+                capabilities: config.capabilities[idx],
                 mac: node.mac,
             });
         }
@@ -181,10 +248,15 @@ impl H2hInitiator for SimInitiator {
         // Check config: inactive peer or simulated packet drop.
         {
             let config = self.sim_config.lock().unwrap();
+            let self_caps = config.capabilities[self.node_idx];
+            let peer_caps = config.capabilities[peer_idx];
+            let allow_low_power_uplink = is_low_power_endpoint(self_caps)
+                && peer_caps & Capabilities::ROUTE != 0;
+
             if self.node_idx >= config.n_active || peer_idx >= config.n_active {
                 return Err(NetworkError::PeerInactive);
             }
-            if !config.node_behaviors[self.node_idx].initiate_h2h {
+            if !config.node_behaviors[self.node_idx].initiate_h2h && !allow_low_power_uplink {
                 return Err(NetworkError::InitiateDisabled);
             }
             if !config.node_behaviors[peer_idx].respond_h2h {
@@ -214,8 +286,38 @@ impl H2hInitiator for SimInitiator {
         let response = self.medium.h2h_resp[self.node_idx].receive().await;
 
         let (resp_bytes, resp_len) = response.result?;
+        self.pending_peer_idx = Some(peer_idx);
         deserialize_payload(&resp_bytes, resp_len).ok_or(NetworkError::ProtocolError)
     }
+
+    async fn send_h2h_frame(&mut self, frame: &H2hFrame) -> Result<(), NetworkError> {
+        let peer_idx = self.pending_peer_idx.ok_or(NetworkError::ProtocolError)?;
+        let (bytes, len) = serialize_frame(frame).ok_or(NetworkError::ProtocolError)?;
+
+        self.medium.h2h_to_responder[peer_idx]
+            .send(SimH2hFrame {
+                result: Ok((bytes, len)),
+            })
+            .await;
+
+        Ok(())
+    }
+
+    async fn receive_h2h_frame(&mut self) -> Result<H2hFrame, NetworkError> {
+        self.pending_peer_idx.ok_or(NetworkError::ProtocolError)?;
+        let frame = self.medium.h2h_to_initiator[self.node_idx].receive().await;
+        let (bytes, len) = frame.result?;
+        deserialize_frame(&bytes, len).ok_or(NetworkError::ProtocolError)
+    }
+
+    async fn finish_h2h_session(&mut self) -> Result<(), NetworkError> {
+        self.pending_peer_idx = None;
+        Ok(())
+    }
+}
+
+fn is_low_power_endpoint(capabilities: u16) -> bool {
+    Capabilities::is_low_power_endpoint_bits(capabilities)
 }
 
 #[cfg(test)]
@@ -224,7 +326,9 @@ mod tests {
     use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
     use embassy_sync::mutex::Mutex as AsyncMutex;
     use pollster::block_on;
-    use routing_core::behavior::{apply_discovery_events, run_initiator_h2h_once};
+    use routing_core::behavior::{
+        apply_discovery_events, collect_h2h_peer_snapshots, run_initiator_h2h_once,
+    };
     use routing_core::crypto::identity::NodeIdentity;
     use routing_core::network::{H2hInitiator, H2hResponder};
     use routing_core::protocol::h2h::{H2hPayload, PeerInfo};
@@ -316,6 +420,18 @@ mod tests {
         b: usize,
     ) -> (usize, usize) {
         if nodes[a].short_addr < nodes[b].short_addr {
+            (a, b)
+        } else {
+            (b, a)
+        }
+    }
+
+    fn endpoint_router_pair(
+        nodes: &'static [SimNodeInfo; MAX_NODES],
+        a: usize,
+        b: usize,
+    ) -> (usize, usize) {
+        if nodes[a].short_addr > nodes[b].short_addr {
             (a, b)
         } else {
             (b, a)
@@ -619,6 +735,133 @@ mod tests {
         let results = block_on(initiator.scan(0));
 
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn scan_probabilistically_cycles_when_neighbors_exceed_result_capacity() {
+        let medium = test_medium();
+        let nodes = test_nodes();
+        let config = test_config(MAX_NODES);
+
+        let mut initiator = SimInitiator::new(0, medium, nodes, config);
+
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..8 {
+            let results = block_on(initiator.scan(0));
+            assert_eq!(results.len(), MAX_SCAN_RESULTS);
+            for event in results.iter() {
+                seen.insert(event.mac[0] as usize);
+            }
+        }
+
+        // Node 0 scans 19 neighbors in a full 20-node topology; repeated scans
+        // must eventually surface the highest-index peers instead of starving
+        // them behind the result cap.
+        assert!(seen.contains(&17));
+        assert!(seen.contains(&18));
+        assert!(seen.contains(&19));
+    }
+
+    #[test]
+    fn low_power_endpoint_can_initiate_uplink_h2h_to_router_even_when_normal_initiation_is_disabled() {
+        let medium = test_medium();
+        let identities = test_identities();
+        let nodes = nodes_from_identities(identities);
+        let routing_tables = test_routing_tables(identities);
+        let uptimes = test_uptimes();
+        let config = test_config(2);
+
+        block_on(async {
+            let (endpoint, router) = endpoint_router_pair(nodes, 0, 1);
+            {
+                let mut cfg = config.lock().unwrap();
+                cfg.capabilities[endpoint] = Capabilities::LOW_ENERGY | Capabilities::APPLICATION;
+                cfg.capabilities[router] = Capabilities::ROUTE | Capabilities::STORE;
+                cfg.node_behaviors[endpoint].scan = false;
+                cfg.node_behaviors[endpoint].initiate_h2h = false;
+                cfg.node_behaviors[router].respond_h2h = true;
+            }
+
+            let mut initiator = SimInitiator::new(endpoint, medium, nodes, Arc::clone(&config));
+            let mut responder = SimResponder::new(router, medium, nodes, Arc::clone(&config));
+
+            let scan_results = initiator.scan(0).await;
+            assert_eq!(scan_results.len(), 1);
+            assert_eq!(scan_results[0].short_addr, nodes[router].short_addr);
+            apply_discovery_events(&routing_tables[endpoint], &scan_results).await;
+
+            let endpoint_caps = {
+                let cfg = config.lock().unwrap();
+                cfg.capabilities[endpoint]
+            };
+            let candidates =
+                collect_h2h_peer_snapshots(&identities[endpoint], endpoint_caps, &routing_tables[endpoint])
+                    .await;
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].0, nodes[router].short_addr);
+
+            let response = routing_core::behavior::build_h2h_payload(
+                &identities[router],
+                {
+                    let cfg = config.lock().unwrap();
+                    cfg.capabilities[router]
+                },
+                &uptimes[router],
+                &routing_tables[router],
+                identities[endpoint].short_addr(),
+            )
+            .await;
+
+            let responder_thread = std::thread::spawn(move || {
+                block_on(async {
+                    let inbound = responder.receive_h2h().await.unwrap();
+                    assert_eq!(inbound.peer_mac, nodes[endpoint].mac);
+                    responder.send_h2h_response(&response).await.unwrap();
+                });
+            });
+
+            run_initiator_h2h_once(
+                &mut initiator,
+                &identities[endpoint],
+                endpoint_caps,
+                &routing_tables[endpoint],
+                &uptimes[endpoint],
+            )
+            .await;
+
+            responder_thread.join().unwrap();
+
+            let table = routing_tables[endpoint].lock().await;
+            let router_entry = table.find_peer(&nodes[router].short_addr).unwrap();
+            assert_eq!(router_entry.trust, TRUST_DIRECT);
+            assert_eq!(router_entry.transport_addr.addr, nodes[router].mac);
+        });
+    }
+
+    #[test]
+    fn router_does_not_schedule_h2h_into_low_power_endpoint() {
+        let identities = test_identities();
+        let nodes = nodes_from_identities(identities);
+        let routing_tables = test_routing_tables(identities);
+
+        block_on(async {
+            let (endpoint, router) = endpoint_router_pair(nodes, 0, 1);
+            {
+                let mut table = routing_tables[router].lock().await;
+                table.update_peer_compact(
+                    nodes[endpoint].short_addr,
+                    Capabilities::LOW_ENERGY | Capabilities::APPLICATION,
+                    TransportAddr::ble(nodes[endpoint].mac),
+                    1,
+                );
+            }
+
+            let router_caps = Capabilities::ROUTE | Capabilities::STORE;
+            let candidates =
+                collect_h2h_peer_snapshots(&identities[router], router_caps, &routing_tables[router])
+                    .await;
+            assert!(candidates.is_empty());
+        });
     }
 
     #[test]

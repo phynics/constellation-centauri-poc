@@ -14,7 +14,10 @@
 //!
 //! Both nodes compute the same values with no coordination.
 
+use core::convert::TryInto;
+
 use sha2::{Digest, Sha256};
+use heapless::Vec;
 
 use crate::config::{H2H_CYCLE_SECS, H2H_MAX_PEER_ENTRIES};
 use crate::crypto::identity::{PubKey, ShortAddr};
@@ -22,6 +25,15 @@ use crate::protocol::packet::PacketError;
 
 /// Current H2H protocol version. Bumped on breaking wire-format changes.
 pub const H2H_VERSION: u8 = 0x02;
+/// Maximum metadata/body bytes transferred in a single delivery frame.
+///
+/// The simulator currently uses H2H delivery frames for delayed-delivery
+/// control/data exchange rather than for arbitrary large application payloads.
+/// Keeping the frame body bounded preserves the fixed-buffer/no-std model and
+/// is sufficient for the current trace-driven simulator behavior.
+pub const H2H_DELIVERY_BODY_MAX: usize = 96;
+/// Upper bound on the number of per-frame delivery acknowledgements.
+pub const H2H_ACK_IDS_MAX: usize = 8;
 
 // ── Pair scheduling ──────────────────────────────────────────────────────────
 
@@ -71,6 +83,346 @@ pub struct H2hPayload {
     pub uptime_secs: u32,
     pub peers: [Option<PeerInfo>; H2H_MAX_PEER_ENTRIES],
     pub peer_count: u8,
+}
+
+/// Additional typed frames exchanged after the initial H2H sync request /
+/// response. These frames intentionally extend H2H rather than introducing a
+/// parallel low-power-only transport protocol.
+pub enum H2hFrame {
+    SyncRequest(H2hPayload),
+    SyncResponse(H2hPayload),
+    DeliverySummary {
+        pending_count: u8,
+        /// Whether the responder believes it is the preferred router for this
+        /// LPN at the time of the wake session. This is informational rather
+        /// than authoritative: fallback routers may legitimately serve retained
+        /// deliveries from replicas even when `preferred_router == false`.
+        /// The bit exists so traces/exports/debugging can explain *why* a
+        /// delayed-delivery session succeeded through a backup router.
+        preferred_router: bool,
+    },
+    DeliveryData {
+        trace_id: u64,
+        message_id: [u8; 8],
+        source_idx: u8,
+        destination_idx: u8,
+        body: Vec<u8, H2H_DELIVERY_BODY_MAX>,
+    },
+    DeliveryAck {
+        trace_ids: Vec<u64, H2H_ACK_IDS_MAX>,
+    },
+    /// Router-to-router retained-delivery replica transfer. This keeps
+    /// redundancy inside the same direct peer session model as sync/delivery,
+    /// instead of growing a separate replication transport beside H2H.
+    ///
+    /// The current policy is intentionally simple: preferred/original routers
+    /// may opportunistically seed reachable store-capable routers. Load-aware
+    /// placement can evolve later without replacing the frame family.
+    RetentionReplica {
+        trace_id: u64,
+        message_id: [u8; 8],
+        source_idx: u8,
+        destination_idx: u8,
+        owner_router_idx: u8,
+        body: Vec<u8, H2H_DELIVERY_BODY_MAX>,
+    },
+    /// Delivery/replica acknowledgements share the same compact shape: a small
+    /// list of trace IDs that the receiver accepted/consumed.
+    RetentionAck {
+        trace_ids: Vec<u64, H2H_ACK_IDS_MAX>,
+    },
+    /// Tombstones clear stale retained replicas after one router has already
+    /// completed delayed delivery to the target LPN. They exist because owner
+    /// vs holder can diverge once replicas are seeded; explicit cleanup is more
+    /// robust than hoping every replica notices delivery through ambient state.
+    RetentionTombstone {
+        trace_ids: Vec<u64, H2H_ACK_IDS_MAX>,
+    },
+    SessionDone,
+}
+
+impl H2hFrame {
+    const TYPE_SYNC_REQUEST: u8 = 0x01;
+    const TYPE_SYNC_RESPONSE: u8 = 0x02;
+    const TYPE_DELIVERY_SUMMARY: u8 = 0x03;
+    const TYPE_DELIVERY_DATA: u8 = 0x04;
+    const TYPE_DELIVERY_ACK: u8 = 0x05;
+    const TYPE_RETENTION_REPLICA: u8 = 0x06;
+    const TYPE_RETENTION_ACK: u8 = 0x07;
+    const TYPE_RETENTION_TOMBSTONE: u8 = 0x08;
+    const TYPE_SESSION_DONE: u8 = 0x09;
+
+    pub fn serialize(&self, buf: &mut [u8]) -> Result<usize, PacketError> {
+        if buf.len() < 2 {
+            return Err(PacketError::BufferTooSmall);
+        }
+
+        buf[0] = match self {
+            H2hFrame::SyncRequest(_) => Self::TYPE_SYNC_REQUEST,
+            H2hFrame::SyncResponse(_) => Self::TYPE_SYNC_RESPONSE,
+            H2hFrame::DeliverySummary { .. } => Self::TYPE_DELIVERY_SUMMARY,
+            H2hFrame::DeliveryData { .. } => Self::TYPE_DELIVERY_DATA,
+            H2hFrame::DeliveryAck { .. } => Self::TYPE_DELIVERY_ACK,
+            H2hFrame::RetentionReplica { .. } => Self::TYPE_RETENTION_REPLICA,
+            H2hFrame::RetentionAck { .. } => Self::TYPE_RETENTION_ACK,
+            H2hFrame::RetentionTombstone { .. } => Self::TYPE_RETENTION_TOMBSTONE,
+            H2hFrame::SessionDone => Self::TYPE_SESSION_DONE,
+        };
+        buf[1] = H2H_VERSION;
+
+        match self {
+            H2hFrame::SyncRequest(payload) | H2hFrame::SyncResponse(payload) => {
+                let n = payload.serialize(&mut buf[2..])?;
+                Ok(2 + n)
+            }
+            H2hFrame::DeliverySummary {
+                pending_count,
+                preferred_router,
+            } => {
+                if buf.len() < 4 {
+                    return Err(PacketError::BufferTooSmall);
+                }
+                buf[2] = *pending_count;
+                buf[3] = if *preferred_router { 1 } else { 0 };
+                Ok(4)
+            }
+            H2hFrame::DeliveryData {
+                trace_id,
+                message_id,
+                source_idx,
+                destination_idx,
+                body,
+            } => {
+                let needed = 2 + 8 + 8 + 1 + 1 + 2 + body.len();
+                if buf.len() < needed {
+                    return Err(PacketError::BufferTooSmall);
+                }
+                let mut off = 2;
+                buf[off..off + 8].copy_from_slice(&trace_id.to_le_bytes());
+                off += 8;
+                buf[off..off + 8].copy_from_slice(message_id);
+                off += 8;
+                buf[off] = *source_idx;
+                off += 1;
+                buf[off] = *destination_idx;
+                off += 1;
+                let body_len = body.len() as u16;
+                buf[off..off + 2].copy_from_slice(&body_len.to_le_bytes());
+                off += 2;
+                buf[off..off + body.len()].copy_from_slice(body.as_slice());
+                Ok(needed)
+            }
+            H2hFrame::DeliveryAck { trace_ids } => {
+                let needed = 3 + 8 * trace_ids.len();
+                if buf.len() < needed {
+                    return Err(PacketError::BufferTooSmall);
+                }
+                buf[2] = trace_ids.len() as u8;
+                let mut off = 3;
+                for trace_id in trace_ids.iter() {
+                    buf[off..off + 8].copy_from_slice(&trace_id.to_le_bytes());
+                    off += 8;
+                }
+                Ok(needed)
+            }
+            H2hFrame::RetentionReplica {
+                trace_id,
+                message_id,
+                source_idx,
+                destination_idx,
+                owner_router_idx,
+                body,
+            } => {
+                let needed = 2 + 8 + 8 + 1 + 1 + 1 + 2 + body.len();
+                if buf.len() < needed {
+                    return Err(PacketError::BufferTooSmall);
+                }
+                let mut off = 2;
+                buf[off..off + 8].copy_from_slice(&trace_id.to_le_bytes());
+                off += 8;
+                buf[off..off + 8].copy_from_slice(message_id);
+                off += 8;
+                buf[off] = *source_idx;
+                off += 1;
+                buf[off] = *destination_idx;
+                off += 1;
+                buf[off] = *owner_router_idx;
+                off += 1;
+                let body_len = body.len() as u16;
+                buf[off..off + 2].copy_from_slice(&body_len.to_le_bytes());
+                off += 2;
+                buf[off..off + body.len()].copy_from_slice(body.as_slice());
+                Ok(needed)
+            }
+            H2hFrame::RetentionAck { trace_ids } | H2hFrame::RetentionTombstone { trace_ids } => {
+                let needed = 3 + 8 * trace_ids.len();
+                if buf.len() < needed {
+                    return Err(PacketError::BufferTooSmall);
+                }
+                buf[2] = trace_ids.len() as u8;
+                let mut off = 3;
+                for trace_id in trace_ids.iter() {
+                    buf[off..off + 8].copy_from_slice(&trace_id.to_le_bytes());
+                    off += 8;
+                }
+                Ok(needed)
+            }
+            H2hFrame::SessionDone => Ok(2),
+        }
+    }
+
+    pub fn deserialize(buf: &[u8]) -> Result<Self, PacketError> {
+        if buf.len() < 2 {
+            return Err(PacketError::InvalidHeader);
+        }
+        if buf[1] != H2H_VERSION {
+            return Err(PacketError::InvalidHeader);
+        }
+
+        match buf[0] {
+            Self::TYPE_SYNC_REQUEST => Ok(Self::SyncRequest(H2hPayload::deserialize(&buf[2..])?)),
+            Self::TYPE_SYNC_RESPONSE => {
+                Ok(Self::SyncResponse(H2hPayload::deserialize(&buf[2..])?))
+            }
+            Self::TYPE_DELIVERY_SUMMARY => {
+                if buf.len() < 4 {
+                    return Err(PacketError::InvalidHeader);
+                }
+                Ok(Self::DeliverySummary {
+                    pending_count: buf[2],
+                    preferred_router: buf[3] != 0,
+                })
+            }
+            Self::TYPE_DELIVERY_DATA => {
+                if buf.len() < 22 {
+                    return Err(PacketError::InvalidHeader);
+                }
+                let mut off = 2;
+                let trace_id = u64::from_le_bytes(
+                    buf[off..off + 8]
+                        .try_into()
+                        .map_err(|_| PacketError::InvalidHeader)?,
+                );
+                off += 8;
+                let mut message_id = [0u8; 8];
+                message_id.copy_from_slice(&buf[off..off + 8]);
+                off += 8;
+                let source_idx = buf[off];
+                off += 1;
+                let destination_idx = buf[off];
+                off += 1;
+                let body_len =
+                    u16::from_le_bytes([buf[off], buf[off + 1]]) as usize;
+                off += 2;
+                if off + body_len > buf.len() || body_len > H2H_DELIVERY_BODY_MAX {
+                    return Err(PacketError::InvalidHeader);
+                }
+                let mut body = Vec::new();
+                for byte in &buf[off..off + body_len] {
+                    body.push(*byte).map_err(|_| PacketError::InvalidHeader)?;
+                }
+                Ok(Self::DeliveryData {
+                    trace_id,
+                    message_id,
+                    source_idx,
+                    destination_idx,
+                    body,
+                })
+            }
+            Self::TYPE_DELIVERY_ACK => {
+                if buf.len() < 3 {
+                    return Err(PacketError::InvalidHeader);
+                }
+                let count = buf[2].min(H2H_ACK_IDS_MAX as u8) as usize;
+                let needed = 3 + count * 8;
+                if buf.len() < needed {
+                    return Err(PacketError::InvalidHeader);
+                }
+                let mut trace_ids = Vec::new();
+                let mut off = 3;
+                for _ in 0..count {
+                    let trace_id = u64::from_le_bytes(
+                        buf[off..off + 8]
+                            .try_into()
+                            .map_err(|_| PacketError::InvalidHeader)?,
+                    );
+                    off += 8;
+                    trace_ids
+                        .push(trace_id)
+                        .map_err(|_| PacketError::InvalidHeader)?;
+                }
+                Ok(Self::DeliveryAck { trace_ids })
+            }
+            Self::TYPE_RETENTION_REPLICA => {
+                if buf.len() < 23 {
+                    return Err(PacketError::InvalidHeader);
+                }
+                let mut off = 2;
+                let trace_id = u64::from_le_bytes(
+                    buf[off..off + 8]
+                        .try_into()
+                        .map_err(|_| PacketError::InvalidHeader)?,
+                );
+                off += 8;
+                let mut message_id = [0u8; 8];
+                message_id.copy_from_slice(&buf[off..off + 8]);
+                off += 8;
+                let source_idx = buf[off];
+                off += 1;
+                let destination_idx = buf[off];
+                off += 1;
+                let owner_router_idx = buf[off];
+                off += 1;
+                let body_len = u16::from_le_bytes([buf[off], buf[off + 1]]) as usize;
+                off += 2;
+                if off + body_len > buf.len() || body_len > H2H_DELIVERY_BODY_MAX {
+                    return Err(PacketError::InvalidHeader);
+                }
+                let mut body = Vec::new();
+                for byte in &buf[off..off + body_len] {
+                    body.push(*byte).map_err(|_| PacketError::InvalidHeader)?;
+                }
+                Ok(Self::RetentionReplica {
+                    trace_id,
+                    message_id,
+                    source_idx,
+                    destination_idx,
+                    owner_router_idx,
+                    body,
+                })
+            }
+            Self::TYPE_RETENTION_ACK | Self::TYPE_RETENTION_TOMBSTONE => {
+                if buf.len() < 3 {
+                    return Err(PacketError::InvalidHeader);
+                }
+                let count = buf[2].min(H2H_ACK_IDS_MAX as u8) as usize;
+                let needed = 3 + count * 8;
+                if buf.len() < needed {
+                    return Err(PacketError::InvalidHeader);
+                }
+                let mut trace_ids = Vec::new();
+                let mut off = 3;
+                for _ in 0..count {
+                    let trace_id = u64::from_le_bytes(
+                        buf[off..off + 8]
+                            .try_into()
+                            .map_err(|_| PacketError::InvalidHeader)?,
+                    );
+                    off += 8;
+                    trace_ids
+                        .push(trace_id)
+                        .map_err(|_| PacketError::InvalidHeader)?;
+                }
+                if buf[0] == Self::TYPE_RETENTION_ACK {
+                    Ok(Self::RetentionAck { trace_ids })
+                } else {
+                    Ok(Self::RetentionTombstone { trace_ids })
+                }
+            }
+            Self::TYPE_SESSION_DONE => Ok(Self::SessionDone),
+            _ => Err(PacketError::InvalidHeader),
+        }
+    }
 }
 
 impl H2hPayload {

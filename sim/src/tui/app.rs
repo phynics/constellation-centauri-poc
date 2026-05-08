@@ -8,8 +8,10 @@ use crossterm::event::{KeyCode, KeyEvent};
 use routing_core::node::roles::Capabilities;
 
 use crate::config_ops;
+use crate::export::{self, ExportContext};
 use crate::scenario::{self, ScenarioId};
 use crate::sim_state::{MessageKind, SimCommand, SimConfig, TraceFilter, TuiState, MAX_NODES};
+use crate::tui_logger;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum ViewMode {
@@ -220,6 +222,10 @@ impl App {
 
             KeyCode::Char('h') | KeyCode::Char('H') => {
                 self.mode = Mode::Help;
+            }
+
+            KeyCode::Char('e') | KeyCode::Char('E') if self.view_mode == ViewMode::Trace => {
+                self.export_diagnostics(tui_state, sim_config);
             }
 
             KeyCode::Char(' ') if self.view_mode == ViewMode::Links => {
@@ -483,6 +489,31 @@ impl App {
             self.current_scenario
                 .unwrap_or_else(scenario::default_scenario),
         )
+    }
+
+    fn export_diagnostics(
+        &self,
+        tui_state: &Arc<Mutex<TuiState>>,
+        sim_config: &Arc<Mutex<SimConfig>>,
+    ) {
+        let logs = tui_logger::snapshot_logs();
+        let state = tui_state.lock().unwrap().clone();
+        let config = sim_config.lock().unwrap().clone();
+        let scenario = self.current_scenario_preset();
+
+        match export::export_diagnostics(
+            &state,
+            &config,
+            ExportContext {
+                scenario,
+                trace_filter: self.trace_filter,
+                selected_trace_index: self.selected_trace,
+                logs: &logs,
+            },
+        ) {
+            Ok(path) => log::info!("Exported diagnostics to {}", path.display()),
+            Err(err) => log::error!("Failed to export diagnostics: {err}"),
+        }
     }
 
     pub fn clamp_selection(&mut self, trace_count: usize, n_active: usize) {

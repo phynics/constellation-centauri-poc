@@ -19,6 +19,7 @@ use crate::medium::SimMedium;
 use crate::network::SimNodeInfo;
 use crate::scenario;
 use crate::sim_state::{SimCommand, SimConfig, TraceEventKind, TuiState, MAX_NODES};
+use crate::store_forward::StoreForwardState;
 
 pub async fn run_command_loop(
     cmd_rx: Arc<Mutex<Receiver<SimCommand>>>,
@@ -28,6 +29,7 @@ pub async fn run_command_loop(
     tui_state: Arc<Mutex<TuiState>>,
     routing_tables: &'static [AsyncMutex<CriticalSectionRawMutex, RoutingTable>; MAX_NODES],
     uptimes: &'static [AsyncMutex<CriticalSectionRawMutex, u32>; MAX_NODES],
+    store_forward_state: Arc<Mutex<StoreForwardState>>,
 ) -> ! {
     loop {
         // Non-blocking poll — embassy tasks must not block.
@@ -158,6 +160,7 @@ pub async fn run_command_loop(
                 }
 
                 tui_state.lock().unwrap().reset_runtime();
+                *store_forward_state.lock().unwrap() = StoreForwardState::default();
 
                 let preset = scenario::preset(id);
                 log::info!("Scenario applied: {}", preset.name);

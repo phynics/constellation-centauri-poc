@@ -4,7 +4,7 @@
 //! (BLE on firmware, in-memory channels on the simulator).
 
 use crate::crypto::identity::ShortAddr;
-use crate::protocol::h2h::H2hPayload;
+use crate::protocol::h2h::{H2hFrame, H2hPayload};
 use heapless::Vec;
 
 /// Maximum scan results returned per `scan()` call.
@@ -57,6 +57,19 @@ pub trait H2hResponder {
     /// Send our response payload on the still-open channel from the previous
     /// `receive_h2h` call. Must be called exactly once after `receive_h2h`.
     async fn send_h2h_response(&mut self, payload: &H2hPayload) -> Result<(), NetworkError>;
+
+    /// Send a typed follow-up frame on the still-open H2H session. This is
+    /// used for delayed-delivery summaries/data/acks after the initial peer
+    /// sync response has completed.
+    async fn send_h2h_frame(&mut self, frame: &H2hFrame) -> Result<(), NetworkError>;
+
+    /// Receive a typed follow-up frame from the peer while the H2H session is
+    /// still open.
+    async fn receive_h2h_frame(&mut self) -> Result<H2hFrame, NetworkError>;
+
+    /// Explicitly finish the active H2H session and release any underlying
+    /// transport state.
+    async fn finish_h2h_session(&mut self) -> Result<(), NetworkError>;
 }
 
 #[allow(async_fn_in_trait)]
@@ -76,4 +89,14 @@ pub trait H2hInitiator {
         peer_mac: [u8; 6],
         our_payload: &H2hPayload,
     ) -> Result<H2hPayload, NetworkError>;
+
+    /// Send a typed follow-up frame after the initial sync response.
+    async fn send_h2h_frame(&mut self, frame: &H2hFrame) -> Result<(), NetworkError>;
+
+    /// Receive a typed follow-up frame after the initial sync response.
+    async fn receive_h2h_frame(&mut self) -> Result<H2hFrame, NetworkError>;
+
+    /// Explicitly finish the active H2H session and release any underlying
+    /// transport state.
+    async fn finish_h2h_session(&mut self) -> Result<(), NetworkError>;
 }

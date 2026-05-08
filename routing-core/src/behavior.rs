@@ -12,6 +12,7 @@ use embassy_time::{Duration, Instant, Timer};
 use crate::config::{H2H_CYCLE_SECS, TICK_HZ};
 use crate::crypto::identity::{short_addr_of, NodeIdentity, ShortAddr};
 use crate::network::{DiscoveryEvent, H2hInitiator, H2hResponder, MAX_SCAN_RESULTS};
+use crate::node::roles::Capabilities;
 use crate::protocol::h2h::{self, H2hPayload};
 use crate::routing::table::RoutingTable;
 use crate::transport::TransportAddr;
@@ -92,13 +93,71 @@ pub async fn apply_discovery_events<M: RawMutex>(
 /// Collect current H2H connection candidates for which this node is the initiator.
 pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
     identity: &NodeIdentity,
+    capabilities: u16,
     routing_table: &Mutex<M, RoutingTable>,
 ) -> heapless::Vec<(ShortAddr, [u8; 6]), 32> {
     let our_addr = *identity.short_addr();
     let table = routing_table.lock().await;
     let mut v = heapless::Vec::new();
+
+    let is_low_power_endpoint = Capabilities::is_low_power_endpoint_bits(capabilities);
+
+    // Low-power endpoints use an explicit wake/uplink model instead of trying
+    // to maintain eager pair ownership with every router they can hear.
+    //
+    // We still rank store-capable routers deterministically so the first router
+    // remains the preferred wake target. However, we now return the full ranked
+    // list rather than truncating to one peer. That gives the initiator loop a
+    // natural fallback path: if the preferred router is down, the LPN can wake
+    // the next-best reachable router in the same cycle without inventing a
+    // second connection policy just for delayed delivery.
+    if is_low_power_endpoint {
+        let mut routers: heapless::Vec<(ShortAddr, [u8; 6], u8, u64), 32> = heapless::Vec::new();
+
+        for peer in table.peers.iter() {
+            if peer.transport_addr.addr == [0u8; 6]
+                || !Capabilities::is_store_router_bits(peer.capabilities)
+            {
+                continue;
+            }
+
+            let candidate = (
+                peer.short_addr,
+                peer.transport_addr.addr,
+                peer.trust,
+                peer.last_seen_ticks,
+            );
+
+            let _ = routers.push(candidate);
+        }
+
+        routers.sort_unstable_by(|a, b| {
+            b.2.cmp(&a.2)
+                .then_with(|| b.3.cmp(&a.3))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
+        for (peer_short, peer_mac, ..) in routers.into_iter() {
+            let _ = v.push((peer_short, peer_mac));
+        }
+
+        return v;
+    }
+
     for peer in table.peers.iter() {
-        if peer.transport_addr.addr != [0u8; 6] && h2h::is_initiator(&our_addr, &peer.short_addr) {
+        if peer.transport_addr.addr == [0u8; 6] {
+            continue;
+        }
+
+        // Full routing participants should not proactively H2H into low-power
+        // endpoint nodes. They can still learn those endpoints from discovery,
+        // while the endpoint initiates uplink H2H when it needs richer state.
+        let peer_is_low_power_endpoint = Capabilities::is_low_power_endpoint_bits(peer.capabilities);
+        if peer_is_low_power_endpoint {
+            continue;
+        }
+
+        if h2h::is_initiator(&our_addr, &peer.short_addr) {
             let _ = v.push((peer.short_addr, peer.transport_addr.addr));
         }
     }
@@ -119,7 +178,7 @@ pub async fn run_initiator_h2h_once<M, I>(
     M: RawMutex,
     I: H2hInitiator,
 {
-    let peer_snapshots = collect_h2h_peer_snapshots(identity, routing_table).await;
+    let peer_snapshots = collect_h2h_peer_snapshots(identity, capabilities, routing_table).await;
 
     for (peer_addr, peer_mac) in peer_snapshots.iter() {
         let payload =
@@ -140,9 +199,11 @@ pub async fn run_initiator_h2h_once<M, I>(
                     &peer_addr[..4],
                     table.peers.len()
                 );
+                let _ = initiator.finish_h2h_session().await;
             }
             Err(e) => {
                 log::warn!("[central] H2H failed to {:02x?}: {:?}", &peer_addr[..4], e);
+                let _ = initiator.finish_h2h_session().await;
             }
         }
     }
@@ -222,6 +283,8 @@ where
                 if let Err(e) = responder.send_h2h_response(&response).await {
                     log::warn!("[periph] send_h2h_response error: {:?}", e);
                 }
+
+                let _ = responder.finish_h2h_session().await;
             }
             Err(e) => {
                 log::warn!("[periph] receive_h2h error: {:?}", e);
@@ -264,7 +327,7 @@ where
 
         // ── Phase 2: H2H connections ──────────────────────────────────────
         let our_addr = *identity.short_addr();
-        let peer_snapshots = collect_h2h_peer_snapshots(identity, routing_table).await;
+        let peer_snapshots = collect_h2h_peer_snapshots(identity, capabilities, routing_table).await;
 
         if !peer_snapshots.is_empty() {
             log::info!(
@@ -274,7 +337,11 @@ where
         }
 
         for (peer_addr, peer_mac) in peer_snapshots.iter() {
-            let offset = h2h::slot_offset(&our_addr, peer_addr);
+            let offset = if Capabilities::is_low_power_endpoint_bits(capabilities) {
+                0
+            } else {
+                h2h::slot_offset(&our_addr, peer_addr)
+            };
             let target_time = cycle_start + Duration::from_secs(offset);
 
             if Instant::now() < target_time {
@@ -305,9 +372,18 @@ where
                         &peer_addr[..4],
                         table.peers.len()
                     );
+                    let _ = initiator.finish_h2h_session().await;
+
+                    // Low-power endpoints treat later ranked routers as
+                    // fallback candidates. Once one wake session succeeds, the
+                    // current wake window is complete.
+                    if Capabilities::is_low_power_endpoint_bits(capabilities) {
+                        break;
+                    }
                 }
                 Err(e) => {
                     log::warn!("[central] H2H failed to {:02x?}: {:?}", &peer_addr[..4], e);
+                    let _ = initiator.finish_h2h_session().await;
                 }
             }
         }

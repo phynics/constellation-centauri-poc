@@ -2636,6 +2636,8 @@ dependencies = [
  "rand",
  "ratatui",
  "routing-core",
+ "serde",
+ "serde_json",
  "serial_test",
  "static_cell",
 ]

@@ -36,6 +36,29 @@ impl Capabilities {
         self.0 & Self::LOW_ENERGY != 0
     }
 
+    /// Low-power endpoint nodes are energy-constrained application leaves that
+    /// do not participate in routing. Several higher-level behaviors depend on
+    /// this exact classification (uplink wake scheduling, delayed delivery,
+    /// router-side retention), so keep the predicate here instead of open-coded
+    /// at every call site.
+    pub const fn is_low_power_endpoint_bits(bits: u16) -> bool {
+        bits & Self::LOW_ENERGY != 0 && bits & Self::ROUTE == 0
+    }
+
+    /// Store-capable routers are the only nodes that are currently eligible to
+    /// hold delayed-delivery mail for low-power endpoints.
+    pub const fn is_store_router_bits(bits: u16) -> bool {
+        bits & Self::STORE != 0 && bits & Self::ROUTE != 0
+    }
+
+    pub const fn is_low_power_endpoint(&self) -> bool {
+        Self::is_low_power_endpoint_bits(self.0)
+    }
+
+    pub const fn is_store_router(&self) -> bool {
+        Self::is_store_router_bits(self.0)
+    }
+
     pub fn to_bytes(&self) -> [u8; 2] {
         self.0.to_le_bytes()
     }

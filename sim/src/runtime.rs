@@ -15,6 +15,7 @@ use crate::medium::SimMedium;
 use crate::message_task;
 use crate::network::{SimInitiator, SimNodeInfo, SimResponder};
 use crate::scenario::{self, ScenarioId};
+use crate::store_forward::{self, StoreForwardState};
 use crate::sim_state::{SimCommand, SimConfig, TuiState, DEFAULT_NODES, MAX_NODES};
 use crate::{behavior, command_task, snapshot_task};
 
@@ -29,6 +30,7 @@ async fn run_node(
     all_nodes: &'static [SimNodeInfo; MAX_NODES],
     sim_config: Arc<Mutex<SimConfig>>,
     tui_state: Arc<Mutex<TuiState>>,
+    store_forward_state: Arc<Mutex<StoreForwardState>>,
 ) {
     let mut responder = SimResponder::new(node_idx, medium, all_nodes, Arc::clone(&sim_config));
     let mut initiator = SimInitiator::new(node_idx, medium, all_nodes, Arc::clone(&sim_config));
@@ -41,6 +43,8 @@ async fn run_node(
             routing_table,
             uptime,
             Arc::clone(&sim_config),
+            Arc::clone(&store_forward_state),
+            Arc::clone(&tui_state),
         ),
         behavior::run_initiator_loop_dynamic(
             node_idx,
@@ -49,6 +53,8 @@ async fn run_node(
             routing_table,
             uptime,
             Arc::clone(&sim_config),
+            Arc::clone(&store_forward_state),
+            Arc::clone(&tui_state),
         ),
         run_heartbeat_loop(uptime, routing_table),
         message_task::run_message_loop(
@@ -58,6 +64,7 @@ async fn run_node(
             all_nodes,
             Arc::clone(&sim_config),
             Arc::clone(&tui_state),
+            Arc::clone(&store_forward_state),
         ),
         message_task::run_sensor_loop(node_idx, medium, all_nodes, sim_config, tui_state),
     )
@@ -74,6 +81,7 @@ async fn embassy_main(
     tui_state: Arc<Mutex<TuiState>>,
     sim_config: Arc<Mutex<SimConfig>>,
     cmd_rx: Arc<Mutex<std::sync::mpsc::Receiver<SimCommand>>>,
+    store_forward_state: Arc<Mutex<StoreForwardState>>,
 ) {
     macro_rules! node {
         ($i:expr) => {
@@ -86,6 +94,7 @@ async fn embassy_main(
                 node_infos,
                 Arc::clone(&sim_config),
                 Arc::clone(&tui_state),
+                Arc::clone(&store_forward_state),
             )
         };
     }
@@ -102,21 +111,28 @@ async fn embassy_main(
             ),
         ),
         join(
-            snapshot_task::run_snapshot_loop(
-                routing_tables,
-                uptimes,
-                identities,
-                Arc::clone(&sim_config),
-                Arc::clone(&tui_state),
+            join(
+                snapshot_task::run_snapshot_loop(
+                    routing_tables,
+                    uptimes,
+                    identities,
+                    Arc::clone(&sim_config),
+                    Arc::clone(&tui_state),
+                ),
+                command_task::run_command_loop(
+                    cmd_rx,
+                    medium,
+                    node_infos,
+                    sim_config,
+                    Arc::clone(&tui_state),
+                    routing_tables,
+                    uptimes,
+                    Arc::clone(&store_forward_state),
+                ),
             ),
-            command_task::run_command_loop(
-                cmd_rx,
-                medium,
-                node_infos,
-                sim_config,
-                tui_state,
-                routing_tables,
-                uptimes,
+            store_forward::run_store_forward_maintenance(
+                store_forward_state,
+                Arc::clone(&tui_state),
             ),
         ),
     )
@@ -131,6 +147,7 @@ pub struct SimRuntime {
     pub node_infos: &'static [SimNodeInfo; MAX_NODES],
     pub routing_tables: &'static [AsyncMutex<CriticalSectionRawMutex, RoutingTable>; MAX_NODES],
     pub uptimes: &'static [AsyncMutex<CriticalSectionRawMutex, u32>; MAX_NODES],
+    pub store_forward_state: Arc<Mutex<StoreForwardState>>,
 }
 
 impl SimRuntime {
@@ -143,6 +160,7 @@ impl SimRuntime {
         let sim_config = Arc::new(Mutex::new(initial_config));
         let (cmd_tx, cmd_rx) = mpsc::channel::<SimCommand>();
         let cmd_rx = Arc::new(Mutex::new(cmd_rx));
+        let store_forward_state = Arc::new(Mutex::new(StoreForwardState::default()));
 
         let mut rng = rand::rngs::SmallRng::seed_from_u64(DEFAULT_SIM_SEED);
 
@@ -183,6 +201,7 @@ impl SimRuntime {
         let tui_state_bg = Arc::clone(&tui_state);
         let sim_config_bg = Arc::clone(&sim_config);
         let cmd_rx_bg = Arc::clone(&cmd_rx);
+        let store_forward_bg = Arc::clone(&store_forward_state);
 
         std::thread::Builder::new()
             .name("embassy".to_string())
@@ -199,6 +218,7 @@ impl SimRuntime {
                         tui_state_bg,
                         sim_config_bg,
                         cmd_rx_bg,
+                        store_forward_bg,
                     ));
                 });
             })
@@ -212,6 +232,7 @@ impl SimRuntime {
             node_infos,
             routing_tables,
             uptimes,
+            store_forward_state,
         }
     }
 
