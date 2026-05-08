@@ -959,4 +959,254 @@ mod tests {
         assert_eq!(candidates_b.len(), 1);
         assert_eq!(candidates_b[0].0, partner_b_addr);
     }
+
+    #[test]
+    fn multi_hop_partitioned_route_resolves_via_bridge() {
+        // Topology: A --- bridge --- C
+        // A knows bridge directly, C indirectly via bridge.
+        // A should route to C via bridge.
+        let a_addr = short_addr_of(&pubkey(0xB0));
+        let bridge_pubkey = pubkey(0xB1);
+        let bridge_addr = short_addr_of(&bridge_pubkey);
+        let bridge_transport = TransportAddr::ble(mac(0xF4));
+        let c_pubkey = pubkey(0xB2);
+        let c_addr = short_addr_of(&c_pubkey);
+
+        let mut table = RoutingTable::new(a_addr);
+
+        // A's direct peer: bridge
+        let _ = table
+            .peers
+            .push(direct_peer_entry(bridge_pubkey, bridge_transport, 10));
+
+        // A's indirect peer: C, learned from bridge
+        let _ = table.peers.push(PeerEntry {
+            short_addr: c_addr,
+            pubkey: c_pubkey,
+            capabilities: 0x7777,
+            bloom: BloomFilter::new(),
+            transport_addr: TransportAddr {
+                addr_type: 0,
+                addr: [0u8; 6],
+            },
+            last_seen_ticks: 20,
+            hop_count: 2,
+            trust: TRUST_INDIRECT,
+            learned_from: bridge_addr,
+        });
+
+        let candidates = table.forwarding_candidates(&c_addr);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0, bridge_addr);
+        assert_eq!(candidates[0].1, bridge_transport);
+    }
+
+    #[test]
+    fn multi_hop_two_hop_route_via_h2h_exchange() {
+        // Simulate a full H2H chain: A <-> B <-> C, A not linked to C.
+        // A does H2H with B, learns C as indirect from B.
+        // A should route to C via B.
+        let a_pubkey = pubkey(0xC0);
+        let a_addr = short_addr_of(&a_pubkey);
+        let b_pubkey = pubkey(0xC1);
+        let b_addr = short_addr_of(&b_pubkey);
+        let b_transport = TransportAddr::ble(mac(0xF5));
+        let c_pubkey = pubkey(0xC2);
+        let c_addr = short_addr_of(&c_pubkey);
+
+        let mut table = RoutingTable::new(a_addr);
+
+        // H2H exchange: B tells A about C
+        let payload = H2hPayload {
+            full_pubkey: Some(b_pubkey),
+            capabilities: 0x8800,
+            uptime_secs: 100,
+            peers: {
+                const NONE: Option<PeerInfo> = None;
+                let mut p = [NONE; H2H_MAX_PEER_ENTRIES];
+                p[0] = Some(PeerInfo {
+                    pubkey: c_pubkey,
+                    capabilities: 0x9900,
+                    hop_count: 0,
+                });
+                p
+            },
+            peer_count: 1,
+        };
+
+        table.update_peer_from_h2h(&payload, b_addr, b_transport, 50);
+
+        // Verify A learned C as indirect from B
+        let c_entry = table.find_peer(&c_addr).unwrap();
+        assert_eq!(c_entry.trust, TRUST_INDIRECT);
+        assert_eq!(c_entry.learned_from, b_addr);
+
+        // Verify A can route to C via B
+        let candidates = table.forwarding_candidates(&c_addr);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0, b_addr);
+        assert_eq!(candidates[0].1, b_transport);
+    }
+
+    #[test]
+    fn multi_hop_three_hop_chain_resolves_step_by_step() {
+        // Chain: A <-> B <-> C <-> D
+        // A knows B directly, C indirectly via B, D indirectly via B.
+        // A should route to D via B (B is the learned_from for both C and D).
+        let a_addr = short_addr_of(&pubkey(0xD0));
+        let b_pubkey = pubkey(0xD1);
+        let b_addr = short_addr_of(&b_pubkey);
+        let b_transport = TransportAddr::ble(mac(0xF6));
+        let c_pubkey = pubkey(0xD2);
+        let c_addr = short_addr_of(&c_pubkey);
+        let d_pubkey = pubkey(0xD3);
+        let d_addr = short_addr_of(&d_pubkey);
+
+        let mut table = RoutingTable::new(a_addr);
+
+        // Direct: B
+        let _ = table
+            .peers
+            .push(direct_peer_entry(b_pubkey, b_transport, 10));
+
+        // Indirect: C learned from B, hop_count=2
+        let _ = table.peers.push(PeerEntry {
+            short_addr: c_addr,
+            pubkey: c_pubkey,
+            capabilities: 0xAA00,
+            bloom: BloomFilter::new(),
+            transport_addr: TransportAddr {
+                addr_type: 0,
+                addr: [0u8; 6],
+            },
+            last_seen_ticks: 20,
+            hop_count: 2,
+            trust: TRUST_INDIRECT,
+            learned_from: b_addr,
+        });
+
+        // Indirect: D learned from B, hop_count=3
+        let _ = table.peers.push(PeerEntry {
+            short_addr: d_addr,
+            pubkey: d_pubkey,
+            capabilities: 0xBB00,
+            bloom: BloomFilter::new(),
+            transport_addr: TransportAddr {
+                addr_type: 0,
+                addr: [0u8; 6],
+            },
+            last_seen_ticks: 20,
+            hop_count: 3,
+            trust: TRUST_INDIRECT,
+            learned_from: b_addr,
+        });
+
+        // A routes to C via B
+        let candidates_c = table.forwarding_candidates(&c_addr);
+        assert_eq!(candidates_c.len(), 1);
+        assert_eq!(candidates_c[0].0, b_addr);
+
+        // A routes to D via B
+        let candidates_d = table.forwarding_candidates(&d_addr);
+        assert_eq!(candidates_d.len(), 1);
+        assert_eq!(candidates_d[0].0, b_addr);
+    }
+
+    #[test]
+    fn multi_hop_bridge_learns_both_partitions_and_routes_cross() {
+        // Partitioned: A <-> bridge <-> C
+        // Bridge does H2H with A (learns A directly) and H2H with C (learns C directly).
+        // Bridge should route to A directly and to C directly.
+        // This tests the bridge's own routing table convergence.
+        let bridge_addr = short_addr_of(&pubkey(0xE0));
+        let a_pubkey = pubkey(0xE1);
+        let a_addr = short_addr_of(&a_pubkey);
+        let a_transport = TransportAddr::ble(mac(0xF7));
+        let c_pubkey = pubkey(0xE2);
+        let c_addr = short_addr_of(&c_pubkey);
+        let c_transport = TransportAddr::ble(mac(0xF8));
+
+        let mut table = RoutingTable::new(bridge_addr);
+
+        // Bridge H2H with A
+        let payload_a = H2hPayload {
+            full_pubkey: Some(a_pubkey),
+            capabilities: 0xCC00,
+            uptime_secs: 50,
+            peers: {
+                const NONE: Option<PeerInfo> = None;
+                [NONE; H2H_MAX_PEER_ENTRIES]
+            },
+            peer_count: 0,
+        };
+        table.update_peer_from_h2h(&payload_a, a_addr, a_transport, 100);
+
+        // Bridge H2H with C
+        let payload_c = H2hPayload {
+            full_pubkey: Some(c_pubkey),
+            capabilities: 0xDD00,
+            uptime_secs: 50,
+            peers: {
+                const NONE: Option<PeerInfo> = None;
+                [NONE; H2H_MAX_PEER_ENTRIES]
+            },
+            peer_count: 0,
+        };
+        table.update_peer_from_h2h(&payload_c, c_addr, c_transport, 100);
+
+        // Bridge routes to A directly
+        let candidates_a = table.forwarding_candidates(&a_addr);
+        assert_eq!(candidates_a.len(), 1);
+        assert_eq!(candidates_a[0].0, a_addr);
+        assert_eq!(candidates_a[0].1, a_transport);
+
+        // Bridge routes to C directly
+        let candidates_c = table.forwarding_candidates(&c_addr);
+        assert_eq!(candidates_c.len(), 1);
+        assert_eq!(candidates_c[0].0, c_addr);
+        assert_eq!(candidates_c[0].1, c_transport);
+    }
+
+    #[test]
+    fn multi_hop_expired_bridge_prevents_indirect_routing() {
+        // A <-> bridge <-> C, but bridge has expired.
+        // A should not be able to route to C via bridge.
+        let a_addr = short_addr_of(&pubkey(0xF0));
+        let bridge_pubkey = pubkey(0xF1);
+        let bridge_addr = short_addr_of(&bridge_pubkey);
+        let bridge_transport = TransportAddr::ble(mac(0xF9));
+        let c_pubkey = pubkey(0xF2);
+        let c_addr = short_addr_of(&c_pubkey);
+
+        let mut table = RoutingTable::new(a_addr);
+
+        let _ = table
+            .peers
+            .push(direct_peer_entry(bridge_pubkey, bridge_transport, 10));
+
+        let _ = table.peers.push(PeerEntry {
+            short_addr: c_addr,
+            pubkey: c_pubkey,
+            capabilities: 0xEE00,
+            bloom: BloomFilter::new(),
+            transport_addr: TransportAddr {
+                addr_type: 0,
+                addr: [0u8; 6],
+            },
+            last_seen_ticks: 20,
+            hop_count: 2,
+            trust: TRUST_INDIRECT,
+            learned_from: bridge_addr,
+        });
+
+        // Expire the bridge
+        table.decay(200, 100);
+        let bridge_entry = table.find_peer(&bridge_addr).unwrap();
+        assert_eq!(bridge_entry.trust, TRUST_EXPIRED);
+
+        // A can no longer route to C — learned_from is expired
+        let candidates = table.forwarding_candidates(&c_addr);
+        assert!(candidates.is_empty());
+    }
 }

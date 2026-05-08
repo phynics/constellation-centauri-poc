@@ -4,58 +4,65 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**y-wood** (`ble-connect`) is a `#![no_std]` embedded Rust firmware for ESP32 microcontrollers. It targets BLE connectivity and display output (ILI9486 via SPI) using the async Embassy framework on bare metal (no OS). Part of the broader "constellation-project" — a hybrid mesh networking system for ESP32.
+**Constellation Mesh** is a Rust workspace for decentralized ESP32 mesh networking with a shared protocol core, bare-metal firmware host, and desktop simulator.
+
+### Workspace Members
+
+- `routing-core/` — Reusable no-std protocol/routing/crypto/behavior layer. All routing decisions live here.
+- `firmware/` — ESP32 firmware using Embassy, esp-hal, trouble-host BLE, and flash persistence.
+- `sim/` — Desktop simulator with Embassy-on-thread + ratatui TUI. **Primary routing-core experiment harness.**
 
 ## Build & Run Commands
 
-The project uses the ESP Rust toolchain (`channel = "esp"` via `espup`). Default target is **ESP32-C6** (`riscv32imac-unknown-none-elf`).
-
 ```bash
-# Build (default: esp32c6)
+# Build the workspace
 cargo build
 
-# Build and flash to a connected device (uses espflash as runner)
-cargo run --release
+# Check individual crates
+cargo check -p routing-core
+cargo check -p sim
+cargo check -p firmware  # requires esp toolchain
 
-# Target a specific chip using cargo aliases:
-cargo esp32c6    # default
-cargo esp32c3
-cargo esp32c2
-cargo esp32h2
-cargo esp32      # Xtensa
-cargo esp32s3    # Xtensa
+# Test
+cargo test -p routing-core    # 30+ unit tests
+cargo test -p sim             # 11 integration tests
+
+# Run the simulator
+cargo run -p sim
+
+# Format and lint
+cargo fmt --all
+cargo clippy -p routing-core
+cargo clippy -p sim
+
+# Firmware (ESP32-C6 target)
+cd firmware && cargo check --no-default-features --features=esp32c6
+cargo esp32c6    # alias: release flash + monitor
 ```
-
-Each cargo alias runs `--release --no-default-features --features=<chip> --target=<arch>`. The runner is `espflash flash --monitor`, so `cargo run` flashes the device and opens a serial monitor.
-
-## Toolchain Setup
-
-- **Nix users**: `nix develop` sets up the full environment (espup, rustup, espflash, etc.)
-- **Non-Nix**: Install `espup`, run `espup install`, then `source export-esp.sh` to set toolchain paths
-- Xtensa targets (esp32, esp32s3) require `build-std` (configured in `[unstable]` in `.cargo/config.toml`)
 
 ## Architecture
 
-- **Runtime**: Embassy async executor (`embassy-executor`, `esp-hal-embassy`) — all tasks are `async`
-- **BLE stack**: `esp-wifi` (BLE controller) + `trouble-host` (BLE host with GATT/peripheral/security support)
-- **Crypto**: `ed25519-dalek` for signing/key exchange
+- **Runtime**: Embassy async executor — all tasks are `async`
+- **Shared layer**: `#![no_std]`, uses `heapless` collections and explicit capacities
+- **BLE stack**: `esp-wifi` (controller) + `trouble-host` (host with GATT/L2CAP)
+- **Crypto**: `ed25519-dalek` for signing, `x25519-dalek` + `chacha20poly1305` for encryption
 - **Storage**: `esp-storage` + `embedded-storage` traits for flash persistence
-- **Display**: `mipidsi` driver for ILI9486 SPI display
-- **Heap**: `esp-alloc` with a 72KB heap allocation
-
-## Documentation
-
-The project documentation is organized in the `docs/` directory:
-
-- **[Project Spec](docs/spec/protocol.md)**: High-level protocol and BLE layer specifications.
-- **[Testing Guide](docs/guides/hardware-testing.md)**: Steps to flash and test on ESP32-C6 hardware.
-- **[BLE Integration Status](docs/guides/ble-integration.md)**: Status and roadmap for the BLE transport.
-- **[Archive](docs/archive/)**: Historical design documents and summaries.
+- **Simulator**: Embassy runs on a background thread, ratatui owns the main thread, shared state crosses via `Arc<Mutex<_>>` + mpsc
 
 ## Key Constraints
 
-- `#![no_std]` + `#![no_main]` — no standard library, no OS, no dynamic allocation outside `esp-alloc`
-- Dev builds use `opt-level = "s"` because debug is too slow on embedded
-- Several crates are pinned to a specific esp-hal git revision via `[patch.crates-io]` — check `Cargo.toml` before updating dependencies
-- `trouble-host` is pinned to the `main` branch of the upstream git repo
-- Log level controlled by `ESP_LOG=info` env var (set in `.cargo/config.toml`)
+- `routing-core` is `#![no_std]` — prefer `heapless` collections, explicit capacities, and static allocation
+- Shared mutable state uses `Mutex` + `StaticCell` in firmware, `Arc<Mutex<_>>` in sim
+- Transport abstraction is real: `H2hInitiator`/`H2hResponder` traits are implemented separately by firmware BLE and simulator shims
+- Capability flags drive node roles; prefer expressing participation through bitfields instead of hard-coded role branches
+- Build fingerprints are intentional: both `build.rs` files hash key sources so nodes can compare firmware equivalence
+- `trouble-host` is pinned to the upstream `main` branch; several esp-hal family crates are patched to a specific git revision
+- Several crates are pinned via `[patch.crates-io]` in the workspace `Cargo.toml` — check before updating dependencies
+- The top-level `src/` tree and `build.rs` are **pre-workspace legacy** — treat them cautiously
+
+## Documentation
+
+- **[Protocol Specification](docs/spec/protocol.md)** — High-level mesh and low-level BLE protocol details.
+- **[BLE Integration Guide](docs/guides/ble-integration.md)** — BLE transport layer status and development guide.
+- **[Hardware Testing](docs/guides/hardware-testing.md)** — Flashing and testing on ESP32-C6 boards.
+- **[Archive](docs/archive/)** — Historical summaries and plans.

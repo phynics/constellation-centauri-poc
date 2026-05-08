@@ -26,7 +26,18 @@ pub struct InboundH2h {
 /// Errors that may occur during network operations.
 #[derive(Debug)]
 pub enum NetworkError {
+    /// Generic connection failure (kept for backward compat).
     ConnectionFailed,
+    /// Peer is not currently active in the simulation.
+    PeerInactive,
+    /// This node's H2H initiate behavior is disabled.
+    InitiateDisabled,
+    /// The peer's H2H respond behavior is disabled.
+    RespondDisabled,
+    /// The link between initiator and peer is disabled.
+    LinkDisabled,
+    /// The link drop probability rejected this attempt.
+    DropRejected,
     ProtocolError,
     Timeout,
 }

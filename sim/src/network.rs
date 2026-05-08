@@ -68,10 +68,10 @@ impl H2hResponder for SimResponder {
         if !respond_h2h {
             self.medium.h2h_resp[req.sender_idx]
                 .send(SimH2hResponse {
-                    result: Err(NetworkError::ConnectionFailed),
+                    result: Err(NetworkError::RespondDisabled),
                 })
                 .await;
-            return Err(NetworkError::ConnectionFailed);
+            return Err(NetworkError::RespondDisabled);
         }
 
         let peer_payload = deserialize_payload(&req.payload_bytes, req.payload_len)
@@ -182,20 +182,20 @@ impl H2hInitiator for SimInitiator {
         {
             let config = self.sim_config.lock().unwrap();
             if self.node_idx >= config.n_active || peer_idx >= config.n_active {
-                return Err(NetworkError::ConnectionFailed);
+                return Err(NetworkError::PeerInactive);
             }
             if !config.node_behaviors[self.node_idx].initiate_h2h {
-                return Err(NetworkError::ConnectionFailed);
+                return Err(NetworkError::InitiateDisabled);
             }
             if !config.node_behaviors[peer_idx].respond_h2h {
-                return Err(NetworkError::ConnectionFailed);
+                return Err(NetworkError::RespondDisabled);
             }
             if !config.link_enabled[self.node_idx][peer_idx] {
-                return Err(NetworkError::ConnectionFailed);
+                return Err(NetworkError::LinkDisabled);
             }
             let drop = config.drop_prob[self.node_idx][peer_idx];
             if drop > 0 && rand::thread_rng().gen_range(0u8..100) < drop {
-                return Err(NetworkError::ConnectionFailed);
+                return Err(NetworkError::DropRejected);
             }
         }
 
@@ -374,7 +374,7 @@ mod tests {
         let mut initiator = SimInitiator::new(0, medium, nodes, config);
         let result = block_on(initiator.initiate_h2h(nodes[1].mac, &test_payload(0x21)));
 
-        assert!(matches!(result, Err(NetworkError::ConnectionFailed)));
+        assert!(matches!(result, Err(NetworkError::DropRejected)));
     }
 
     #[test]
@@ -553,7 +553,7 @@ mod tests {
             let disabled_h2h = initiator
                 .initiate_h2h(nodes[node_b].mac, &test_payload(0x55))
                 .await;
-            assert!(matches!(disabled_h2h, Err(NetworkError::ConnectionFailed)));
+            assert!(matches!(disabled_h2h, Err(NetworkError::LinkDisabled)));
 
             {
                 let mut cfg = config.lock().unwrap();
@@ -631,6 +631,6 @@ mod tests {
         let mut initiator = SimInitiator::new(0, medium, nodes, config);
         let result = block_on(initiator.initiate_h2h(nodes[1].mac, &test_payload(0x21)));
 
-        assert!(matches!(result, Err(NetworkError::ConnectionFailed)));
+        assert!(matches!(result, Err(NetworkError::RespondDisabled)));
     }
 }

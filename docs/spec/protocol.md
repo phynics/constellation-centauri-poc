@@ -309,15 +309,15 @@ pub struct PeerInfo {
     pub capabilities: Capabilities,
     pub last_seen: Instant,
     pub hop_count: u8,         // 0 = direct neighbor
-    pub trust_level: TrustLevel,
+    pub trust: u8,             // TRUST_DIRECT, TRUST_INDIRECT, TRUST_BLOOM, TRUST_EXPIRED
+    pub learned_from: ShortAddr, // for indirect peers: the direct partner that taught us
 }
 
-#[repr(u8)]
-pub enum TrustLevel {
-    DirectHeartbeat = 3,    // we heard their heartbeat directly
-    NeighborBloom = 1,      // a neighbor's bloom filter claims to know them
-    Expired = 0,            // haven't heard from them in a while
-}
+/// Trust levels for routing table entries.
+pub const TRUST_DIRECT: u8 = 3;   // direct H2H exchange
+pub const TRUST_INDIRECT: u8 = 2;  // learned from a partner's H2H peer list
+pub const TRUST_BLOOM: u8 = 1;    // bloom filter match only
+pub const TRUST_EXPIRED: u8 = 0;  // stale, not refreshed within decay interval
 ```
 
 ### 5.3 BLE Transport Implementation
@@ -431,12 +431,11 @@ fn forward(packet: Packet):
     packet.ttl -= 1
     packet.hop_count += 1
 
-    // Find neighbors whose bloom filters contain the destination
-    candidates = neighbors.filter(|n| n.bloom.contains(packet.dst))
+    candidates = forwarding_candidates(packet.dst)
 
     if candidates.is_empty():
-        // No bloom match: flood to all known routing neighbors
-        candidates = neighbors.filter(|n| n.capabilities.contains(ROUTE))
+        // No route: drop
+        return
 
     // Send to ALL matching candidates (multi-path)
     for neighbor in candidates:
@@ -444,9 +443,17 @@ fn forward(packet: Packet):
         transport.send(neighbor.transport_id, packet.serialize())
 ```
 
+**`forwarding_candidates(dst)` resolution order**:
+
+1. **Direct destination**: if `dst` is a known peer with usable transport → forward directly
+2. **Indirect via `learned_from`**: if `dst` is an indirect peer (TRUST_INDIRECT), resolve `learned_from` to a usable direct neighbor → forward via that neighbor
+3. **Bloom-route candidates**: neighbors whose bloom filter claims they know `dst` → forward via bloom hint
+4. **No candidates**: packet is dropped
+
 **Key behaviors**:
+- **Indirect routing**: destinations learned from H2H carry `learned_from`, which is the next-hop hint for indirect peers
 - **Multiple bloom hits**: send to ALL matching neighbors (increases delivery probability)
-- **No bloom hits**: flood to all routing-capable neighbors
+- **No bloom hits**: no candidates, packet is dropped (no unconditional flood in current implementation)
 - **Loop prevention**: `SeenMessages` ring buffer ensures a message is forwarded at most once
 - **TTL**: prevents infinite propagation; default TTL = 10
 
@@ -596,45 +603,50 @@ Uses `esp-storage` + `embedded-storage` traits for flash read/write.
 
 ## 10. Module Structure
 
+The project is organized as a Cargo workspace with three members:
+
 ```
-src/
-  main.rs                   -- entry point, peripheral init, task spawning
-  lib.rs                    -- (optional) shared types for testing on host
+routing-core/              # Shared no-std protocol layer
+  src/
+    lib.rs                 # Module boundary
+    config.rs              # Constants (MAX_NODES, TTL, etc.)
+    behavior.rs            # Shared initiator/responder/heartbeat loops
+    crypto/
+      identity.rs          # NodeIdentity, ShortAddr, ed25519 signing
+      encryption.rs        # ECDH, ChaCha20-Poly1305 encrypt/decrypt
+    protocol/
+      h2h.rs               # H2H payload, slot scheduling, initiator selection
+      packet.rs            # Packet builder, header serialization
+      dedup.rs             # SeenMessages ring buffer
+    routing/
+      table.rs             # RoutingTable, forwarding_candidates, bloom, decay
+      bloom.rs             # BloomFilter (256-bit, 3 hash functions)
+    network.rs             # H2hInitiator/H2hResponder traits, NetworkError
+    transport.rs           # TransportAddr
+    node/
+      roles.rs             # Capabilities bitfield
 
-  crypto/
-    mod.rs
-    identity.rs             -- NodeIdentity, key generation, ed25519 ops
-    encryption.rs           -- ECDH, ChaCha20-Poly1305 encrypt/decrypt
-    certificate.rs          -- NodeCertificate, verification
+firmware/                  # ESP32 bare-metal host
+  src/
+    main.rs                # Embassy startup, BLE stack wiring, task orchestration
+    transport/
+      ble_network.rs       # trouble-host BLE: advertise, scan, L2CAP H2H
 
-  protocol/
-    mod.rs
-    packet.rs               -- PacketHeader, PacketType, serialization
-    heartbeat.rs            -- HeartbeatPayload, HeartbeatScheduler
-    announce.rs             -- AnnouncePayload
-    dedup.rs                -- SeenMessages ring buffer
-
-  routing/
-    mod.rs
-    table.rs                -- RoutingTable, entry decay
-    bloom.rs                -- BloomFilter (256-bit, 3 hash functions)
-    forward.rs              -- forwarding logic, multi-path
-
-  transport/
-    mod.rs                  -- Transport trait, TransportPeerId, TransportType
-    ble.rs                  -- BleTransport (trouble-host + esp-wifi)
-    wifi.rs                 -- WifiTransport (future, IPv6)
-    lora.rs                 -- LoraTransport (future)
-    registry.rs             -- PeerRegistry, PeerInfo, transport selection
-
-  node/
-    mod.rs
-    roles.rs                -- Capabilities bitfield
-    storage.rs              -- Flash persistence, NodeStorage trait
-    store_forward.rs        -- StoreForwardBuffer for LE nodes
-
-  display/
-    mod.rs                  -- ILI9486 display driver, status rendering (optional)
+sim/                       # Desktop simulator host
+  src/
+    main.rs                # Simulator boot, static node setup, Embassy background thread
+    network.rs             # SimInitiator/SimResponder (in-process transport shims)
+    behavior.rs            # Sim-specific behavior loops (runtime capability lookup)
+    scenario.rs            # Built-in scenario presets
+    message_task.rs        # Hop-by-hop message propagation using routing-core
+    command_task.rs        # TUI command dispatch
+    snapshot_task.rs       # Embassy -> TUI state bridge (1s tick)
+    medium.rs              # SimMedium channels and serialization
+    sim_state.rs           # Shared state: TuiState, SimConfig, traces, events
+    tui/
+      mod.rs               # TUI entry point, crossterm + ratatui loop
+      app.rs               # App state, key handling, input modes
+      ui.rs                # Trace-centric rendering
 ```
 
 ---
@@ -769,21 +781,27 @@ New Node                  Companion App (Phone)
 
 ```rust
 pub mod config {
-    use core::time::Duration;
-
     pub const PROTOCOL_VERSION: u8 = 0x01;
-    pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
-    pub const HEARTBEAT_MAX_SUPPRESSION: Duration = Duration::from_secs(180);
+    pub const HEARTBEAT_INTERVAL_SECS: u64 = 60;
+    pub const HEARTBEAT_MAX_SUPPRESSION_SECS: u64 = 180;
+    pub const H2H_CYCLE_SECS: u64 = 60;
+    pub const H2H_MAX_PEER_ENTRIES: usize = 8;
+    pub const H2H_CONNECTION_TIMEOUT_SECS: u64 = 5;
+    pub const H2H_PSM: u16 = 0x0081;
+    pub const H2H_MTU: u16 = 512;
     pub const DEFAULT_TTL: u8 = 10;
     pub const BLOOM_FILTER_BYTES: usize = 32;   // 256 bits
     pub const BLOOM_HASH_COUNT: usize = 3;
     pub const SEEN_MESSAGES_CAPACITY: usize = 128;
     pub const ROUTING_DECAY_FACTOR: u8 = 3;     // entries expire at 3x heartbeat interval
-    pub const LE_DELIVERY_WINDOW: Duration = Duration::from_secs(2);
+    pub const LE_DELIVERY_WINDOW_SECS: u64 = 2;
     pub const STORE_FORWARD_MAX_PER_NODE: usize = 8;
-    pub const STORE_FORWARD_MAX_AGE: Duration = Duration::from_secs(600);
-    pub const MAX_PEERS: usize = 64;
+    pub const STORE_FORWARD_MAX_AGE_SECS: u64 = 600;
+    pub const MAX_PEERS: usize = 32;
+    pub const TICK_HZ: u64 = 1_000_000;          // Embassy ESP32 default
     pub const HEAP_SIZE: usize = 72 * 1024;
+    pub const HEADER_SIZE: usize = 92;
+    pub const BROADCAST_ADDR: [u8; 8] = [0xFF; 8];
 }
 ```
 
