@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use routing_core::node::roles::Capabilities;
 
+use crate::config_ops;
 use crate::scenario::{self, ScenarioId};
 use crate::sim_state::{MessageKind, SimCommand, SimConfig, TraceFilter, TuiState, MAX_NODES};
 
@@ -250,64 +251,71 @@ impl App {
         }
         match key.code {
             KeyCode::Char(' ') => {
-                cfg.node_behaviors[self.selected_node].advertise =
-                    !cfg.node_behaviors[self.selected_node].advertise;
+                config_ops::update_node_behavior(&mut cfg, self.selected_node, |behavior| {
+                    behavior.advertise = !behavior.advertise;
+                });
             }
             KeyCode::Char('t') | KeyCode::Char('T') => {
-                cfg.node_types[self.selected_node] = cfg.node_types[self.selected_node].cycle();
+                let next_type = cfg.node_types[self.selected_node].cycle();
+                config_ops::set_node_type(&mut cfg, self.selected_node, next_type);
             }
-            KeyCode::Char('1') => toggle_capability(
-                &mut cfg.capabilities[self.selected_node],
-                Capabilities::ROUTE,
-            ),
-            KeyCode::Char('2') => toggle_capability(
-                &mut cfg.capabilities[self.selected_node],
-                Capabilities::STORE,
-            ),
-            KeyCode::Char('3') => toggle_capability(
-                &mut cfg.capabilities[self.selected_node],
+            KeyCode::Char('1') => {
+                config_ops::toggle_capability(&mut cfg, self.selected_node, Capabilities::ROUTE)
+            }
+            KeyCode::Char('2') => {
+                config_ops::toggle_capability(&mut cfg, self.selected_node, Capabilities::STORE)
+            }
+            KeyCode::Char('3') => config_ops::toggle_capability(
+                &mut cfg,
+                self.selected_node,
                 Capabilities::APPLICATION,
             ),
-            KeyCode::Char('4') => toggle_capability(
-                &mut cfg.capabilities[self.selected_node],
-                Capabilities::BRIDGE,
-            ),
-            KeyCode::Char('5') => toggle_capability(
-                &mut cfg.capabilities[self.selected_node],
+            KeyCode::Char('4') => {
+                config_ops::toggle_capability(&mut cfg, self.selected_node, Capabilities::BRIDGE)
+            }
+            KeyCode::Char('5') => config_ops::toggle_capability(
+                &mut cfg,
+                self.selected_node,
                 Capabilities::LOW_ENERGY,
             ),
-            KeyCode::Char('6') => toggle_capability(
-                &mut cfg.capabilities[self.selected_node],
-                Capabilities::MOBILE,
-            ),
+            KeyCode::Char('6') => {
+                config_ops::toggle_capability(&mut cfg, self.selected_node, Capabilities::MOBILE)
+            }
             KeyCode::Char('a') | KeyCode::Char('A') => {
-                cfg.node_behaviors[self.selected_node].advertise =
-                    !cfg.node_behaviors[self.selected_node].advertise
+                config_ops::update_node_behavior(&mut cfg, self.selected_node, |behavior| {
+                    behavior.advertise = !behavior.advertise;
+                })
             }
             KeyCode::Char('c') | KeyCode::Char('C') => {
-                cfg.node_behaviors[self.selected_node].scan =
-                    !cfg.node_behaviors[self.selected_node].scan
+                config_ops::update_node_behavior(&mut cfg, self.selected_node, |behavior| {
+                    behavior.scan = !behavior.scan;
+                })
             }
             KeyCode::Char('i') | KeyCode::Char('I') => {
-                cfg.node_behaviors[self.selected_node].initiate_h2h =
-                    !cfg.node_behaviors[self.selected_node].initiate_h2h
+                config_ops::update_node_behavior(&mut cfg, self.selected_node, |behavior| {
+                    behavior.initiate_h2h = !behavior.initiate_h2h;
+                })
             }
             KeyCode::Char('o') | KeyCode::Char('O') => {
-                cfg.node_behaviors[self.selected_node].respond_h2h =
-                    !cfg.node_behaviors[self.selected_node].respond_h2h
+                config_ops::update_node_behavior(&mut cfg, self.selected_node, |behavior| {
+                    behavior.respond_h2h = !behavior.respond_h2h;
+                })
             }
             KeyCode::Char('e') | KeyCode::Char('E') => {
-                cfg.node_behaviors[self.selected_node].emit_sensor =
-                    !cfg.node_behaviors[self.selected_node].emit_sensor
+                config_ops::update_node_behavior(&mut cfg, self.selected_node, |behavior| {
+                    behavior.emit_sensor = !behavior.emit_sensor;
+                })
             }
             KeyCode::Char('x') | KeyCode::Char('X') => {
                 if self.selected_node + 1 == cfg.n_active && cfg.n_active > 1 {
-                    cfg.n_active -= 1;
+                    let next_n_active = cfg.n_active - 1;
+                    config_ops::set_n_active(&mut cfg, next_n_active);
                 }
             }
             KeyCode::Char('z') | KeyCode::Char('Z') => {
                 if cfg.n_active < MAX_NODES {
-                    cfg.n_active += 1;
+                    let next_n_active = cfg.n_active + 1;
+                    config_ops::set_n_active(&mut cfg, next_n_active);
                     self.selected_node = cfg.n_active - 1;
                 }
             }
@@ -333,7 +341,7 @@ impl App {
             return;
         };
         let mut cfg = sim_config.lock().unwrap();
-        cfg.link_enabled[from][to] = !cfg.link_enabled[from][to];
+        config_ops::toggle_link(&mut cfg, from, to);
     }
 
     fn handle_help_key(&mut self, key: KeyEvent) -> bool {
@@ -465,7 +473,7 @@ impl App {
     pub fn apply_drop_prob_input(&mut self, sim_config: &Arc<Mutex<SimConfig>>) {
         if let InputTarget::DropProb { from, to } = self.input_target {
             if let Ok(prob) = self.input_buf.trim().parse::<u8>() {
-                sim_config.lock().unwrap().drop_prob[from][to] = prob.min(100);
+                config_ops::set_drop_prob(&mut sim_config.lock().unwrap(), from, to, prob);
             }
         }
     }
@@ -493,14 +501,6 @@ impl App {
             self.selected_link_node = self.selected_link_node.min(n_active - 1);
         }
         self.selected_link_peer_row = self.selected_link_peer_row.min(n_active.saturating_sub(2));
-    }
-}
-
-fn toggle_capability(bits: &mut u16, flag: u16) {
-    if *bits & flag != 0 {
-        *bits &= !flag;
-    } else {
-        *bits |= flag;
     }
 }
 

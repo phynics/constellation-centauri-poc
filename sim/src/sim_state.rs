@@ -223,6 +223,7 @@ pub struct MessageTrace {
     pub events: Vec<TraceEvent>,
 }
 
+#[derive(Clone)]
 pub struct TuiState {
     pub node_short_addrs: [[u8; 8]; MAX_NODES],
     pub nodes: [NodeSnapshot; MAX_NODES],
@@ -402,6 +403,7 @@ impl Default for NodeBehavior {
     }
 }
 
+#[derive(Clone)]
 pub struct SimConfig {
     pub n_active: usize,
     /// Whether a direct link exists between node a and node b.

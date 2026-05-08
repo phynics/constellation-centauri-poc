@@ -2,6 +2,7 @@
 
 use routing_core::node::roles::Capabilities;
 
+use crate::config_ops;
 use crate::sim_state::{NodeBehavior, NodeType, SimConfig, DEFAULT_NODES, MAX_NODES};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +74,43 @@ pub fn build_config(id: ScenarioId) -> SimConfig {
         ScenarioId::LossyEdge => lossy_edge(),
         ScenarioId::FieldDeployment => field_deployment(),
     }
+}
+
+pub fn build_config_with(id: ScenarioId, f: impl FnOnce(&mut SimConfig)) -> SimConfig {
+    let mut cfg = build_config(id);
+    f(&mut cfg);
+    cfg
+}
+
+pub fn partitioned_bridge_deterministic() -> SimConfig {
+    build_config_with(ScenarioId::PartitionedBridge, |cfg| {
+        config_ops::set_drop_prob(cfg, 15, 3, 0);
+        config_ops::set_drop_prob(cfg, 3, 15, 0);
+    })
+}
+
+pub fn full_mesh_small(n_active: usize) -> SimConfig {
+    build_config_with(ScenarioId::FullMeshBaseline, |cfg| {
+        config_ops::set_n_active(cfg, n_active);
+    })
+}
+
+pub fn lossy_edge_small_deterministic() -> SimConfig {
+    build_config_with(ScenarioId::LossyEdge, |cfg| {
+        config_ops::set_n_active(cfg, 4);
+        for row in cfg.drop_prob.iter_mut() {
+            for drop in row.iter_mut() {
+                *drop = 0;
+            }
+        }
+        for from in 0..4 {
+            for to in 0..4 {
+                config_ops::set_link_enabled(cfg, from, to, false);
+            }
+        }
+        config_ops::set_bidirectional_link(cfg, 0, 2, true);
+        config_ops::set_link_enabled(cfg, 2, 3, true);
+    })
 }
 
 fn full_mesh_baseline() -> SimConfig {
@@ -192,7 +230,7 @@ fn blank_config(n_active: usize) -> SimConfig {
 fn disable_all_links(cfg: &mut SimConfig) {
     for from in 0..MAX_NODES {
         for to in 0..MAX_NODES {
-            cfg.link_enabled[from][to] = false;
+            config_ops::set_link_enabled(cfg, from, to, false);
         }
     }
 }
@@ -247,8 +285,7 @@ fn add_caps(cfg: &mut SimConfig, node: usize, flags: u16) {
 }
 
 fn enable_bidirectional_link(cfg: &mut SimConfig, a: usize, b: usize) {
-    cfg.link_enabled[a][b] = true;
-    cfg.link_enabled[b][a] = true;
+    config_ops::set_bidirectional_link(cfg, a, b, true);
 }
 
 #[cfg(test)]

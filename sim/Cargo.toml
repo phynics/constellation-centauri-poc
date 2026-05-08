@@ -16,9 +16,10 @@ critical-section = { version = "1", features = ["std"] }
 log = "0.4"
 heapless = "0.8.0"
 rand = { version = "0.8", features = ["small_rng"] }
+pollster = "0.4"
 
 ratatui = "0.30"
 crossterm = "0.29"
 
 [dev-dependencies]
-pollster = "0.4"
+serial_test = "3"
