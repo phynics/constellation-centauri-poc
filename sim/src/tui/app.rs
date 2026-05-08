@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use routing_core::node::roles::Capabilities;
 
 use crate::scenario::{self, ScenarioId};
-use crate::sim_state::{MessageKind, SimCommand, SimConfig, TuiState, MAX_NODES};
+use crate::sim_state::{MessageKind, SimCommand, SimConfig, TraceFilter, TuiState, MAX_NODES};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum ViewMode {
@@ -29,16 +29,24 @@ pub enum Mode {
 #[derive(Clone, Copy, PartialEq)]
 pub enum InputTarget {
     None,
-    DropProb { from: usize, to: usize },
+    DropProb {
+        from: usize,
+        to: usize,
+    },
     MessageFrom,
     MessageTo,
-    MessageBody { from: usize, to: usize },
+    MessageBody {
+        from: usize,
+        to: usize,
+        is_broadcast: bool,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum BottomTab {
     Timeline,
     Graph,
+    Packet,
     Logs,
 }
 
@@ -54,6 +62,7 @@ pub struct App {
     pub selected_node: usize,
     pub selected_link_node: usize,
     pub selected_link_peer_row: usize,
+    pub trace_filter: TraceFilter,
     pub selected_scenario: usize,
     pub current_scenario: Option<ScenarioId>,
 }
@@ -72,6 +81,7 @@ impl App {
             selected_node: 0,
             selected_link_node: 0,
             selected_link_peer_row: 0,
+            trace_filter: TraceFilter::All,
             selected_scenario: 0,
             current_scenario: Some(scenario::default_scenario()),
         }
@@ -97,7 +107,11 @@ impl App {
             return self.handle_input_key(key, sim_config, cmd_tx);
         }
 
-        let trace_count = tui_state.lock().unwrap().traces.len();
+        let trace_count = tui_state
+            .lock()
+            .unwrap()
+            .filtered_trace_indices(self.trace_filter)
+            .len();
 
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return true,
@@ -187,10 +201,20 @@ impl App {
 
             KeyCode::Char('g') | KeyCode::Char('G') => {
                 self.bottom_tab = match self.bottom_tab {
-                    BottomTab::Timeline => BottomTab::Logs,
-                    BottomTab::Graph => BottomTab::Logs,
+                    BottomTab::Timeline => BottomTab::Graph,
+                    BottomTab::Graph => BottomTab::Packet,
+                    BottomTab::Packet => BottomTab::Logs,
                     BottomTab::Logs => BottomTab::Timeline,
                 };
+            }
+
+            KeyCode::Char('f') | KeyCode::Char('F') if self.view_mode == ViewMode::Trace => {
+                self.trace_filter = match self.trace_filter {
+                    TraceFilter::All => TraceFilter::Directed,
+                    TraceFilter::Directed => TraceFilter::Broadcast,
+                    TraceFilter::Broadcast => TraceFilter::All,
+                };
+                self.selected_trace = 0;
             }
 
             KeyCode::Char('h') | KeyCode::Char('H') => {
@@ -385,19 +409,29 @@ impl App {
                 }
 
                 InputTarget::MessageTo => {
-                    if let Ok(to) = self.input_buf.trim().parse::<usize>() {
+                    let trimmed = self.input_buf.trim();
+                    if trimmed.eq_ignore_ascii_case("all") || trimmed == "*" {
+                        self.pending_msg_to = MAX_NODES;
+                        self.input_target = InputTarget::MessageBody {
+                            from: self.pending_msg_from,
+                            to: MAX_NODES,
+                            is_broadcast: true,
+                        };
+                        self.input_buf.clear();
+                    } else if let Ok(to) = trimmed.parse::<usize>() {
                         if to < MAX_NODES {
                             self.pending_msg_to = to;
                             self.input_target = InputTarget::MessageBody {
                                 from: self.pending_msg_from,
                                 to,
+                                is_broadcast: false,
                             };
                             self.input_buf.clear();
                         }
                     }
                 }
 
-                InputTarget::MessageBody { from, to } => {
+                InputTarget::MessageBody { from, to, .. } => {
                     let _ = cmd_tx.send(SimCommand::SendMessage {
                         from,
                         to,

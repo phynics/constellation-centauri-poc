@@ -96,7 +96,7 @@ async fn run_node(
             Arc::clone(&sim_config),
             Arc::clone(&tui_state),
         ),
-        message_task::run_sensor_loop(node_idx, medium, sim_config, tui_state),
+        message_task::run_sensor_loop(node_idx, medium, all_nodes, sim_config, tui_state),
     )
     .await;
 }
@@ -153,6 +153,7 @@ async fn embassy_main(
             command_task::run_command_loop(
                 cmd_rx,
                 medium,
+                node_infos,
                 sim_config,
                 tui_state,
                 routing_tables,

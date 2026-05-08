@@ -10,16 +10,20 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex as AsyncMutex;
 use embassy_time::{Duration, Timer};
 
+use routing_core::config::BROADCAST_ADDR;
 use routing_core::config::DEFAULT_TTL;
+use routing_core::protocol::packet::{FLAG_BROADCAST, PACKET_TYPE_DATA};
 use routing_core::routing::table::RoutingTable;
 
 use crate::medium::SimMedium;
+use crate::network::SimNodeInfo;
 use crate::scenario;
 use crate::sim_state::{SimCommand, SimConfig, TuiState, MAX_NODES};
 
 pub async fn run_command_loop(
     cmd_rx: Arc<Mutex<Receiver<SimCommand>>>,
     medium: &'static SimMedium,
+    all_nodes: &'static [SimNodeInfo; MAX_NODES],
     sim_config: Arc<Mutex<SimConfig>>,
     tui_state: Arc<Mutex<TuiState>>,
     routing_tables: &'static [AsyncMutex<CriticalSectionRawMutex, RoutingTable>; MAX_NODES],
@@ -36,15 +40,34 @@ pub async fn run_command_loop(
                 kind,
                 body,
             }) => {
-                if to < MAX_NODES {
+                if to <= MAX_NODES {
+                    let is_broadcast = to == MAX_NODES;
                     let (source_caps, target_caps, link_enabled_at_send, drop_prob_at_send) = {
                         let cfg = sim_config.lock().unwrap();
                         (
                             cfg.capabilities[from],
-                            cfg.capabilities[to],
-                            cfg.link_enabled[from][to],
-                            cfg.drop_prob[from][to],
+                            if is_broadcast {
+                                0
+                            } else {
+                                cfg.capabilities[to]
+                            },
+                            if is_broadcast {
+                                true
+                            } else {
+                                cfg.link_enabled[from][to]
+                            },
+                            if is_broadcast {
+                                0
+                            } else {
+                                cfg.drop_prob[from][to]
+                            },
                         )
+                    };
+                    let packet_flags = if is_broadcast { FLAG_BROADCAST } else { 0 };
+                    let dst_addr = if is_broadcast {
+                        BROADCAST_ADDR
+                    } else {
+                        all_nodes[to].short_addr
                     };
 
                     let trace_id = {
@@ -57,6 +80,10 @@ pub async fn run_command_loop(
                             body.clone(),
                             source_caps,
                             target_caps,
+                            PACKET_TYPE_DATA,
+                            packet_flags,
+                            dst_addr,
+                            is_broadcast,
                             link_enabled_at_send,
                             drop_prob_at_send,
                             message_id,
@@ -70,6 +97,7 @@ pub async fn run_command_loop(
                         trace_id,
                         from_idx: from,
                         to_idx: to,
+                        is_broadcast,
                         sender_idx: from,
                         message_id,
                         ttl: DEFAULT_TTL,
@@ -79,7 +107,13 @@ pub async fn run_command_loop(
                     tui_state.lock().unwrap().push_trace_event(
                         trace_id,
                         from,
-                        format!("manual message queued at source for destination {}", to),
+                        DEFAULT_TTL,
+                        0,
+                        if is_broadcast {
+                            "manual broadcast queued at source".to_string()
+                        } else {
+                            format!("manual message queued at source for destination {}", to)
+                        },
                     );
                     let mut state = tui_state.lock().unwrap();
                     state.msgs_sent[from] = state.msgs_sent[from].saturating_add(1);

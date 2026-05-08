@@ -39,6 +39,7 @@ pub struct SimDataMessage {
     pub trace_id: u64,
     pub from_idx: usize,
     pub to_idx: usize,
+    pub is_broadcast: bool,
     pub sender_idx: usize,
     pub message_id: [u8; 8],
     pub ttl: u8,

@@ -87,7 +87,26 @@ impl TraceStatus {
 pub struct TraceEvent {
     pub time_secs: u32,
     pub node_idx: usize,
+    pub ttl: u8,
+    pub hop_count: u8,
     pub message: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum TraceFilter {
+    All,
+    Directed,
+    Broadcast,
+}
+
+impl TraceFilter {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TraceFilter::All => "all",
+            TraceFilter::Directed => "directed",
+            TraceFilter::Broadcast => "broadcast",
+        }
+    }
 }
 
 // ── Snapshots (written by embassy, read by TUI) ───────────────────────────────
@@ -122,6 +141,10 @@ pub struct MessageTrace {
     pub body: String,
     pub source_caps: u16,
     pub target_caps: u16,
+    pub packet_type: u8,
+    pub packet_flags: u8,
+    pub dst_addr: [u8; 8],
+    pub is_broadcast: bool,
     pub link_enabled_at_send: bool,
     pub drop_prob_at_send: u8,
     pub message_id: [u8; 8],
@@ -162,6 +185,10 @@ impl TuiState {
         body: String,
         source_caps: u16,
         target_caps: u16,
+        packet_type: u8,
+        packet_flags: u8,
+        dst_addr: [u8; 8],
+        is_broadcast: bool,
         link_enabled_at_send: bool,
         drop_prob_at_send: u8,
         message_id: [u8; 8],
@@ -184,6 +211,10 @@ impl TuiState {
             body,
             source_caps,
             target_caps,
+            packet_type,
+            packet_flags,
+            dst_addr,
+            is_broadcast,
             link_enabled_at_send,
             drop_prob_at_send,
             message_id,
@@ -192,6 +223,8 @@ impl TuiState {
             events: vec![TraceEvent {
                 time_secs: self.elapsed_secs,
                 node_idx: from_idx,
+                ttl: ttl_at_send,
+                hop_count: 0,
                 message: format!("trace created for {} → {}", from_idx, to_idx),
             }],
         });
@@ -207,15 +240,37 @@ impl TuiState {
         }
     }
 
-    pub fn push_trace_event(&mut self, trace_id: u64, node_idx: usize, message: impl Into<String>) {
+    pub fn push_trace_event(
+        &mut self,
+        trace_id: u64,
+        node_idx: usize,
+        ttl: u8,
+        hop_count: u8,
+        message: impl Into<String>,
+    ) {
         let now = self.elapsed_secs;
         if let Some(trace) = self.traces.iter_mut().find(|trace| trace.id == trace_id) {
             trace.events.push(TraceEvent {
                 time_secs: now,
                 node_idx,
+                ttl,
+                hop_count,
                 message: message.into(),
             });
         }
+    }
+
+    pub fn filtered_trace_indices(&self, filter: TraceFilter) -> Vec<usize> {
+        self.traces
+            .iter()
+            .enumerate()
+            .filter(|(_, trace)| match filter {
+                TraceFilter::All => true,
+                TraceFilter::Directed => !trace.is_broadcast,
+                TraceFilter::Broadcast => trace.is_broadcast,
+            })
+            .map(|(idx, _)| idx)
+            .collect()
     }
 
     pub fn set_trace_terminal_status(&mut self, trace_id: u64, status: TraceStatus) {

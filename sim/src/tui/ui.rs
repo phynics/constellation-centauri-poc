@@ -97,12 +97,13 @@ fn render_summary(frame: &mut Frame, app: &App, state: &TuiState, config: &SimCo
         Line::from(format!(" {}", preset.description)),
         Line::styled(
             format!(
-                " mode={}  traces={}  active={}  {}  [N] cycle modes  [M] send  [R] scenario  [H] help",
+                " mode={}  filter={}  traces={}  active={}  {}  [N] cycle modes  [F]ilter  [M] send  [R] scenario",
                 match app.view_mode {
                     ViewMode::Trace => "trace",
                     ViewMode::Nodes => "nodes",
                     ViewMode::Links => "links",
                 },
+                app.trace_filter.as_str(),
                 state.traces.len(),
                 config.n_active,
                 trace_summary
@@ -122,17 +123,18 @@ fn render_trace_list(frame: &mut Frame, app: &App, state: &TuiState, area: Rect)
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let filtered = state.filtered_trace_indices(app.trace_filter);
     let visible = inner.height as usize;
-    let total = state.traces.len();
+    let total = filtered.len();
     let start = total.saturating_sub(visible).min(app.selected_trace);
 
-    let items: Vec<ListItem> = state
-        .traces
+    let items: Vec<ListItem> = filtered
         .iter()
         .enumerate()
         .skip(start)
         .take(visible)
-        .map(|(idx, trace)| {
+        .map(|(idx, trace_idx)| {
+            let trace = &state.traces[*trace_idx];
             let selected = idx == app.selected_trace;
             let style = if selected {
                 Style::default().add_modifier(Modifier::REVERSED)
@@ -488,7 +490,7 @@ fn render_node_map(frame: &mut Frame, app: &App, state: &TuiState, config: &SimC
 
     let node_ids: Vec<usize> = (0..config.n_active).collect();
     let mut lines = vec![Line::styled(
-        "S=source D=destination *=path",
+        "S=source D=destination B=broadcast *=path",
         Style::default().fg(Color::DarkGray),
     )];
 
@@ -498,8 +500,11 @@ fn render_node_map(frame: &mut Frame, app: &App, state: &TuiState, config: &SimC
             let on_path = hop_nodes.contains(idx);
             let is_src = selected_trace.map(|t| t.from_idx == *idx).unwrap_or(false);
             let is_dst = selected_trace.map(|t| t.to_idx == *idx).unwrap_or(false);
+            let is_broadcast = selected_trace.map(|t| t.is_broadcast).unwrap_or(false);
             let prefix = if is_src {
                 'S'
+            } else if is_broadcast && on_path {
+                'B'
             } else if is_dst {
                 'D'
             } else if on_path {
@@ -531,6 +536,27 @@ fn render_node_map(frame: &mut Frame, app: &App, state: &TuiState, config: &SimC
             ));
         }
         lines.push(Line::from(spans));
+    }
+
+    if let Some(trace) = selected_trace {
+        let path = trace
+            .events
+            .iter()
+            .map(|event| format!("{}(h{},t{})", event.node_idx, event.hop_count, event.ttl))
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            if trace.is_broadcast {
+                "Broadcast fan-out"
+            } else {
+                "Path"
+            },
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::from(path));
     }
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -662,6 +688,11 @@ fn render_bottom_panel(frame: &mut Frame, app: &App, state: &TuiState, area: Rec
     } else {
         tab_style_inactive
     };
+    let packet_style = if app.bottom_tab == BottomTab::Packet {
+        tab_style_active
+    } else {
+        tab_style_inactive
+    };
     let logs_style = if app.bottom_tab == BottomTab::Logs {
         tab_style_active
     } else {
@@ -673,6 +704,8 @@ fn render_bottom_panel(frame: &mut Frame, app: &App, state: &TuiState, area: Rec
         Span::styled(" Timeline ", timeline_style),
         Span::raw("  "),
         Span::styled(" Graph ", graph_style),
+        Span::raw("  "),
+        Span::styled(" Packet ", packet_style),
         Span::raw("  "),
         Span::styled(" Logs ", logs_style),
         Span::styled("   [G] switch", Style::default().fg(Color::DarkGray)),
@@ -733,6 +766,52 @@ fn render_bottom_panel(frame: &mut Frame, app: &App, state: &TuiState, area: Rec
                 frame.render_widget(Paragraph::new("No selected trace."), body_area);
             }
         }
+        BottomTab::Packet => {
+            if let Some(trace) = selected_trace(state, app) {
+                let latest = trace.events.last();
+                let lines = vec![
+                    Line::styled(
+                        "Packet view",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Line::from(format!(
+                        "type=0x{:02x}  flags=0b{:08b}",
+                        trace.packet_type, trace.packet_flags
+                    )),
+                    Line::from(format!("msg_id={:02x?}", trace.message_id)),
+                    Line::from(format!(
+                        "src=node {}  dst={}",
+                        trace.from_idx,
+                        if trace.is_broadcast {
+                            "broadcast".to_string()
+                        } else {
+                            format!("node {}", trace.to_idx)
+                        }
+                    )),
+                    Line::from(format!("dst_addr={:02x?}", trace.dst_addr)),
+                    Line::from(format!(
+                        "ttl_start={}  latest_ttl={}  latest_hop={}",
+                        trace.ttl_at_send,
+                        latest.map(|e| e.ttl).unwrap_or(trace.ttl_at_send),
+                        latest.map(|e| e.hop_count).unwrap_or(0)
+                    )),
+                    Line::from(format!(
+                        "mode={}  status={}",
+                        if trace.is_broadcast {
+                            "broadcast"
+                        } else {
+                            "directed"
+                        },
+                        trace.terminal_status.as_str()
+                    )),
+                ];
+                frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body_area);
+            } else {
+                frame.render_widget(Paragraph::new("No selected trace."), body_area);
+            }
+        }
         BottomTab::Logs => {
             let visible = body_area.height as usize;
             let logs = crate::tui_logger::get_logs(visible);
@@ -756,7 +835,9 @@ fn render_bottom_panel(frame: &mut Frame, app: &App, state: &TuiState, area: Rec
     }
 
     frame.render_widget(
-        Paragraph::new(" [↑↓] Select   [N] Nodes/Traces   [M] Send   [R] Scenario   [G] Timeline/Logs   [H] Help")
+        Paragraph::new(
+            " [↑↓] Select   [N] Modes   [F] Filter   [M] Send   [R] Scenario   [G] Tabs   [H] Help",
+        )
         .style(Style::default().fg(Color::DarkGray)),
         hint_area,
     );
@@ -766,8 +847,18 @@ fn render_input_overlay(frame: &mut Frame, app: &App, area: Rect) {
     let prompt = match app.input_target {
         InputTarget::DropProb { from, to } => format!("Drop % for {} → {}: ", from, to),
         InputTarget::MessageFrom => "Message from node #: ".to_string(),
-        InputTarget::MessageTo => "Message to node #: ".to_string(),
-        InputTarget::MessageBody { from, to } => format!("Message {} → {}: ", from, to),
+        InputTarget::MessageTo => "Message to node # (or * / all): ".to_string(),
+        InputTarget::MessageBody {
+            from,
+            to,
+            is_broadcast,
+        } => {
+            if is_broadcast {
+                format!("Broadcast from {}: ", from)
+            } else {
+                format!("Message {} → {}: ", from, to)
+            }
+        }
         InputTarget::None => "Input: ".to_string(),
     };
 
@@ -897,7 +988,10 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
 }
 
 fn selected_trace<'a>(state: &'a TuiState, app: &App) -> Option<&'a MessageTrace> {
-    state.traces.get(app.selected_trace)
+    let filtered = state.filtered_trace_indices(app.trace_filter);
+    filtered
+        .get(app.selected_trace)
+        .and_then(|idx| state.traces.get(*idx))
 }
 
 fn selected_link_pair(app: &App, config: &SimConfig) -> Option<(usize, usize)> {

@@ -5,9 +5,12 @@ use std::sync::{Arc, Mutex};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex as AsyncMutex;
 use embassy_time::{Duration, Timer};
+use heapless::Vec as HeaplessVec;
 use rand::Rng as _;
 
+use routing_core::config::BROADCAST_ADDR;
 use routing_core::config::DEFAULT_TTL;
+use routing_core::protocol::packet::PACKET_TYPE_DATA;
 use routing_core::routing::table::RoutingTable;
 
 use crate::medium::{SimDataMessage, SimMedium};
@@ -32,6 +35,8 @@ pub async fn run_message_loop(
             state.push_trace_event(
                 msg.trace_id,
                 node_idx,
+                msg.ttl,
+                msg.hop_count,
                 format!(
                     "node {} received packet from {} (ttl={}, hop={})",
                     node_idx, msg.sender_idx, msg.ttl, msg.hop_count
@@ -41,7 +46,13 @@ pub async fn run_message_loop(
 
         if msg.ttl == 0 {
             let mut state = tui_state.lock().unwrap();
-            state.push_trace_event(msg.trace_id, node_idx, "ttl exhausted before processing");
+            state.push_trace_event(
+                msg.trace_id,
+                node_idx,
+                msg.ttl,
+                msg.hop_count,
+                "ttl exhausted before processing",
+            );
             state.set_trace_terminal_status(msg.trace_id, TraceStatus::TtlExpired);
             continue;
         }
@@ -50,34 +61,83 @@ pub async fn run_message_loop(
             let mut table = routing_table.lock().await;
             if table.seen.check_and_insert(&msg.message_id) {
                 let mut state = tui_state.lock().unwrap();
-                state.push_trace_event(msg.trace_id, node_idx, "dedup rejected packet");
+                state.push_trace_event(
+                    msg.trace_id,
+                    node_idx,
+                    msg.ttl,
+                    msg.hop_count,
+                    "dedup rejected packet",
+                );
                 state.set_trace_terminal_status(msg.trace_id, TraceStatus::Deduped);
                 continue;
             }
         }
 
-        if node_idx == msg.to_idx {
+        if !msg.is_broadcast && node_idx == msg.to_idx {
             let mut state = tui_state.lock().unwrap();
-            state.push_trace_event(msg.trace_id, node_idx, "destination consumed packet");
+            state.push_trace_event(
+                msg.trace_id,
+                node_idx,
+                msg.ttl,
+                msg.hop_count,
+                "destination consumed packet",
+            );
             state.mark_trace_delivered(msg.trace_id);
             state.msgs_received[node_idx] = state.msgs_received[node_idx].saturating_add(1);
             continue;
         }
 
-        let dst_addr = all_nodes[msg.to_idx].short_addr;
-        let candidates = {
-            let table = routing_table.lock().await;
-            table.forwarding_candidates(&dst_addr)
+        let dst_addr = if msg.is_broadcast {
+            BROADCAST_ADDR
+        } else {
+            all_nodes[msg.to_idx].short_addr
         };
+        let candidates: HeaplessVec<([u8; 8], routing_core::transport::TransportAddr), 8> = {
+            let table = routing_table.lock().await;
+            if msg.is_broadcast {
+                table
+                    .peers
+                    .iter()
+                    .filter(|peer| {
+                        peer.trust > routing_core::routing::table::TRUST_EXPIRED
+                            && peer.transport_addr.addr != [0u8; 6]
+                    })
+                    .map(|peer| (peer.short_addr, peer.transport_addr))
+                    .collect()
+            } else {
+                table.forwarding_candidates(&dst_addr)
+            }
+        };
+
+        if msg.is_broadcast {
+            let mut state = tui_state.lock().unwrap();
+            state.msgs_received[node_idx] = state.msgs_received[node_idx].saturating_add(1);
+            state.push_trace_event(
+                msg.trace_id,
+                node_idx,
+                msg.ttl,
+                msg.hop_count,
+                "broadcast observed at node",
+            );
+        }
 
         if candidates.is_empty() {
             let mut state = tui_state.lock().unwrap();
             state.push_trace_event(
                 msg.trace_id,
                 node_idx,
+                msg.ttl,
+                msg.hop_count,
                 "no forwarding candidate from routing table",
             );
-            state.set_trace_terminal_status(msg.trace_id, TraceStatus::NoRoute);
+            state.set_trace_terminal_status(
+                msg.trace_id,
+                if msg.is_broadcast {
+                    TraceStatus::Delivered
+                } else {
+                    TraceStatus::NoRoute
+                },
+            );
             continue;
         }
 
@@ -103,6 +163,8 @@ pub async fn run_message_loop(
                 tui_state.lock().unwrap().push_trace_event(
                     msg.trace_id,
                     node_idx,
+                    msg.ttl,
+                    msg.hop_count,
                     format!("candidate {} blocked by inactive/disabled link", next_idx),
                 );
                 continue;
@@ -114,6 +176,8 @@ pub async fn run_message_loop(
                 state.push_trace_event(
                     msg.trace_id,
                     node_idx,
+                    msg.ttl,
+                    msg.hop_count,
                     format!(
                         "candidate {} dropped by simulated loss ({}%)",
                         next_idx, drop_prob
@@ -126,6 +190,7 @@ pub async fn run_message_loop(
                 trace_id: msg.trace_id,
                 from_idx: msg.from_idx,
                 to_idx: msg.to_idx,
+                is_broadcast: msg.is_broadcast,
                 sender_idx: node_idx,
                 message_id: msg.message_id,
                 ttl: msg.ttl.saturating_sub(1),
@@ -138,6 +203,8 @@ pub async fn run_message_loop(
             tui_state.lock().unwrap().push_trace_event(
                 msg.trace_id,
                 node_idx,
+                msg.ttl.saturating_sub(1),
+                msg.hop_count.saturating_add(1),
                 format!(
                     "forwarded to node {} via {:02x?} toward peer {:02x?}",
                     next_idx,
@@ -149,11 +216,19 @@ pub async fn run_message_loop(
 
         if !forwarded_any {
             let mut state = tui_state.lock().unwrap();
-            state.push_trace_event(msg.trace_id, node_idx, "no candidate accepted packet");
+            state.push_trace_event(
+                msg.trace_id,
+                node_idx,
+                msg.ttl,
+                msg.hop_count,
+                "no candidate accepted packet",
+            );
             if msg.ttl <= 1 {
                 state.set_trace_terminal_status(msg.trace_id, TraceStatus::TtlExpired);
             } else if had_drop {
                 state.set_trace_terminal_status(msg.trace_id, TraceStatus::Dropped);
+            } else if msg.is_broadcast {
+                state.set_trace_terminal_status(msg.trace_id, TraceStatus::Delivered);
             } else {
                 state.set_trace_terminal_status(msg.trace_id, TraceStatus::NoRoute);
             }
@@ -165,6 +240,7 @@ pub async fn run_message_loop(
 pub async fn run_sensor_loop(
     node_idx: usize,
     medium: &'static SimMedium,
+    all_nodes: &'static [SimNodeInfo; MAX_NODES],
     sim_config: Arc<Mutex<SimConfig>>,
     tui_state: Arc<Mutex<TuiState>>,
 ) -> ! {
@@ -223,6 +299,10 @@ pub async fn run_sensor_loop(
                     body_str.clone(),
                     source_caps,
                     target_caps,
+                    PACKET_TYPE_DATA,
+                    0,
+                    all_nodes[target_idx].short_addr,
+                    false,
                     link_enabled_at_send,
                     drop_prob_at_send,
                     message_id,
@@ -234,6 +314,7 @@ pub async fn run_sensor_loop(
                 trace_id,
                 from_idx: node_idx,
                 to_idx: target_idx,
+                is_broadcast: false,
                 sender_idx: node_idx,
                 message_id,
                 ttl: DEFAULT_TTL,
@@ -245,6 +326,8 @@ pub async fn run_sensor_loop(
             state.push_trace_event(
                 trace_id,
                 node_idx,
+                DEFAULT_TTL,
+                0,
                 format!(
                     "sensor message queued at source for destination {}",
                     target_idx
