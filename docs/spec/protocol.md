@@ -100,7 +100,7 @@ Per-message encryption using ECDH + ChaCha20-Poly1305:
 3. ECDH: shared_secret = x25519(sender_secret, recipient_public)
 4. KDF:  symmetric_key = HKDF-SHA256(shared_secret, salt=sender_pubkey || recipient_pubkey)
 5. Encrypt: ChaCha20-Poly1305(symmetric_key, nonce, plaintext) -> ciphertext + tag
-6. Packet carries: sender_pubkey, nonce, ciphertext, tag
+6. Packet carries: `src = ShortAddr(sender_pubkey)`, `packet_counter`, and an encrypted payload containing nonce + ciphertext + tag
 ```
 
 **Nonce strategy (payload encryption)**: Random 12-byte nonce per encrypted
@@ -210,7 +210,7 @@ All packets share a common header. The wire format **MUST** remain compact enoug
 to fit constrained transports; BLE compatibility is the current sizing pressure,
 not the protocol's only target.
 
-### 4.1 Packet Header (fixed, 82 bytes)
+### 4.1 Packet Header (fixed, 92 bytes)
 
 ```
  0                   1                   2                   3
@@ -247,7 +247,7 @@ pub enum PacketType {
     Data         = 0x02,
     DataEncrypted = 0x03,
     Announce     = 0x04,  // node joining / capability change
-    Ack          = 0x05,
+    Ack          = 0x05,  // reserved / unused in v1
     // Future: RouteRequest = 0x10, Tunnel = 0x20
 }
 
@@ -280,11 +280,29 @@ freshness value. It **MUST NOT** be treated as an arbitrary random identifier.
 
 ### 4.2 Payload Budget
 
-With a constrained-transport MTU of ~244 bytes (after transport overhead), and an 82-byte header:
-- **~162 bytes** available for payload
-- For encrypted data: 12-byte nonce + 16-byte Poly1305 tag = 28 bytes overhead -> **~134 bytes cleartext**
+With a constrained-transport MTU of ~244 bytes (after transport overhead), and a 92-byte header:
+- **~152 bytes** available for payload
+- For encrypted data: 12-byte nonce + 16-byte Poly1305 tag = 28 bytes overhead -> **~124 bytes cleartext**
 
-### 4.3 Heartbeat Payload
+### 4.3 Encrypted Payload Format
+
+`PacketType::DataEncrypted` uses the normal packet header plus the following
+payload body:
+
+```rust
+pub struct EncryptedPayload {
+    pub nonce: [u8; 12],
+    pub ciphertext_and_tag: heapless::Vec<u8, N>,
+}
+```
+
+The sender's full public key is **NOT** carried in every encrypted packet.
+Receivers **MUST** resolve `src` through the authenticated peer registry to
+obtain the sender public key required for signature verification and payload
+decryption context. A node **MUST NOT** accept `DataEncrypted` from an
+unresolved or unauthenticated sender.
+
+### 4.4 Heartbeat Payload
 
 ```rust
 pub struct HeartbeatPayload {
@@ -299,7 +317,7 @@ pub struct HeartbeatPayload {
 
 **Bloom filter sizing**: 256 bits (32 bytes) with 3 hash functions supports ~20-30 nodes at <5% false positive rate. Sufficient for v1 scale of tens of nodes.
 
-### 4.4 Announcement Payload
+### 4.5 Announcement Payload
 
 Sent on join, capability change, or periodically alongside heartbeats:
 
@@ -315,7 +333,7 @@ pub struct TransportHints {
 }
 ```
 
-### 4.5 Replay Protection and Duplicate Handling
+### 4.6 Replay Protection and Duplicate Handling
 
 Every node maintains receiver-side freshness state per authenticated sender.
 
@@ -387,7 +405,7 @@ An implementation MAY mix an advertised state digest or epoch value into key
 derivation, receipt summaries, or other higher-level context. It **MUST NOT**
 replace the per-sender counter as the protocol's primary replay defense.
 
-### 4.6 Delivery Semantics
+### 4.7 Delivery Semantics
 
 For routed traffic to intermittently reachable low-power nodes, the network
 guarantee is **at-least-once delivery**.
@@ -462,6 +480,11 @@ Only authenticated peers may be elevated to forwarding or storage authority.
 Observed peers may contribute transport reachability hints, but they **MUST
 NOT** be treated as routing-authorized or store-authorized participants until
 authenticated.
+
+Protocol version 1 performs authoritative peer promotion during authenticated
+H2H exchange. Discovery and announcement traffic may carry certificate material,
+certificate digests, or transport hints, but discovery alone does not grant
+routing or storage authority.
 
 ```rust
 pub struct PeerRegistry {
@@ -597,9 +620,16 @@ Receivers **MUST** reject H2H frames when:
 
 - the sender identity is not an authenticated member
 - the sender is not authorized for the requested routing/storage mutation
-- `frame_counter` is duplicated or lower than the highest accepted value from
-  that sender in the current session
+- `frame_counter` falls outside the current session replay window or has
+  already been seen within that window
 - `session_id` does not match the active H2H exchange
+
+Per sender within a session, receivers **MUST** maintain:
+
+- `highest_frame_counter`
+- a replay bitmap covering the previous `H2H_SESSION_REPLAY_WINDOW` counters
+
+`H2H_SESSION_REPLAY_WINDOW` is 16 in this protocol version.
 
 #### 5.6.2 Session Establishment Rules
 
@@ -617,6 +647,21 @@ Session keys MAY be introduced later as an optimization, but they are not part
 of conformance for this protocol version.
 
 ---
+
+All H2H wire payloads in this protocol version are carried inside an
+authenticated envelope:
+
+```rust
+pub struct SignedH2hFrame {
+    pub auth: H2hAuthHeader,
+    pub body: H2hFrameBody,
+    pub signature: Signature,
+}
+```
+
+`SyncRequest`, `SyncResponse`, and all follow-up H2H frames use this outer
+envelope. Any binding-specific H2H wire format that omits the authenticated
+envelope is non-conforming.
 
 ## 6. Routing
 
@@ -651,12 +696,22 @@ pub struct RoutingTable {
     peers: PeerRegistry,
     /// Our bloom filter (recomputed periodically)
     local_bloom: BloomFilter,
-    /// Recently seen message IDs for dedup
+    /// Fast recent duplicate cache for loop suppression
     seen: SeenMessages,
     /// Decay timer: entries not refreshed within TTL are demoted/removed
     decay_interval: Duration,  // e.g., 3 * heartbeat_interval = 180s
 }
 ```
+
+Authentication/authorization state and routing-confidence state are separate
+dimensions:
+
+- membership/auth state: observed, authenticated, routing-authorized,
+  store-authorized
+- route-confidence state: direct, indirect, bloom-derived, expired
+
+An implementation **MUST NOT** collapse these into a single conceptual trust
+level when making forwarding or storage-authority decisions.
 
 ### 6.2 Bloom Filter
 
@@ -683,6 +738,12 @@ The bloom filter in each heartbeat advertises "nodes I can route to." Receivers 
 
 ```
 fn forward(packet: Packet):
+    if !verify_sender_membership_and_signature(packet):
+        return
+
+    if !replay_window_accepts(packet.src, packet.packet_counter):
+        return
+
     if packet.dst == self.addr:
         deliver_locally(packet)
         return
@@ -702,7 +763,9 @@ fn forward(packet: Packet):
         // No route: drop
         return
 
-    // Send to ALL matching candidates (multi-path)
+    // Send according to forwarding class:
+    // - direct / indirect next-hop: one chosen next-hop
+    // - bloom-derived: ordered top-N bounded by BLOOM_FANOUT_MAX
     for neighbor in candidates:
         transport = select_transport(neighbor, packet.type)
         transport.send(neighbor.transport_id, packet.serialize())
@@ -786,13 +849,12 @@ Current algorithm:
 7. After the normal sync request/response completes, the router **MUST** send a `DeliverySummary` frame before any retained data frames.
 8. The router **MUST** send one `DeliveryData` frame per retained message it chooses to deliver in that wake session.
 9. The LE node **MAY** acknowledge delivered items with `DeliveryAck` when an explicit return path is available and cheap enough for the wake session.
-10. If no explicit acknowledgement is sent, the LE node **SHOULD** later advertise an authenticated passive receipt summary, such as the highest accepted retained `packet_counter` per owner or an equivalent compact receipt digest.
+10. If no explicit acknowledgement is sent, the LE node **SHOULD** later advertise an authenticated passive receipt summary keyed by original message source, such as the highest accepted retained `packet_counter` per source.
 11. After explicit acknowledgement or sufficiently specific authenticated passive receipt evidence, the serving router **MUST** remove acknowledged retained entries and **SHOULD** emit authenticated tombstones so redundant replicas can be cleared.
 12. The session **MUST** terminate with `SessionDone`.
 
 Delivery semantics are **at-least-once**. If acknowledgement or passive receipt
-evidence is lost, the same
-retained item MAY be delivered again on a later wake. Low-power receivers
+evidence is lost, the same retained item MAY be delivered again on a later wake. Low-power receivers
 therefore **SHOULD** apply idempotence at message-consumption time.
 
 Important: the **primary wake router** and the **backup replica placement** use intentionally different rankings. The primary choice is local-quality driven; backup placement is deterministic from the LE identity so different routers can independently derive the same redundancy set.
@@ -821,7 +883,7 @@ pub struct BufferedMessage {
 
 The current selection rules are:
 
-- Any store-capable router that ends up holding the undeliverable packet **MAY** become the **owner router** for that retained entry.
+- Any store-authorized router that ends up holding the undeliverable packet **MAY** become the **owner router** for that retained entry.
 - Backup replica placement **MUST** be limited to the deterministic subset returned by `is_backup_router_for_lpn(...)`.
 - The preferred wake router for the LE node **MUST** be chosen from live local peer quality, not from the deterministic backup ranking.
 - A successful LE wake session **MUST** stop after the **first** successful router exchange in that wake window; later candidates are fallback choices, not additional sync partners.
@@ -870,6 +932,8 @@ Rules:
   summary entry for that destination LPN
 - receipt summaries **MUST NOT** authorize deletion of items from unrelated
   sources or for unrelated destination LPNs
+- only the owner router for a retained item may originate authoritative
+  tombstones for that item after validating receipt evidence
 
 This summary mechanism is deliberately conservative. It is intended to provide
 "good enough" completion evidence without requiring explicit ack traffic for
@@ -1297,6 +1361,15 @@ Offset  Size  Field
 
 Fits within the 31-byte BLE advertising data limit.
 
+This BLE discovery payload provides only observed-peer hints:
+
+- `short_addr`
+- provisional capabilities
+
+It does **NOT** by itself grant routing or storage authority. In protocol
+version 1, authoritative peer promotion occurs during authenticated H2H, not
+from advertisement parsing alone.
+
 ### 2.3 BLE Address Derivation
 
 Each node derives its random static BLE address from its `ShortAddr`:
@@ -1342,12 +1415,15 @@ The current H2H session is a two-phase protocol:
 
 1. The responder **MUST** advertise and accept a BLE connection.
 2. The initiator **MUST** connect and open the L2CAP CoC.
-3. The initiator **MUST** send `SyncRequest(H2hPayload)`.
+3. The initiator **MUST** send `SignedH2hFrame { auth, body = SyncRequest(H2hPayload), signature }`.
 4. The responder **MUST** parse the request and resolve the partner identity.
 5. The responder **MUST** build its response payload before mutating the routing table.
 6. The responder **MUST** update its routing table from the initiator payload.
-7. The responder **MUST** send `SyncResponse(H2hPayload)`.
+7. The responder **MUST** send `SignedH2hFrame { auth, body = SyncResponse(H2hPayload), signature }`.
 8. The initiator **MUST** update its routing table from the responder payload.
+
+Both `SyncRequest` and `SyncResponse` are carried inside authenticated
+`SignedH2hFrame` envelopes as defined in the core specification.
 
 #### Phase B — optional follow-up frames on the same session
 
@@ -1363,7 +1439,25 @@ If the host/runtime needs extra work after sync, the same session **MAY** stay o
 
 Delayed delivery and router-to-router replica transfer **MUST NOT** introduce a second parallel session protocol when the same semantics can be expressed as follow-up `H2hFrame`s on the active H2H session.
 
+All follow-up `H2hFrame` bodies in Phase B are likewise carried inside
+`SignedH2hFrame` envelopes with the same `session_id` and per-sender
+`frame_counter` progression.
+
 ### 3.4 H2H Payload Wire Format
+
+The H2H payload described below is the **body** of `SyncRequest` /
+`SyncResponse`. On the wire, the full frame is:
+
+```
+SignedH2hFrame {
+  auth: H2hAuthHeader,
+  body: SyncRequest(H2hPayload) | SyncResponse(H2hPayload) | follow-up H2hFrame,
+  signature: Signature,
+}
+```
+
+Any BLE exchange that omits this authenticated outer envelope is
+non-conforming, even if the inner `H2hPayload` matches the layout below.
 
 ```
 Offset  Size      Field            Notes
