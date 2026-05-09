@@ -1,3 +1,5 @@
+//! Fixed-capacity duplicate-message tracking for routed packets.
+
 use crate::config::SEEN_MESSAGES_CAPACITY;
 use heapless::Deque;
 

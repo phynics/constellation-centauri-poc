@@ -1,3 +1,5 @@
+//! Shared protocol and behavior constants for the routing core.
+
 pub const PROTOCOL_VERSION: u8 = 0x01;
 pub const HEARTBEAT_INTERVAL_SECS: u64 = 60;
 pub const HEARTBEAT_MAX_SUPPRESSION_SECS: u64 = 180;

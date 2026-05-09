@@ -1,3 +1,5 @@
+//! Message encryption helpers built on node identity keys.
+
 use crate::crypto::identity::{NodeIdentity, PubKey};
 use chacha20poly1305::{
     aead::{Aead, KeyInit},

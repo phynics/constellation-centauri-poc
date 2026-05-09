@@ -1,3 +1,5 @@
+//! Heartbeat payload format used for periodic topology advertisements.
+
 use crate::config::BLOOM_FILTER_BYTES;
 use crate::crypto::identity::PubKey;
 use crate::protocol::packet::PacketError;

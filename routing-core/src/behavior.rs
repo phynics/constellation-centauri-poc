@@ -138,7 +138,8 @@ pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
     // the next-best reachable router in the same cycle without inventing a
     // second connection policy just for delayed delivery.
     if is_low_power_endpoint {
-        let mut routers: heapless::Vec<(ShortAddr, [u8; 6], u8, u64, bool), 32> = heapless::Vec::new();
+        let mut routers: heapless::Vec<(ShortAddr, [u8; 6], u8, u64, bool), 32> =
+            heapless::Vec::new();
 
         for peer in table.peers.iter() {
             if peer.transport_addr.addr == [0u8; 6]
@@ -167,9 +168,7 @@ pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
                     let best: (ShortAddr, [u8; 6], u8, u64, bool) = routers[best_idx];
                     candidate.2 > best.2
                         || (candidate.2 == best.2 && candidate.3 > best.3)
-                        || (candidate.2 == best.2
-                            && candidate.3 == best.3
-                            && candidate.0 < best.0)
+                        || (candidate.2 == best.2 && candidate.3 == best.3 && candidate.0 < best.0)
                 }
             };
             if should_replace {
@@ -208,7 +207,8 @@ pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
         // Full routing participants should not proactively H2H into low-power
         // endpoint nodes. They can still learn those endpoints from discovery,
         // while the endpoint initiates uplink H2H when it needs richer state.
-        let peer_is_low_power_endpoint = Capabilities::is_low_power_endpoint_bits(peer.capabilities);
+        let peer_is_low_power_endpoint =
+            Capabilities::is_low_power_endpoint_bits(peer.capabilities);
         if peer_is_low_power_endpoint {
             continue;
         }
@@ -401,7 +401,8 @@ where
 
         // ── Phase 2: H2H connections ──────────────────────────────────────
         let our_addr = *identity.short_addr();
-        let peer_snapshots = collect_h2h_peer_snapshots(identity, capabilities, routing_table).await;
+        let peer_snapshots =
+            collect_h2h_peer_snapshots(identity, capabilities, routing_table).await;
 
         if !peer_snapshots.is_empty() {
             log::info!(
@@ -503,7 +504,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{backup_router_score_for_lpn, is_backup_router_for_lpn, sort_backup_routers_for_lpn};
+    use super::{
+        backup_router_score_for_lpn, is_backup_router_for_lpn, sort_backup_routers_for_lpn,
+    };
 
     #[test]
     fn backup_router_scoring_is_deterministic() {

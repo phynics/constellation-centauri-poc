@@ -1104,7 +1104,9 @@ fn trace_hop_edges(trace: &MessageTrace) -> Vec<(usize, usize)> {
         .iter()
         .filter_map(|event| match event.kind {
             TraceEventKind::Forwarded { to_node } => Some((event.node_idx, to_node)),
-            TraceEventKind::DeliveredFromStore { router_node } => Some((router_node, event.node_idx)),
+            TraceEventKind::DeliveredFromStore { router_node } => {
+                Some((router_node, event.node_idx))
+            }
             _ => None,
         })
         .collect()

@@ -10,9 +10,9 @@ use rand::Rng as _;
 
 use routing_core::config::BROADCAST_ADDR;
 use routing_core::config::DEFAULT_TTL;
+use routing_core::node::roles::Capabilities;
 use routing_core::protocol::packet::PACKET_TYPE_DATA;
 use routing_core::routing::table::RoutingTable;
-use routing_core::node::roles::Capabilities;
 
 use crate::medium::{SimDataMessage, SimMedium};
 use crate::network::SimNodeInfo;
@@ -137,11 +137,10 @@ pub async fn run_message_loop(
         }
 
         if candidates.is_empty() {
-            let destination_is_low_power = !msg.is_broadcast
-                && {
-                    let cfg = sim_config.lock().unwrap();
-                    Capabilities::is_low_power_endpoint_bits(cfg.capabilities[msg.to_idx])
-                };
+            let destination_is_low_power = !msg.is_broadcast && {
+                let cfg = sim_config.lock().unwrap();
+                Capabilities::is_low_power_endpoint_bits(cfg.capabilities[msg.to_idx])
+            };
             let holder_caps = {
                 let cfg = sim_config.lock().unwrap();
                 cfg.capabilities[node_idx]
@@ -285,11 +284,10 @@ pub async fn run_message_loop(
         }
 
         if !forwarded_any {
-            let destination_is_low_power = !msg.is_broadcast
-                && {
-                    let cfg = sim_config.lock().unwrap();
-                    Capabilities::is_low_power_endpoint_bits(cfg.capabilities[msg.to_idx])
-                };
+            let destination_is_low_power = !msg.is_broadcast && {
+                let cfg = sim_config.lock().unwrap();
+                Capabilities::is_low_power_endpoint_bits(cfg.capabilities[msg.to_idx])
+            };
             let holder_caps = {
                 let cfg = sim_config.lock().unwrap();
                 cfg.capabilities[node_idx]

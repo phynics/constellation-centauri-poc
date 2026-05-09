@@ -1,3 +1,5 @@
+//! Flash-backed persistence for firmware node identities.
+
 use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use routing_core::crypto::identity::NodeIdentity;
 

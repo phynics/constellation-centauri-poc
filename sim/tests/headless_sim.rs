@@ -178,19 +178,26 @@ fn low_power_endpoint_collects_retained_delivery_on_wake_h2h() {
 
     let trace = sim.wait_for_trace_terminal(trace_id, Duration::from_secs(20));
     assert_eq!(trace.terminal_status, TraceStatus::Delivered);
-    assert!(trace.events.iter().any(|event| matches!(event.kind, TraceEventKind::Deferred)));
-    assert!(trace.events.iter().any(|event| {
-        matches!(event.kind, TraceEventKind::LpnWakeSync { .. })
-    }));
-    assert!(trace.events.iter().any(|event| {
-        matches!(event.kind, TraceEventKind::PendingAnnounced { .. })
-    }));
-    assert!(trace.events.iter().any(|event| {
-        matches!(event.kind, TraceEventKind::DeliveredFromStore { .. })
-    }));
-    assert!(trace.events.iter().any(|event| {
-        matches!(event.kind, TraceEventKind::DeliveryConfirmed { .. })
-    }));
+    assert!(trace
+        .events
+        .iter()
+        .any(|event| matches!(event.kind, TraceEventKind::Deferred)));
+    assert!(trace
+        .events
+        .iter()
+        .any(|event| { matches!(event.kind, TraceEventKind::LpnWakeSync { .. }) }));
+    assert!(trace
+        .events
+        .iter()
+        .any(|event| { matches!(event.kind, TraceEventKind::PendingAnnounced { .. }) }));
+    assert!(trace
+        .events
+        .iter()
+        .any(|event| { matches!(event.kind, TraceEventKind::DeliveredFromStore { .. }) }));
+    assert!(trace
+        .events
+        .iter()
+        .any(|event| { matches!(event.kind, TraceEventKind::DeliveryConfirmed { .. }) }));
 }
 
 #[test]
@@ -272,11 +279,18 @@ fn low_power_endpoint_falls_back_to_backup_router_when_primary_is_unreachable() 
 
     let trace = sim.wait_for_trace_terminal(trace_id, Duration::from_secs(5));
     assert_eq!(trace.terminal_status, TraceStatus::Delivered);
-    assert!(trace.events.iter().any(|event| matches!(event.kind, TraceEventKind::Deferred)));
+    assert!(trace
+        .events
+        .iter()
+        .any(|event| matches!(event.kind, TraceEventKind::Deferred)));
+    assert!(trace
+        .events
+        .iter()
+        .any(|event| { matches!(event.kind, TraceEventKind::LpnWakeSync { router_node: 1 }) }));
     assert!(trace.events.iter().any(|event| {
-        matches!(event.kind, TraceEventKind::LpnWakeSync { router_node: 1 })
-    }));
-    assert!(trace.events.iter().any(|event| {
-        matches!(event.kind, TraceEventKind::DeliveredFromStore { router_node: 1 })
+        matches!(
+            event.kind,
+            TraceEventKind::DeliveredFromStore { router_node: 1 }
+        )
     }));
 }

@@ -1,3 +1,5 @@
+//! Compact bloom-filter summaries for indirect reachability hints.
+
 use crate::config::BLOOM_FILTER_BYTES;
 use crate::crypto::identity::ShortAddr;
 

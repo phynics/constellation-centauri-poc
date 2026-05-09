@@ -12,20 +12,19 @@ use embassy_time::{Duration, Instant, Timer};
 use heapless::Vec as HeaplessVec;
 
 use routing_core::behavior::{
-    apply_discovery_events, build_h2h_payload, collect_h2h_peer_snapshots,
-    is_backup_router_for_lpn,
+    apply_discovery_events, build_h2h_payload, collect_h2h_peer_snapshots, is_backup_router_for_lpn,
 };
 use routing_core::config::H2H_CYCLE_SECS;
 use routing_core::crypto::identity::{short_addr_of, NodeIdentity};
 use routing_core::network::{H2hInitiator, H2hResponder};
 use routing_core::node::roles::Capabilities;
-use routing_core::protocol::h2h::{self, H2H_DELIVERY_BODY_MAX, H2hFrame};
+use routing_core::protocol::h2h::{self, H2hFrame, H2H_DELIVERY_BODY_MAX};
 use routing_core::routing::table::RoutingTable;
 use routing_core::transport::TransportAddr;
 
 use crate::sim_state::{SimConfig, MAX_NODES};
-use crate::store_forward::StoreForwardState;
 use crate::sim_state::{TraceEventKind, TuiState};
+use crate::store_forward::StoreForwardState;
 
 const DISCOVERY_DURATION_MS: u64 = 7_000;
 
@@ -208,7 +207,10 @@ where
                     };
                     if !tombstones.is_empty() {
                         let mut trace_ids = heapless::Vec::new();
-                        for trace_id in tombstones.iter().take(routing_core::protocol::h2h::H2H_ACK_IDS_MAX) {
+                        for trace_id in tombstones
+                            .iter()
+                            .take(routing_core::protocol::h2h::H2H_ACK_IDS_MAX)
+                        {
                             let _ = trace_ids.push(*trace_id);
                         }
                         let _ = responder
@@ -412,8 +414,7 @@ where
                                         },
                                         format!(
                                             "LPN {} woke router {} for delayed-delivery sync",
-                                            node_idx,
-                                            peer_mac[0] as usize
+                                            node_idx, peer_mac[0] as usize
                                         ),
                                     );
                                     tui_state.lock().unwrap().push_trace_event(
@@ -426,8 +427,7 @@ where
                                         },
                                         format!(
                                             "LPN {} received retained delivery from router {}",
-                                            node_idx,
-                                            peer_mac[0] as usize
+                                            node_idx, peer_mac[0] as usize
                                         ),
                                     );
                                     tui_state.lock().unwrap().mark_trace_delivered(trace_id);
@@ -463,19 +463,24 @@ where
                                     owner_router_idx,
                                     body,
                                 }) => {
-                                    let retained = store_forward_state.lock().unwrap().retain_replica(
-                                        crate::store_forward::RetainedMessage {
+                                    let retained = store_forward_state
+                                        .lock()
+                                        .unwrap()
+                                        .retain_replica(crate::store_forward::RetainedMessage {
                                             trace_id,
                                             message_id,
                                             from_idx: source_idx as usize,
                                             to_idx: destination_idx as usize,
                                             holder_idx: node_idx,
                                             owner_router_idx: owner_router_idx as usize,
-                                            body: String::from_utf8_lossy(body.as_slice()).into_owned(),
-                                            enqueued_at_secs: tui_state.lock().unwrap().elapsed_secs,
+                                            body: String::from_utf8_lossy(body.as_slice())
+                                                .into_owned(),
+                                            enqueued_at_secs: tui_state
+                                                .lock()
+                                                .unwrap()
+                                                .elapsed_secs,
                                             announced: false,
-                                        },
-                                    );
+                                        });
 
                                     if retained {
                                         let mut trace_ids = heapless::Vec::new();

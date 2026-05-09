@@ -49,8 +49,8 @@ pub mod node;
 pub mod transport;
 
 use routing_core::behavior::{run_heartbeat_loop, run_initiator_loop, run_responder_loop};
-use routing_core::crypto::identity::NodeIdentity;
 use routing_core::config::H2H_PSM;
+use routing_core::crypto::identity::NodeIdentity;
 use routing_core::node::roles::Capabilities;
 use routing_core::routing::table::RoutingTable;
 
@@ -152,7 +152,8 @@ async fn main(_spawner: Spawner) {
 
     let capabilities = Capabilities(Capabilities::ROUTE | Capabilities::APPLICATION);
 
-    let mut ble_responder = BleResponder::new(peripheral, &stack, *identity.short_addr(), capabilities.0);
+    let mut ble_responder =
+        BleResponder::new(peripheral, &stack, *identity.short_addr(), capabilities.0);
 
     let mut ble_initiator = BleInitiator::new(central, &stack, address, discovery_rx);
 

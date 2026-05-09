@@ -250,8 +250,8 @@ impl H2hInitiator for SimInitiator {
             let config = self.sim_config.lock().unwrap();
             let self_caps = config.capabilities[self.node_idx];
             let peer_caps = config.capabilities[peer_idx];
-            let allow_low_power_uplink = is_low_power_endpoint(self_caps)
-                && peer_caps & Capabilities::ROUTE != 0;
+            let allow_low_power_uplink =
+                is_low_power_endpoint(self_caps) && peer_caps & Capabilities::ROUTE != 0;
 
             if self.node_idx >= config.n_active || peer_idx >= config.n_active {
                 return Err(NetworkError::PeerInactive);
@@ -763,7 +763,8 @@ mod tests {
     }
 
     #[test]
-    fn low_power_endpoint_can_initiate_uplink_h2h_to_router_even_when_normal_initiation_is_disabled() {
+    fn low_power_endpoint_can_initiate_uplink_h2h_to_router_even_when_normal_initiation_is_disabled(
+    ) {
         let medium = test_medium();
         let identities = test_identities();
         let nodes = nodes_from_identities(identities);
@@ -794,9 +795,12 @@ mod tests {
                 let cfg = config.lock().unwrap();
                 cfg.capabilities[endpoint]
             };
-            let candidates =
-                collect_h2h_peer_snapshots(&identities[endpoint], endpoint_caps, &routing_tables[endpoint])
-                    .await;
+            let candidates = collect_h2h_peer_snapshots(
+                &identities[endpoint],
+                endpoint_caps,
+                &routing_tables[endpoint],
+            )
+            .await;
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].0, nodes[router].short_addr);
 
@@ -857,9 +861,12 @@ mod tests {
             }
 
             let router_caps = Capabilities::ROUTE | Capabilities::STORE;
-            let candidates =
-                collect_h2h_peer_snapshots(&identities[router], router_caps, &routing_tables[router])
-                    .await;
+            let candidates = collect_h2h_peer_snapshots(
+                &identities[router],
+                router_caps,
+                &routing_tables[router],
+            )
+            .await;
             assert!(candidates.is_empty());
         });
     }

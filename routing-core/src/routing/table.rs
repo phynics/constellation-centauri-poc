@@ -1,3 +1,5 @@
+//! Core routing-table state, peer trust, and forwarding-candidate selection.
+
 use crate::config::{H2H_MAX_PEER_ENTRIES, MAX_PEERS, TICK_HZ};
 use crate::crypto::identity::{short_addr_of, PubKey, ShortAddr};
 use crate::protocol::dedup::SeenMessages;

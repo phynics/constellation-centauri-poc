@@ -198,14 +198,16 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
             // the already-accepted BLE connection. Accepting here keeps the
             // channel open across the whole H2H session, including delayed-
             // delivery follow-up frames added above the base peer-sync exchange.
-            let mut channel =
-                match L2capChannel::listen(self.stack, &conn).accept(&l2cap_config).await {
-                    Ok(ch) => ch,
-                    Err(e) => {
-                        log::warn!("[periph] L2CAP accept error: {:?}", e);
-                        continue;
-                    }
-                };
+            let mut channel = match L2capChannel::listen(self.stack, &conn)
+                .accept(&l2cap_config)
+                .await
+            {
+                Ok(ch) => ch,
+                Err(e) => {
+                    log::warn!("[periph] L2CAP accept error: {:?}", e);
+                    continue;
+                }
+            };
 
             // Receive peer's payload
             let mut rx_buf = [0u8; 512];

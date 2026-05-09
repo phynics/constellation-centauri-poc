@@ -16,8 +16,8 @@
 
 use core::convert::TryInto;
 
-use sha2::{Digest, Sha256};
 use heapless::Vec;
+use sha2::{Digest, Sha256};
 
 use crate::config::{H2H_CYCLE_SECS, H2H_MAX_PEER_ENTRIES};
 use crate::crypto::identity::{PubKey, ShortAddr};
@@ -281,9 +281,7 @@ impl H2hFrame {
 
         match buf[0] {
             Self::TYPE_SYNC_REQUEST => Ok(Self::SyncRequest(H2hPayload::deserialize(&buf[2..])?)),
-            Self::TYPE_SYNC_RESPONSE => {
-                Ok(Self::SyncResponse(H2hPayload::deserialize(&buf[2..])?))
-            }
+            Self::TYPE_SYNC_RESPONSE => Ok(Self::SyncResponse(H2hPayload::deserialize(&buf[2..])?)),
             Self::TYPE_DELIVERY_SUMMARY => {
                 if buf.len() < 4 {
                     return Err(PacketError::InvalidHeader);
@@ -311,8 +309,7 @@ impl H2hFrame {
                 off += 1;
                 let destination_idx = buf[off];
                 off += 1;
-                let body_len =
-                    u16::from_le_bytes([buf[off], buf[off + 1]]) as usize;
+                let body_len = u16::from_le_bytes([buf[off], buf[off + 1]]) as usize;
                 off += 2;
                 if off + body_len > buf.len() || body_len > H2H_DELIVERY_BODY_MAX {
                     return Err(PacketError::InvalidHeader);

@@ -1,3 +1,5 @@
+//! Headless simulator harness helpers for deterministic tests and assertions.
+
 use std::time::{Duration, Instant};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -224,7 +226,12 @@ impl SimHarness {
 
             if Capabilities::is_low_power_endpoint_bits(capabilities) {
                 loop {
-                    match with_timeout(embassy_time::Duration::from_millis(500), initiator.receive_h2h_frame()).await {
+                    match with_timeout(
+                        embassy_time::Duration::from_millis(500),
+                        initiator.receive_h2h_frame(),
+                    )
+                    .await
+                    {
                         Ok(Ok(H2hFrame::DeliverySummary { pending_count, .. })) => {
                             if pending_count == 0 {
                                 continue;
@@ -257,7 +264,11 @@ impl SimHarness {
                                     initiator_idx, peer_idx
                                 ),
                             );
-                            self.runtime.tui_state.lock().unwrap().mark_trace_delivered(trace_id);
+                            self.runtime
+                                .tui_state
+                                .lock()
+                                .unwrap()
+                                .mark_trace_delivered(trace_id);
                             let mut trace_ids = heapless::Vec::new();
                             let _ = trace_ids.push(trace_id);
                             let _ = initiator
@@ -271,7 +282,12 @@ impl SimHarness {
                 }
             } else if Capabilities::is_store_router_bits(capabilities) {
                 loop {
-                    match with_timeout(embassy_time::Duration::from_millis(500), initiator.receive_h2h_frame()).await {
+                    match with_timeout(
+                        embassy_time::Duration::from_millis(500),
+                        initiator.receive_h2h_frame(),
+                    )
+                    .await
+                    {
                         Ok(Ok(H2hFrame::RetentionTombstone { trace_ids })) => {
                             self.runtime
                                 .store_forward_state
@@ -287,8 +303,12 @@ impl SimHarness {
                             owner_router_idx,
                             body,
                         })) => {
-                            let retained = self.runtime.store_forward_state.lock().unwrap().retain_replica(
-                                RetainedMessage {
+                            let retained = self
+                                .runtime
+                                .store_forward_state
+                                .lock()
+                                .unwrap()
+                                .retain_replica(RetainedMessage {
                                     trace_id,
                                     message_id,
                                     from_idx: source_idx as usize,
@@ -296,14 +316,20 @@ impl SimHarness {
                                     holder_idx: initiator_idx,
                                     owner_router_idx: owner_router_idx as usize,
                                     body: String::from_utf8_lossy(body.as_slice()).into_owned(),
-                                    enqueued_at_secs: self.runtime.tui_state.lock().unwrap().elapsed_secs,
+                                    enqueued_at_secs: self
+                                        .runtime
+                                        .tui_state
+                                        .lock()
+                                        .unwrap()
+                                        .elapsed_secs,
                                     announced: false,
-                                },
-                            );
+                                });
                             if retained {
                                 let mut trace_ids = heapless::Vec::new();
                                 let _ = trace_ids.push(trace_id);
-                                let _ = initiator.send_h2h_frame(&H2hFrame::RetentionAck { trace_ids }).await;
+                                let _ = initiator
+                                    .send_h2h_frame(&H2hFrame::RetentionAck { trace_ids })
+                                    .await;
                             }
                         }
                         Ok(Ok(H2hFrame::SessionDone)) => break,
@@ -351,8 +377,13 @@ impl SimHarness {
                     .replication_candidates(initiator_idx);
 
                 for entry in replication_candidates {
-                    let lpn_short = self.runtime.tui_state.lock().unwrap().node_short_addrs[entry.to_idx];
-                    if !is_backup_router_for_lpn(&lpn_short, &peer_short, known_store_routers.as_slice()) {
+                    let lpn_short =
+                        self.runtime.tui_state.lock().unwrap().node_short_addrs[entry.to_idx];
+                    if !is_backup_router_for_lpn(
+                        &lpn_short,
+                        &peer_short,
+                        known_store_routers.as_slice(),
+                    ) {
                         continue;
                     }
                     let mut body = heapless::Vec::new();
@@ -368,7 +399,12 @@ impl SimHarness {
                         body,
                     };
                     let _ = initiator.send_h2h_frame(&frame).await;
-                    match with_timeout(embassy_time::Duration::from_millis(500), initiator.receive_h2h_frame()).await {
+                    match with_timeout(
+                        embassy_time::Duration::from_millis(500),
+                        initiator.receive_h2h_frame(),
+                    )
+                    .await
+                    {
                         Ok(Ok(H2hFrame::RetentionAck { .. })) => {}
                         Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {}
                     }
@@ -423,7 +459,9 @@ impl SimHarness {
         holder_idx: usize,
         timeout: Duration,
     ) {
-        self.wait_until(timeout, || self.retained_trace_exists_at_holder(trace_id, holder_idx));
+        self.wait_until(timeout, || {
+            self.retained_trace_exists_at_holder(trace_id, holder_idx)
+        });
     }
 
     pub fn trace_has_delivery(&self, trace_id: u64, node_idx: usize) -> bool {

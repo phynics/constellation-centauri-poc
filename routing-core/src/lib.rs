@@ -1,3 +1,8 @@
+//! Shared no-std protocol crate for Constellation Mesh.
+//!
+//! This crate owns transport-agnostic routing, packet formats, H2H behavior,
+//! crypto helpers, and node-role policy used by both firmware and simulator.
+
 #![no_std]
 
 // For alloc-dependent crypto (chacha20poly1305)

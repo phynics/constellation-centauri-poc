@@ -1,3 +1,5 @@
+//! Desktop simulator crate for exercising routing-core against an in-memory medium.
+
 pub mod behavior;
 pub mod command_task;
 pub mod config_ops;

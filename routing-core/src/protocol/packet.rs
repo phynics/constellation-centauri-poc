@@ -1,3 +1,5 @@
+//! Packet header, signing, and builder helpers for routed mesh traffic.
+
 use crate::config::{BROADCAST_ADDR, DEFAULT_TTL, HEADER_SIZE, PROTOCOL_VERSION};
 use crate::crypto::identity::{verify, NodeIdentity, ShortAddr, Signature};
 use rand_core::RngCore;

@@ -62,8 +62,8 @@ fn build_export_bundle(
     config: &SimConfig,
     ctx: ExportContext<'_>,
 ) -> DiagnosticExport {
-    let selected_trace_id = selected_trace(state, ctx.trace_filter, ctx.selected_trace_index)
-        .map(|trace| trace.id);
+    let selected_trace_id =
+        selected_trace(state, ctx.trace_filter, ctx.selected_trace_index).map(|trace| trace.id);
 
     DiagnosticExport {
         export_format: "constellation-sim-diagnostics/v1",
@@ -289,11 +289,7 @@ impl SimConfigExport {
                     behavior: NodeBehaviorExport::from_behavior(config.node_behaviors[idx]),
                 })
                 .collect(),
-            link_enabled: config
-                .link_enabled
-                .iter()
-                .map(|row| row.to_vec())
-                .collect(),
+            link_enabled: config.link_enabled.iter().map(|row| row.to_vec()).collect(),
             drop_prob: config.drop_prob.iter().map(|row| row.to_vec()).collect(),
         }
     }
@@ -441,7 +437,11 @@ impl TraceExport {
             message_id: trace.message_id,
             ttl_at_send: trace.ttl_at_send,
             terminal_status: trace_status_name(trace.terminal_status),
-            events: trace.events.iter().map(TraceEventExport::from_event).collect(),
+            events: trace
+                .events
+                .iter()
+                .map(TraceEventExport::from_event)
+                .collect(),
         }
     }
 }

@@ -1,3 +1,5 @@
+//! Node identity primitives: signing keys, short addresses, and signatures.
+
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::{CryptoRngCore, RngCore};
 use sha2::{Digest, Sha256};

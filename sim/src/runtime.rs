@@ -1,3 +1,5 @@
+//! Simulator runtime assembly: static nodes, embassy tasks, and shared state.
+
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -15,8 +17,8 @@ use crate::medium::SimMedium;
 use crate::message_task;
 use crate::network::{SimInitiator, SimNodeInfo, SimResponder};
 use crate::scenario::{self, ScenarioId};
-use crate::store_forward::{self, StoreForwardState};
 use crate::sim_state::{SimCommand, SimConfig, TuiState, DEFAULT_NODES, MAX_NODES};
+use crate::store_forward::{self, StoreForwardState};
 use crate::{behavior, command_task, snapshot_task};
 
 const DEFAULT_SIM_SEED: u64 = 0xC0FFE_BABE;

@@ -49,11 +49,9 @@ impl StoreForwardState {
         if held_for_router >= STORE_FORWARD_MAX_PER_NODE {
             return false;
         }
-        if self
-            .entries
-            .iter()
-            .any(|existing| existing.trace_id == entry.trace_id && existing.holder_idx == entry.holder_idx)
-        {
+        if self.entries.iter().any(|existing| {
+            existing.trace_id == entry.trace_id && existing.holder_idx == entry.holder_idx
+        }) {
             return true;
         }
         self.entries.push(entry);
@@ -61,11 +59,9 @@ impl StoreForwardState {
     }
 
     pub fn retain_replica(&mut self, mut entry: RetainedMessage) -> bool {
-        if self
-            .entries
-            .iter()
-            .any(|existing| existing.trace_id == entry.trace_id && existing.holder_idx == entry.holder_idx)
-        {
+        if self.entries.iter().any(|existing| {
+            existing.trace_id == entry.trace_id && existing.holder_idx == entry.holder_idx
+        }) {
             return true;
         }
         entry.announced = false;
@@ -89,9 +85,8 @@ impl StoreForwardState {
 
     pub fn ack_delivered(&mut self, holder_idx: usize, trace_ids: &[u64]) {
         let acked: HashSet<u64> = trace_ids.iter().copied().collect();
-        self.entries.retain(|entry| {
-            !(entry.holder_idx == holder_idx && acked.contains(&entry.trace_id))
-        });
+        self.entries
+            .retain(|entry| !(entry.holder_idx == holder_idx && acked.contains(&entry.trace_id)));
         for trace_id in trace_ids {
             if !self.tombstones.contains(trace_id) {
                 self.tombstones.push(*trace_id);
@@ -107,7 +102,8 @@ impl StoreForwardState {
         // that generated them. Once any router has completed delayed delivery,
         // other retained copies become stale redundancy and should be removed.
         let cleared: HashSet<u64> = trace_ids.iter().copied().collect();
-        self.entries.retain(|entry| !cleared.contains(&entry.trace_id));
+        self.entries
+            .retain(|entry| !cleared.contains(&entry.trace_id));
         for trace_id in trace_ids {
             if !self.tombstones.contains(trace_id) {
                 self.tombstones.push(*trace_id);
