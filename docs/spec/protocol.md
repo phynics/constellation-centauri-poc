@@ -776,7 +776,8 @@ fn forward(packet: Packet):
 1. **Direct authenticated destination**: if `dst` is a known authenticated peer with usable transport → forward directly
 2. **Indirect authenticated next-hop**: if `dst` is an indirect peer, resolve `learned_from` to a usable authenticated direct neighbor → forward via that neighbor
 3. **Bounded bloom-route candidates**: neighbors whose authenticated bloom state claims they know `dst` → forward via bounded bloom-hint fan-out
-4. **No candidates**: packet is dropped
+4. **Router-uplink fallback**: if the local node is not itself acting as a routing topology holder and no direct/indirect/bloom candidates exist, forward to the single best authenticated routing-authorized direct neighbor
+5. **No candidates**: packet is dropped
 
 **Key behaviors**:
 - **Indirect routing**: destinations learned from H2H **MUST** carry `learned_from`, which is the next-hop hint for indirect peers.
@@ -787,6 +788,8 @@ fn forward(packet: Packet):
   3. lower `hop_count` first
   4. lexicographically smaller `ShortAddr` first
   Only the first `BLOOM_FANOUT_MAX` candidates may be used.
+- **Router-uplink fallback**: this fallback **MUST** select at most one direct authenticated routing-authorized neighbor. It exists to let non-router/edge nodes hand uncertainty upward to a topology holder.
+- **No recursive router escalation**: a router that receives a packet through router-uplink fallback and still has no direct, indirect, bloom, or delayed-delivery reason to keep it **MUST** terminate it as `NoRoute` rather than blindly forwarding it to another router.
 - **No bloom hits**: if resolution yields no candidates, the node **MUST NOT** perform an unconditional flood in the current protocol.
 - **Loop prevention**: `SeenMessages` ring buffer **MUST** ensure a message is forwarded at most once per node.
 - **TTL**: nodes **MUST** decrement TTL on forward and **MUST NOT** forward packets whose TTL has reached zero.
