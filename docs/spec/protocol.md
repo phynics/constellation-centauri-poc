@@ -238,7 +238,7 @@ not the protocol's only target.
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
-**Note**: Signature covers `[ver, type, flags, ttl, src, dst, packet_counter, payload]` but NOT hop_count (since relays increment it).
+**Note**: Signature covers `[ver, type, flags, src, dst, packet_counter, payload]` but NOT `ttl` or `hop_count` (since relays decrement/increment them while forwarding).
 
 ```rust
 #[repr(u8)]
@@ -270,7 +270,7 @@ pub struct PacketHeader {
     pub src: ShortAddr,       // sender short address
     pub dst: ShortAddr,       // destination (0xFF..FF = broadcast)
     pub packet_counter: u64,  // per-sender monotonic freshness counter
-    pub signature: Signature, // ed25519 over header+payload (excl hop_count)
+    pub signature: Signature, // ed25519 over header+payload (excl ttl/hop_count)
 }
 ```
 
@@ -350,7 +350,7 @@ A conforming implementation **MUST** enforce all of the following:
 Pattern A is the normative model for this protocol version: the freshness value
 is a **per-sender monotonic counter**.
 
-#### 4.5.1 Acceptance Window
+#### 4.6.1 Acceptance Window
 
 Receivers **MUST** track replay state per authenticated sender.
 
@@ -369,7 +369,7 @@ The normative receiver algorithm is:
 
 This allows limited reordering without allowing indefinite replay.
 
-#### 4.5.2 Sender Persistence
+#### 4.6.2 Sender Persistence
 
 `packet_counter` is per-sender and **MUST** increase monotonically across all
 authenticated routed packets emitted by that node.
@@ -389,12 +389,12 @@ fast recent-message rejection:
 
 ```rust
 pub struct SeenMessages {
-    ring: heapless::Deque<u64, 128>,  // recent packet_counter ring buffer
+    ring: heapless::Deque<(ShortAddr, u64), 128>,  // recent (src, packet_counter) tuples
 }
 
 impl SeenMessages {
-    /// Returns true if this message was already seen. Adds it if not.
-    pub fn check_and_insert(&mut self, packet_counter: u64) -> bool;
+    /// Returns true if this message from this sender was already seen. Adds it if not.
+    pub fn check_and_insert(&mut self, src: ShortAddr, packet_counter: u64) -> bool;
 }
 ```
 
@@ -636,12 +636,23 @@ Per sender within a session, receivers **MUST** maintain:
 For protocol version 1:
 
 - the initiator **MUST** choose a fresh `session_id`
-- `SyncRequest` **MUST** include enough identity material to authenticate the
-  initiator if the responder does not already have validated state for it
-- `SyncResponse` **MUST** include enough identity material to authenticate the
-  responder if the initiator does not already have validated state for it
+- `SyncRequest` **MUST** carry enough identity material to authenticate the
+  initiator before the responder accepts any routing, storage, or retained-state
+  mutation from that exchange
+- `SyncResponse` **MUST** carry enough identity material to authenticate the
+  responder before the initiator accepts any routing, storage, or retained-state
+  mutation from that exchange
+- the minimum sufficient identity material is:
+  - the sender's `full_pubkey`, and
+  - the sender's `NodeCertificate` or an exact certificate object previously
+    validated and still bound to that `full_pubkey`
+- a peer **MUST NOT** omit certificate material on first authenticated contact
+  with a given partner
+- pubkey or certificate omission is allowed only when the sender has reason to
+  believe the partner already holds the same validated binding
 - both sides **MUST** validate peer certificate material against the stored
-  network public key before accepting state-mutating follow-up frames
+  network public key before accepting state-mutating follow-up frames or
+  promoting the peer beyond observed status
 
 Session keys MAY be introduced later as an optimization, but they are not part
 of conformance for this protocol version.
@@ -748,8 +759,8 @@ fn forward(packet: Packet):
         deliver_locally(packet)
         return
 
-    if seen.check_and_insert(packet.packet_counter):
-        return  // already forwarded, drop (loop prevention)
+    if seen.check_and_insert(packet.src, packet.packet_counter):
+        return  // already forwarded for this sender, drop (loop prevention)
 
     if packet.ttl == 0:
         return  // TTL expired
@@ -791,7 +802,7 @@ fn forward(packet: Packet):
 - **Router-uplink fallback**: this fallback **MUST** select at most one direct authenticated routing-authorized neighbor. It exists to let non-router/edge nodes hand uncertainty upward to a topology holder.
 - **No recursive router escalation**: a router that receives a packet through router-uplink fallback and still has no direct, indirect, bloom, or delayed-delivery reason to keep it **MUST** terminate it as `NoRoute` rather than blindly forwarding it to another router.
 - **No bloom hits**: if resolution yields no candidates, the node **MUST NOT** perform an unconditional flood in the current protocol.
-- **Loop prevention**: `SeenMessages` ring buffer **MUST** ensure a message is forwarded at most once per node.
+- **Loop prevention**: `SeenMessages` ring buffer **MUST** key duplicate suppression by at least `(src, packet_counter)` so different senders do not collide.
 - **TTL**: nodes **MUST** decrement TTL on forward and **MUST NOT** forward packets whose TTL has reached zero.
 
 ### 6.4 Routing Confidence
@@ -1049,262 +1060,10 @@ Uses `esp-storage` + `embedded-storage` traits for flash read/write.
 
 ---
 
-## 10. Module Structure
-
-The project is organized as a Cargo workspace with three members:
-
-```
-routing-core/              # Shared no-std protocol layer
-  src/
-    lib.rs                 # Module boundary
-    config.rs              # Constants (MAX_NODES, TTL, etc.)
-    behavior.rs            # Shared initiator/responder/heartbeat loops
-    crypto/
-      identity.rs          # NodeIdentity, ShortAddr, ed25519 signing
-      encryption.rs        # ECDH, ChaCha20-Poly1305 encrypt/decrypt
-    protocol/
-      h2h.rs               # H2H payload, slot scheduling, initiator selection
-      packet.rs            # Packet builder, header serialization
-      dedup.rs             # SeenMessages ring buffer
-    routing/
-      table.rs             # RoutingTable, forwarding_candidates, bloom, decay
-      bloom.rs             # BloomFilter (256-bit, 3 hash functions)
-    network.rs             # H2hInitiator/H2hResponder traits, NetworkError
-    transport.rs           # TransportAddr
-    node/
-      roles.rs             # Capabilities bitfield
-
-firmware/                  # ESP32 bare-metal host
-  src/
-    main.rs                # Embassy startup, transport wiring, task orchestration
-    transport/
-      ble_network.rs       # current BLE binding implementation
-
-sim/                       # Desktop simulator host
-  src/
-    main.rs                # Simulator boot, static node setup, Embassy background thread
-    network.rs             # SimInitiator/SimResponder (in-process transport shims)
-    behavior.rs            # Sim-specific behavior loops (runtime capability lookup)
-    scenario.rs            # Built-in scenario presets
-    message_task.rs        # Hop-by-hop message propagation using routing-core
-    command_task.rs        # TUI command dispatch
-    snapshot_task.rs       # Embassy -> TUI state bridge (1s tick)
-    medium.rs              # SimMedium channels and serialization
-    sim_state.rs           # Shared state: TuiState, SimConfig, traces, events
-    tui/
-      mod.rs               # TUI entry point, crossterm + ratatui loop
-      app.rs               # App state, key handling, input modes
-      ui.rs                # Trace-centric rendering
-```
-
----
-
-## 11. Embassy Task Architecture
-
-The firmware runs as cooperative async tasks on the Embassy executor:
-
-```rust
-#[embassy_executor::task]
-async fn heartbeat_task(/* routing table, transport */) {
-    // Periodic heartbeat send + schedule management
-}
-
-#[embassy_executor::task]
-async fn link_rx_task(/* active transport, routing table */) {
-    // Continuously receive transport frames, dispatch to router
-}
-
-#[embassy_executor::task]
-async fn router_task(/* routing table, transports, store_forward */) {
-    // Central routing loop: receives from channel, forwards or delivers
-    // Also handles entry decay on timer
-}
-
-#[embassy_executor::task]
-async fn store_forward_task(/* buffer, transports */) {
-    // Watches for LE node heartbeats, delivers buffered messages
-}
-
-// Future:
-// async fn additional_transport_rx_task(...)
-// async fn display_task(...)
-```
-
-Tasks communicate via `embassy_sync::Channel` and shared state protected by `embassy_sync::Mutex`.
-
----
-
-## 12. Current Runtime Flows
-
-This section describes the **step-by-step algorithms the code currently executes**, rather than an aspirational message sequence.
-
-### 12.1 Discovery Cycle
-
-For every H2H cycle:
-
-1. The node **MUST** wait for the cycle start.
-2. The node **MUST** perform transport-level neighbor discovery for `DISCOVERY_DURATION_MS`.
-3. For each discovered neighbor, the node **MUST**:
-   - read `short_addr`, `capabilities`, and transport address
-   - update or insert a direct peer via `update_peer_compact(...)` or equivalent logic
-4. The node **MUST** recompute the local bloom filter from the current peer set.
-5. The node **MUST** build the H2H candidate list from direct peers with usable transport addresses.
-6. If the local node is a full router/application participant, it **MUST** only include peers for which this node is the deterministic initiator.
-7. If the local node is a low-power endpoint, it **MUST** rank routers for wake/fallback instead of using pair ownership.
-
-### 12.2 Direct H2H Sync Flow
-
-For each candidate peer:
-
-1. The initiator **MUST** compute the pair slot offset from `slot_offset(self, peer)` unless the local node is low power, in which case the wake attempt **MUST** use offset `0`.
-2. The initiator **MUST** wait until the slot time before attempting the session.
-3. The initiator **MUST** build an `H2hPayload` tailored for that partner:
-   - `full_pubkey` **MUST** be included only if the partner does not already know it
-   - at most `H2H_MAX_PEER_ENTRIES` peers **MUST** be included
-   - the partner's own entry and indirect peers learned only from that partner **MUST NOT** be included
-4. The initiator **MUST** open the H2H session and send `SyncRequest(payload)`.
-5. The responder **MUST** receive the payload, resolve the partner short address, and build its own response **before** mutating its routing table.
-6. The responder **MUST** update its routing table from the initiator payload.
-7. The responder **MUST** send `SyncResponse(response_payload)`.
-8. The initiator **MUST** update its routing table from the response payload.
-9. Both sides **MUST** finish the H2H session unless follow-up typed frames are needed.
-
-### 12.3 Routing Table Update Flow
-
-When `update_peer_from_h2h(...)` processes an H2H payload:
-
-1. The implementation **MUST** resolve the direct partner short address.
-2. The implementation **MUST** ignore the payload if it refers to `self_addr`.
-3. The implementation **MUST** resolve the partner pubkey:
-   - use `payload.full_pubkey` when present
-   - otherwise keep any previously known pubkey
-4. The implementation **MUST** insert or refresh the partner as a **direct** peer:
-   - `hop_count = 0`
-   - `trust = TRUST_DIRECT`
-   - `learned_from = 0`
-   - update capabilities, transport address, and last-seen time
-5. For each advertised peer entry inside the payload, the implementation **MUST**:
-   - derive its `short_addr` from the peer pubkey
-   - ignore it if it refers to `self_addr`
-   - compute `hop_count = advertised_hop_count + 1`
-   - insert or refresh it as `TRUST_INDIRECT` if the existing knowledge is not stronger
-   - store `learned_from = partner_short_addr`
-6. The implementation **MUST** recompute the local bloom filter.
-
-### 12.4 Routed Message Forwarding Flow
-
-When a node receives a routed data packet:
-
-1. The node **SHOULD** record a receive event for tracing/diagnostics.
-2. If `ttl == 0`, the node **MUST** mark the packet expired and stop.
-3. The node **MUST** check the `SeenMessages` ring:
-   - if already seen, the packet **MUST** be dropped as a duplicate
-   - otherwise the node **MUST** insert the message ID
-4. If this node is the unicast destination, it **MUST** deliver locally and stop.
-5. The node **MUST** resolve forwarding candidates in this order:
-   - direct destination with usable transport first
-   - otherwise indirect destination via `learned_from`
-   - otherwise all usable peers whose direct entry or bloom hint matches the destination
-6. If no candidates exist:
-   - if the destination is low power and this node is store-capable, the node **MUST** retain the packet for delayed delivery
-   - otherwise the node **MUST** mark it `NoRoute`
-7. For each candidate, the node **MUST**:
-   - decrement TTL and increment hop count in the forwarded copy
-   - skip self-loops, sender-loops, inactive links, or dropped links
-   - send the packet to the next hop
-8. If at least one forward succeeds, tracing **SHOULD** record the hop(s); otherwise the packet **MUST** terminate as dropped/no-route.
-
-### 12.5 Low-Power Delayed Delivery Flow
-
-When a routed packet targets a sleeping low-power endpoint:
-
-1. Normal forwarding **MUST** run first.
-2. If a store-capable router has no immediate next hop to the destination, it **MUST** retain the packet locally.
-3. The retained entry **MUST** record:
-   - original sender and destination
-   - message ID / trace ID
-   - `holder_idx`
-   - stable `owner_router_idx`
-4. During later router↔router H2H sessions, owner routers **MAY** send `RetentionReplica` frames to deterministic backup routers for that LE node.
-5. When the LE node wakes, it **MUST** initiate H2H with its best-ranked reachable router.
-6. After sync completes, the router **MUST** send `DeliverySummary` followed by zero or more `DeliveryData` frames.
-7. The LE node **MAY** send `DeliveryAck` frames for delivered retained items when explicit acknowledgement is practical for the wake session.
-8. If explicit acknowledgement is omitted or lost, the LE node **SHOULD** later advertise an authenticated passive receipt summary containing source-address / highest-contiguous-counter entries.
-9. The serving router **MUST** clear entries only after explicit acknowledgement or validated passive receipt summary evidence that specifically covers those retained items, and **SHOULD** emit `RetentionTombstone` to clean replicas on other routers.
-10. The wake session **MUST** close with `SessionDone`.
-
-### 12.6 Router-to-Router Retention Replication Flow
-
-When two store-capable routers complete their initial H2H sync:
-
-1. Each side **MAY** first send any known `RetentionTombstone` frames.
-2. The owner router **MUST** enumerate retained entries where `holder_idx == owner_router_idx`.
-3. For each retained entry, it **MUST** check whether the partner belongs to the deterministic backup subset for that LE destination.
-4. If yes, it **MAY** send `RetentionReplica`.
-5. The receiver **MUST** store the replica under its own holder identity and reply with `RetentionAck` if it accepts the replica.
-6. Either side **MAY** continue sending replicas until it is done, but it **MUST** eventually send `SessionDone`.
-7. On future delivery completion, tombstones **SHOULD** propagate and clear stale replicas across holders.
-
-### 12.7 Onboarding Flow
-
-1. On first boot, the node generates an Ed25519 identity and persists it.
-2. The companion app learns the node public key over the active onboarding transport.
-3. The companion app signs a `NodeCertificate` with the offline network key.
-4. The certificate and network public key are written back to the node and persisted.
-5. The node can then participate with its assigned capability bitfield.
-
----
-
-## 13. Configuration Constants
-
-```rust
-pub mod config {
-    pub const PROTOCOL_VERSION: u8 = 0x01;
-    pub const HEARTBEAT_INTERVAL_SECS: u64 = 60;
-    pub const HEARTBEAT_MAX_SUPPRESSION_SECS: u64 = 180;
-    pub const H2H_CYCLE_SECS: u64 = 60;
-    pub const H2H_MAX_PEER_ENTRIES: usize = 8;
-    pub const H2H_CONNECTION_TIMEOUT_SECS: u64 = 5;
-    pub const H2H_PSM: u16 = 0x0081;
-    pub const H2H_MTU: u16 = 512;
-    pub const H2H_SESSION_REPLAY_WINDOW: u32 = 16;
-    pub const DEFAULT_TTL: u8 = 10;
-    pub const BLOOM_FILTER_BYTES: usize = 32;   // 256 bits
-    pub const BLOOM_HASH_COUNT: usize = 3;
-    pub const BLOOM_FANOUT_MAX: usize = 2;
-    pub const SEEN_MESSAGES_CAPACITY: usize = 128;
-    pub const REPLAY_WINDOW_SIZE: u64 = 64;
-    pub const ROUTING_DECAY_FACTOR: u8 = 3;     // entries expire at 3x heartbeat interval
-    pub const LE_DELIVERY_WINDOW_SECS: u64 = 2;
-    pub const STORE_FORWARD_MAX_PER_NODE: usize = 8;
-    pub const STORE_FORWARD_MAX_AGE_SECS: u64 = 600;
-    pub const RECEIPT_SUMMARY_MAX_ENTRIES: usize = 4;
-    pub const MAX_PEERS: usize = 32;
-    pub const TICK_HZ: u64 = 1_000_000;          // Embassy ESP32 default
-    pub const HEAP_SIZE: usize = 72 * 1024;
-    pub const HEADER_SIZE: usize = 92;
-    pub const BROADCAST_ADDR: [u8; 8] = [0xFF; 8];
-}
-```
-
----
-
-## 14. Future Work (Out of Scope for v1)
-
-- **Tunnel mode**: Latency/bandwidth-optimized established routes with multi-path control signals for quick fallback
-- **Coordinator**: For networks beyond tens of nodes, a coordinator role for route computation
-- **LE wake coordination**: Synchronized wake schedules between LE nodes and their carriers
-- **Fragmentation**: For tunnel mode, larger payloads over WiFi or BLE extended advertisements
-- **LoRa transport**: Long-range, low-bandwidth transport implementation
-- **Route metrics**: Signal strength weighting, latency-aware routing
-
----
-
 # Appendix A. BLE Binding (Current Reference Binding)
 
-This appendix specifies the current BLE binding: advertisement formats, the H2H
-(Heart2Heart) exchange over BLE primitives, debug messaging, and binding-level
-versioning details.
+This appendix specifies the current BLE binding: advertisement formats and the H2H
+(Heart2Heart) exchange over BLE primitives.
 
 The core mesh protocol is defined in the sections above. This appendix is a
 transport-specific realization of those semantics, not the definition of the
@@ -1463,28 +1222,33 @@ Any BLE exchange that omits this authenticated outer envelope is
 non-conforming, even if the inner `H2hPayload` matches the layout below.
 
 ```
-Offset  Size      Field            Notes
-──────  ────      ─────            ─────
-0       1         flags            Bit field (see §3.5)
-1       1         version          Protocol version (see §3.6)
-2       0 | 32    full_pubkey      Conditional on flags.0
-?       2         capabilities     Sender's capability bitfield (LE u16)
-?       4         uptime_secs      Sender's uptime in seconds (LE u32)
-?       1         peer_count       Number of peer entries (0–8)
-?       N × 35    peers[]          Peer info entries
+Offset  Size         Field            Notes
+──────  ────         ─────            ─────
+0       1            flags            Bit field (see §3.5)
+1       1            version          Protocol version (see §3.6)
+2       0 | 32       full_pubkey      Present when flags.0 = 1
+?       0 | CERT_LEN certificate      Present when flags.1 = 1; serialized `NodeCertificate`
+?       2            capabilities     Sender's capability bitfield (LE u16)
+?       4            uptime_secs      Sender's uptime in seconds (LE u32)
+?       1            peer_count       Number of peer entries (0–8)
+?       N × 35       peers[]          Peer info entries
 ```
 
-**Total size**: 8 bytes + `35 × peer_count` without pubkey, or 40 bytes + `35 × peer_count` with pubkey.
+The fixed portion without optional identity material is **9 bytes**. With only
+`full_pubkey` it is **41 bytes** before peer entries. With both `full_pubkey`
+and `certificate`, it is `41 + CERT_LEN` bytes before peer entries.
 
-Practical max with `H2H_MAX_PEER_ENTRIES = 8`: 288 bytes (no pubkey) or 320 bytes (with pubkey).
+A sender **MUST** include certificate material on first authenticated contact
+with a partner. Later exchanges MAY omit fields already validated by that
+partner, subject to the authenticated-bootstrap rules in §5.6.2.
 
 ### 3.5 Flags Byte
 
 ```
 Bit  Name          Description
 ───  ────          ───────────
-0    has_pubkey    1 = 32-byte pubkey follows flags; 0 = omitted
-1    (reserved)
+0    has_pubkey      1 = 32-byte pubkey follows flags; 0 = omitted
+1    has_certificate  1 = serialized NodeCertificate follows optional pubkey; 0 = omitted
 2    (reserved)
 3    (reserved)
 4    (reserved)
@@ -1493,13 +1257,13 @@ Bit  Name          Description
 7    (reserved)
 ```
 
-**Pubkey omission logic**: the sender **MUST** check the routing table. If the partner's entry already has a non-zero pubkey, the sender **MAY** omit its own pubkey to save 32 bytes. First exchanges **SHOULD** include the pubkey.
+**Identity-material omission logic**: the sender **MAY** omit `full_pubkey` or `certificate` only when the partner is already known to hold the same validated identity binding. First authenticated exchanges **MUST** include both `full_pubkey` and `certificate`.
 
 ### 3.6 Version Byte
 
-The `version` byte immediately follows `flags`. It identifies the H2H protocol version used by the sender. The current version is `0x02`.
+The `version` byte immediately follows `flags`. It identifies the H2H wire-format version used by the sender. In protocol version 1, the H2H wire-format version is also `0x01`.
 
-A receiver **MUST** check the version byte. If it does not support the received version, it **SHOULD** log a debug message and skip processing (but not disconnect — the peer may still understand the response).
+A receiver **MUST** check the version byte. If it does not support the received version, it **MUST** reject the frame without applying any state mutation.
 
 ### 3.7 Peer Info Entry (35 bytes)
 
@@ -1521,196 +1285,3 @@ Peers included in the list are selected via **recency-weighted reservoir samplin
 - **RNG**: xorshift32 seeded from `our_short_addr[0..4] XOR now_ticks`
 
 ---
-
-## 4. Debug Messages
-
-Debug messages provide diagnostic visibility into the BLE protocol layer. All are prefixed with a tag indicating the subsystem.
-
-### 4.1 Log Tags
-
-| Tag | Subsystem |
-|-----|-----------|
-| `[periph]` | Peripheral H2H task (responder) |
-| `[central]` | Central H2H task (initiator + discovery) |
-| `[ble_runner]` | BLE HCI event loop |
-| `[heartbeat]` | Uptime + routing table health |
-
-### 4.2 Startup Messages
-
-```
-Constellation Mesh Node - H2H (Heart2Heart)
-=============================================
-Build: <16-char hex fingerprint>
-Node identity: <short_addr as hex>
-Public key:    <pubkey as hex>
-BLE address:   <6-byte MAC as hex>
-[periph] Startup jitter: <N>ms
-```
-
-The **build fingerprint** is a hash of key source files, computed at compile time. Both devices in a pair must show the same fingerprint to confirm identical firmware.
-
-### 4.3 Discovery Messages
-
-```
-[central] New peer <short_addr> (<N> total)
-```
-
-Only printed when a **genuinely new** peer is added to the routing table (not on re-discovery of a known peer).
-
-### 4.4 H2H Exchange Messages (Initiator / Central)
-
-```
-[central] H2H cycle: <N> peers to connect
-[central] H2H → <short_addr> (slot <N>s)
-[central] Connected to <short_addr>
-[central] H2H tx sent
-[central] H2H rx from <short_addr>
-[central] Routing table: <N> peers
-```
-
-**Error cases**:
-```
-[central] L2CAP send error: <error>
-[central] L2CAP rx error: <error>
-[central] L2CAP create error: <error>
-[central] Connect to <short_addr> failed: <error>
-[central] Scan error: <error>
-```
-
-### 4.5 H2H Exchange Messages (Responder / Peripheral)
-
-```
-[periph] Connection from <BLE MAC>
-[periph] H2H rx <N> bytes
-[periph] H2H step=1 partner=<short_addr prefix>
-[periph] H2H step=2 built payload, <N> peers
-[periph] H2H step=3 serialized <N> bytes
-[periph] H2H step=4 tx ok
-[periph] Routing table: <N> peers
-```
-
-**Error cases**:
-```
-[periph] H2H step=4 tx ERR: <error>
-[periph] H2H serialize error: <error>
-[periph] H2H deserialize FAILED (<N> bytes)
-[periph] L2CAP rx error: <error>
-[periph] L2CAP accept error: <error>
-[periph] Accept error: <error>
-[periph] Advertise error: <error>
-[periph] AD encode error: <error>
-```
-
-### 4.6 Periodic Health
-
-```
-[heartbeat] Uptime: <N>s, peers: <N>
-```
-
-Printed every 5 seconds.
-
----
-
-## 5. Protocol Versioning
-
-### 5.1 Version Location
-
-The protocol version appears in two places:
-
-| Context | Field | Current Value |
-|---------|-------|---------------|
-| Mesh packet header | `version` (upper 4 bits of byte 0) | `0x01` |
-| H2H payload | `version` (byte 1) | `0x02` |
-
-### 5.2 Compatibility Rules
-
-- **Same major version (0x0X)**: nodes MUST be able to parse the payload, ignoring unknown flags. Unknown flag bits are reserved and MUST be zero on send.
-- **Different major version**: nodes SHOULD log a version mismatch and skip processing.
-- **Version negotiation**: not implemented. Both peers send their version; the receiver **MUST** decide locally whether it can parse the payload.
-
-### 5.3 Breaking Changes
-
-Changes that bump the version byte:
-
-- Adding required fields before `peer_count`
-- Changing the semantic meaning of existing fields
-- Changing `PeerInfo` entry size
-
-Changes that do **not** bump the version:
-
-- Adding new flag bits (receivers ignore unknown flags)
-- Changing peer selection algorithm (wire format unchanged)
-
----
-
-## 6. IPv6-Compatible Addressing
-
-### 6.1 Address Derivation
-
-Constellation's `ShortAddr` (8 bytes / 64 bits) maps directly to an IPv6 interface identifier. Combined with a network-derived prefix, every node has a deterministic IPv6 address:
-
-```
-fd XX:XXXX:XXXX:XXXX : SSSS:SSSS:SSSS:SSSS
-└── network prefix ──────┘ └── ShortAddr (8B) ──┘
-         /64                   interface ID
-```
-
-### 6.2 Network Prefix
-
-The `/64` prefix is derived from the **network authority's public key**:
-
-```
-prefix[0]    = 0xFD                          // ULA (RFC 4193)
-prefix[1..8] = SHA-256(NetworkAuthorityPubKey)[0..7]  // 7 bytes
-```
-
-This gives each constellation network a unique `/64` within the `fd00::/8` ULA range. The probability of collision is negligible (2⁻⁵⁶).
-
-### 6.3 Full IPv6 Address
-
-```
-addr[0..8]  = network prefix  (fd + 7 bytes from network key hash)
-addr[8..16] = ShortAddr        (8 bytes from SHA-256(NodePubKey))
-```
-
-**Example**:
-```
-Network key hash: a3 b7 c2 e8 1b 4d 90
-Node ShortAddr:   ee f1 9d bb 92 48 3d 89
-
-IPv6 address:     fda3:b7c2:e81b:4d90:eef1:9dbb:9248:3d89
-```
-
-### 6.4 Transport Implications
-
-| Transport | Address Usage |
-|-----------|---------------|
-| **BLE** | ShortAddr in advertisements and L2CAP; IPv6 not used on the wire |
-| **WiFi** | Full IPv6 address assigned to the interface; direct UDP/TCP |
-| **LoRa** | ShortAddr only (bandwidth-constrained) |
-
-When WiFi transport is added, nodes bind their derived IPv6 address to the WiFi interface, enabling seamless mesh-layer to IP-layer bridging without address translation.
-
-### 6.5 Backward Compatibility
-
-The `ShortAddr` type remains `[u8; 8]` throughout the codebase. IPv6 addresses are constructed only at the transport boundary. No changes to routing tables, peer entries, or packet headers are required.
-
----
-
-## 7. Constants
-
-```
-PROTOCOL_VERSION          = 0x01
-H2H_CYCLE_SECS            = 60
-H2H_MAX_PEER_ENTRIES       = 8
-H2H_CONNECTION_TIMEOUT_SECS = 5
-H2H_PSM                   = 0x0081
-H2H_MTU                   = 128
-CONSTELLATION_COMPANY_ID   = 0x1234
-DISCOVERY_PAYLOAD_SIZE     = 10
-PEER_INFO_SIZE             = 11
-TICK_HZ                    = 1_000_000 (Embassy ESP32 default)
-WEIGHT_SCALE               = 10_000
-DIRECT_WEIGHT_FLOOR        = 2_500
-MAX_PEERS                  = 32
-```
