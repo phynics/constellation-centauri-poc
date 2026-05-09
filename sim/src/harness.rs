@@ -25,6 +25,8 @@ use crate::sim_state::{
     MAX_NODES,
 };
 use crate::store_forward::RetainedMessage;
+use routing_core::config::{BROADCAST_ADDR, DEFAULT_TTL};
+use routing_core::protocol::packet::PACKET_TYPE_DATA;
 
 pub struct SimHarness {
     runtime: SimRuntime,
@@ -122,6 +124,78 @@ impl SimHarness {
             .back()
             .map(|trace| trace.id)
             .expect("expected trace to exist after send")
+    }
+
+    pub fn inject_message_with_id(
+        &self,
+        from: usize,
+        to: usize,
+        kind: MessageKind,
+        body: impl Into<String>,
+        message_id: [u8; 8],
+    ) -> u64 {
+        let body = body.into();
+        let is_broadcast = to == BROADCAST_NODE;
+        let destination_idx = if is_broadcast { from } else { to };
+        let cfg = self.config();
+        let source_caps = cfg.capabilities[from];
+        let target_caps = if is_broadcast {
+            0
+        } else {
+            cfg.capabilities[destination_idx]
+        };
+        let dst_addr = if is_broadcast {
+            BROADCAST_ADDR
+        } else {
+            self.runtime.node_infos[destination_idx].short_addr
+        };
+        let link_enabled_at_send = if is_broadcast {
+            true
+        } else {
+            cfg.link_enabled[from][destination_idx]
+        };
+        let drop_prob_at_send = if is_broadcast {
+            0
+        } else {
+            cfg.drop_prob[from][destination_idx]
+        };
+
+        let trace_id = {
+            let mut state = self.runtime.tui_state.lock().unwrap();
+            state.create_trace(
+                from,
+                to,
+                kind,
+                body,
+                source_caps,
+                target_caps,
+                PACKET_TYPE_DATA,
+                if is_broadcast { routing_core::protocol::packet::FLAG_BROADCAST } else { 0 },
+                dst_addr,
+                is_broadcast,
+                link_enabled_at_send,
+                drop_prob_at_send,
+                message_id,
+                DEFAULT_TTL,
+            )
+        };
+
+        let msg = crate::medium::SimDataMessage {
+            trace_id,
+            from_idx: from,
+            to_idx: to,
+            is_broadcast,
+            sender_idx: from,
+            message_id,
+            ttl: DEFAULT_TTL,
+            hop_count: 0,
+        };
+
+        pollster::block_on(async {
+            self.runtime.medium.msg_inbox[from].send(msg).await;
+        });
+
+        trace_id
     }
 
     pub fn wait_for_trace_terminal(&self, trace_id: u64, timeout: Duration) -> MessageTrace {
@@ -416,6 +490,114 @@ impl SimHarness {
             let _ = initiator.finish_h2h_session().await;
             true
         })
+    }
+
+    pub fn run_lpn_wake_without_delivery_ack(&self, initiator_idx: usize, peer_idx: usize) -> bool {
+        let mut initiator = SimInitiator::new(
+            initiator_idx,
+            self.runtime.medium,
+            self.runtime.node_infos,
+            self.runtime.sim_config.clone(),
+        );
+        pollster::block_on(async {
+            let capabilities = self.runtime.sim_config.lock().unwrap().capabilities[initiator_idx];
+            let peer_short = self.runtime.node_infos[peer_idx].short_addr;
+            let peer_mac = self.runtime.node_infos[peer_idx].mac;
+            let payload = build_h2h_payload(
+                &self.runtime.identities[initiator_idx],
+                capabilities,
+                &self.runtime.uptimes[initiator_idx],
+                &self.runtime.routing_tables[initiator_idx],
+                &peer_short,
+            )
+            .await;
+
+            let Ok(peer_payload) = initiator.initiate_h2h(peer_mac, &payload).await else {
+                let _ = initiator.finish_h2h_session().await;
+                return false;
+            };
+            {
+                let transport = TransportAddr::ble(peer_mac);
+                let mut table = self.runtime.routing_tables[initiator_idx].lock().await;
+                table.update_peer_from_h2h(
+                    &peer_payload,
+                    peer_short,
+                    transport,
+                    embassy_time::Instant::now().as_ticks(),
+                );
+            }
+
+            loop {
+                match with_timeout(
+                    embassy_time::Duration::from_millis(500),
+                    initiator.receive_h2h_frame(),
+                )
+                .await
+                {
+                    Ok(Ok(H2hFrame::DeliverySummary { pending_count, .. })) => {
+                        if pending_count == 0 {
+                            continue;
+                        }
+                    }
+                    Ok(Ok(H2hFrame::DeliveryData { trace_id, .. })) => {
+                        self.runtime.tui_state.lock().unwrap().push_trace_event(
+                            trace_id,
+                            initiator_idx,
+                            0,
+                            0,
+                            TraceEventKind::LpnWakeSync {
+                                router_node: peer_idx,
+                            },
+                            format!(
+                                "LPN {} woke router {} for delayed-delivery sync (ack intentionally withheld)",
+                                initiator_idx, peer_idx
+                            ),
+                        );
+                        self.runtime.tui_state.lock().unwrap().push_trace_event(
+                            trace_id,
+                            initiator_idx,
+                            0,
+                            0,
+                            TraceEventKind::DeliveredFromStore {
+                                router_node: peer_idx,
+                            },
+                            format!(
+                                "LPN {} received retained delivery from router {} without sending ack",
+                                initiator_idx, peer_idx
+                            ),
+                        );
+                        self.runtime
+                            .tui_state
+                            .lock()
+                            .unwrap()
+                            .mark_trace_delivered(trace_id);
+                        let _ = initiator.send_h2h_frame(&H2hFrame::SessionDone).await;
+                    }
+                    Ok(Ok(H2hFrame::SessionDone)) => break,
+                    Ok(Ok(_)) => {}
+                    Ok(Err(_)) | Err(_) => break,
+                }
+            }
+
+            let _ = initiator.finish_h2h_session().await;
+            true
+        })
+    }
+
+    pub fn trace_event_count(
+        &self,
+        trace_id: u64,
+        predicate: impl Fn(&TraceEventKind) -> bool,
+    ) -> usize {
+        self.trace(trace_id)
+            .map(|trace| {
+                trace
+                    .events
+                    .iter()
+                    .filter(|event| predicate(&event.kind))
+                    .count()
+            })
+            .unwrap_or(0)
     }
 
     pub fn trace(&self, trace_id: u64) -> Option<MessageTrace> {
