@@ -46,9 +46,16 @@ const NETWORK_MARKER_LEN: usize = 33;
 const EMPTY_CAPABILITIES: [u8; 2] = [0u8; 2];
 const EMPTY_PUBKEY: [u8; 32] = [0xFFu8; 32];
 const EMPTY_SIGNATURE: [u8; 64] = [0xFFu8; 64];
+/// 128-bit UUID for the onboarding service, in **BLE little-endian** wire order.
+///
+/// The UUID `43d7aa10-5f4b-4c84-a100-000000000001` in RFC 4122 big-endian is
+/// `[43 d7 aa 10 5f 4b 4c 84 a1 00 00 00 00 00 00 01]`, but the BLE spec
+/// (Core Spec Vol 3, Part B §2.5.1) requires 128-bit UUIDs in advertising
+/// data to be transmitted in little-endian byte order. `trouble-host` writes
+/// the raw bytes as-is, so we must provide the LE-reversed form here.
 pub const ONBOARDING_SERVICE_UUID_BYTES: [u8; 16] = [
-    0x43, 0xd7, 0xaa, 0x10, 0x5f, 0x4b, 0x4c, 0x84, 0xa1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x01,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa1, 0x84, 0x4c, 0x4b, 0x5f, 0x10, 0xaa, 0xd7,
+    0x43,
 ];
 
 #[gatt_server(connections_max = 1, mutex_type = NoopRawMutex, attribute_table_size = 80)]
