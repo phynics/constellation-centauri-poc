@@ -9,26 +9,18 @@ use blew::gatt::props::{AttributePermissions, CharacteristicProperties};
 use blew::gatt::service::{GattCharacteristic, GattService};
 use blew::peripheral::{AdvertisingConfig, PeripheralRequest, PeripheralStateEvent};
 use blew::{Central, Peripheral};
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_sync::mutex::Mutex as AsyncMutex;
-use embassy_time::Timer;
-use routing_core::behavior::{run_heartbeat_loop, run_initiator_loop, run_responder_loop};
 use routing_core::crypto::identity::NodeIdentity;
 use routing_core::onboarding::{
     is_constellation_protocol_signature, parse_network_marker, NetworkMarker, NodeCertificate,
 };
-use routing_core::routing::table::RoutingTable;
-use tokio::sync::mpsc as async_mpsc;
 use tokio::sync::watch;
 use tokio_stream::StreamExt as _;
 
 use super::constants::{
     AUTHORITY_PUBKEY_CHAR_UUID, CAPABILITIES_CHAR_UUID, CERT_CAPABILITIES_CHAR_UUID,
-    CERT_SIGNATURE_CHAR_UUID, COMMIT_ENROLLMENT_CHAR_UUID, L2CAP_PSM_CHAR_UUID, NETWORK_MARKER_CHAR_UUID,
+    CERT_SIGNATURE_CHAR_UUID, COMMIT_ENROLLMENT_CHAR_UUID, NETWORK_MARKER_CHAR_UUID,
     NODE_PUBKEY_CHAR_UUID, ONBOARDING_SERVICE_UUID, PROTOCOL_SIGNATURE_CHAR_UUID, SHORT_ADDR_CHAR_UUID,
 };
-use super::network::{transport_addr_for_device_id, AcceptedSession, MacInitiator, MacResponder};
-use crate::diagnostics::state::RoutingPeerView;
 use crate::diagnostics::state::{DiscoveredPeer, SharedState};
 use crate::node::storage::LocalNodeRecord;
 use crate::runtime::CompanionCommand;
@@ -45,63 +37,6 @@ pub async fn run(
 
     central.wait_ready(std::time::Duration::from_secs(5)).await?;
     peripheral.wait_ready(std::time::Duration::from_secs(5)).await?;
-
-    let identity: &'static NodeIdentity = Box::leak(Box::new(NodeIdentity::from_bytes(&local_node.secret)));
-    let routing_table: &'static AsyncMutex<NoopRawMutex, RoutingTable> =
-        Box::leak(Box::new(AsyncMutex::new(RoutingTable::new(local_node.short_addr))));
-    let uptime: &'static AsyncMutex<NoopRawMutex, u32> =
-        Box::leak(Box::new(AsyncMutex::new(0u32)));
-
-    let initiator = MacInitiator::new(Arc::clone(&central));
-    let known_devices = initiator.known_devices();
-    let (accepted_tx, accepted_rx) = async_mpsc::channel::<AcceptedSession>(16);
-    let responder = MacResponder::new(accepted_rx);
-
-    let initiator: &'static mut MacInitiator = Box::leak(Box::new(initiator));
-    let responder: &'static mut MacResponder = Box::leak(Box::new(responder));
-
-    tokio::task::spawn_local(run_initiator_loop(
-        initiator,
-        identity,
-        local_node.capabilities,
-        routing_table,
-        uptime,
-    ));
-    tokio::task::spawn_local(run_responder_loop(
-        responder,
-        identity,
-        local_node.capabilities,
-        routing_table,
-        uptime,
-    ));
-    tokio::task::spawn_local(run_heartbeat_loop(uptime, routing_table));
-
-    let snapshot_state = Arc::clone(&shared);
-    tokio::task::spawn_local(async move {
-        loop {
-            let peers = {
-                let table = routing_table.lock().await;
-                table
-                    .peers
-                    .iter()
-                    .map(|peer| RoutingPeerView {
-                        short_addr: peer.short_addr,
-                        capabilities: peer.capabilities,
-                        trust: peer.trust,
-                        hop_count: peer.hop_count,
-                        last_seen_ticks: peer.last_seen_ticks,
-                        transport_len: peer.transport_addr.len,
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let up = *uptime.lock().await;
-            snapshot_state
-                .lock()
-                .unwrap()
-                .update_routing_snapshot(up, peers);
-            Timer::after(embassy_time::Duration::from_secs(1)).await;
-        }
-    });
 
     peripheral
         .add_service(&GattService {
@@ -143,19 +78,9 @@ pub async fn run(
                     value: vec![],
                     descriptors: vec![],
                 },
-                GattCharacteristic {
-                    uuid: L2CAP_PSM_CHAR_UUID,
-                    properties: CharacteristicProperties::READ,
-                    permissions: AttributePermissions::READ,
-                    value: vec![],
-                    descriptors: vec![],
-                },
             ],
         })
         .await?;
-
-    let (psm, mut incoming_l2cap) = peripheral.l2cap_listener().await?;
-    let psm_bytes = psm.value().to_le_bytes().to_vec();
 
     let mut requests = peripheral.take_requests().ok_or("peripheral request stream already taken")?;
     let mut peripheral_state = peripheral.state_events();
@@ -171,7 +96,7 @@ pub async fn run(
         let mut state = shared.lock().unwrap();
         state.scanning = true;
         state.advertising = true;
-        state.push_event(format!("BLE scan + advertising started (l2cap psm={})", psm.value()));
+        state.push_event("BLE scan + advertising started");
     }
 
     central
@@ -188,6 +113,7 @@ pub async fn run(
         if let Ok(command) = cmd_rx.lock().unwrap().try_recv() {
             match command {
                 CompanionCommand::EnrollSelected(device_id) => {
+                    shared.lock().unwrap().push_event(format!("enrolling {device_id}..."));
                     match enroll_device(&central, &shared, &local_node, &device_id).await {
                         Ok(()) => {
                             shared.lock().unwrap().push_event(format!("commit sent to {device_id}; waiting for reboot + rediscovery"));
@@ -215,11 +141,6 @@ pub async fn run(
                         shared.lock().unwrap().push_event(format!("central adapter powered={powered}"));
                     }
                     CentralEvent::DeviceDiscovered(device) => {
-                        let transport_addr = transport_addr_for_device_id(&device.id);
-                        known_devices
-                            .lock()
-                            .unwrap()
-                            .insert(transport_addr, device.id.clone());
                         let peer = DiscoveredPeer {
                             id: device.id.to_string(),
                             name: device.name.clone(),
@@ -267,33 +188,9 @@ pub async fn run(
                     }
                 }
             }
-            incoming = incoming_l2cap.next() => {
-                let Some(incoming) = incoming else { break; };
-                match incoming {
-                    Ok((device_id, channel)) => {
-                        let transport_addr = transport_addr_for_device_id(&device_id);
-                        shared.lock().unwrap().push_event(format!(
-                            "accepted l2cap session from {} ({:02x?})",
-                            device_id,
-                            &transport_addr.addr[..transport_addr.len as usize]
-                        ));
-                        let session = AcceptedSession {
-                            device_id,
-                            transport_addr,
-                            channel,
-                        };
-                        if accepted_tx.send(session).await.is_err() {
-                            shared.lock().unwrap().push_event("dropped accepted l2cap session".to_string());
-                        }
-                    }
-                    Err(err) => {
-                        shared.lock().unwrap().push_event(format!("l2cap accept error: {err}"));
-                    }
-                }
-            }
             request = requests.next() => {
                 let Some(request) = request else { break; };
-                handle_peripheral_request(&local_node, &psm_bytes, request, &shared);
+                handle_peripheral_request(&local_node, request, &shared);
             }
         }
     }
@@ -311,7 +208,6 @@ pub async fn run(
 
 fn handle_peripheral_request(
     local_node: &LocalNodeRecord,
-    psm_bytes: &[u8],
     request: PeripheralRequest,
     shared: &Arc<Mutex<SharedState>>,
 ) {
@@ -332,8 +228,6 @@ fn handle_peripheral_request(
                 local_node.capabilities.to_le_bytes().to_vec()
             } else if char_uuid == SHORT_ADDR_CHAR_UUID {
                 local_node.short_addr.to_vec()
-            } else if char_uuid == L2CAP_PSM_CHAR_UUID {
-                psm_bytes.to_vec()
             } else {
                 Vec::new()
             };
