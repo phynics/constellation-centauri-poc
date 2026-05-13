@@ -5,10 +5,14 @@ use crate::crypto::identity::{verify, NodeIdentity, ShortAddr, Signature};
 use rand_core::RngCore;
 
 pub const PACKET_TYPE_HEARTBEAT: u8 = 0x01;
-pub const PACKET_TYPE_DATA: u8 = 0x02;
-pub const PACKET_TYPE_DATA_ENCRYPTED: u8 = 0x03;
+pub const PACKET_TYPE_FRAME_INFRA: u8 = 0x02;
+pub const PACKET_TYPE_FRAME_APP: u8 = 0x03;
 pub const PACKET_TYPE_ANNOUNCE: u8 = 0x04;
 pub const PACKET_TYPE_ACK: u8 = 0x05;
+
+// Backwards-compatible aliases while call sites are migrated.
+pub const PACKET_TYPE_DATA: u8 = PACKET_TYPE_FRAME_INFRA;
+pub const PACKET_TYPE_DATA_ENCRYPTED: u8 = PACKET_TYPE_FRAME_APP;
 
 pub const FLAG_ACK_REQUESTED: u8 = 0b0000_0001;
 pub const FLAG_FRAGMENTED: u8 = 0b0000_0010;
@@ -156,8 +160,8 @@ impl PacketHeader {
 
     /// Sign the packet header and payload.
     ///
-    /// Signature covers: [version, type, flags, ttl, src, dst, message_id, payload]
-    /// Note: hop_count is NOT signed since relays increment it.
+    /// Signature covers: [version, type, flags, src, dst, message_id, payload]
+    /// Note: hop_count and ttl are NOT signed since relays mutate them.
     pub fn sign(&mut self, identity: &NodeIdentity, payload: &[u8]) {
         let signable_data = self.build_signable_data(payload);
         self.signature = identity.sign(&signable_data);
@@ -171,7 +175,7 @@ impl PacketHeader {
 
     /// Build the data that should be signed/verified.
     ///
-    /// Includes all header fields except hop_count and signature, plus payload.
+    /// Includes all header fields except ttl, hop_count, and signature, plus payload.
     fn build_signable_data(&self, payload: &[u8]) -> heapless::Vec<u8, 256> {
         let mut data = heapless::Vec::new();
 
@@ -180,9 +184,6 @@ impl PacketHeader {
 
         // flags
         let _ = data.push(self.flags);
-
-        // ttl
-        let _ = data.push(self.ttl);
 
         // src (8 bytes)
         let _ = data.extend_from_slice(&self.src);

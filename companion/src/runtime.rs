@@ -11,6 +11,9 @@ use crate::node::storage::{load_or_create_local_node, LocalNodeRecord};
 #[derive(Clone, Debug)]
 pub enum CompanionCommand {
     EnrollSelected(String),
+    ResetNetworkKey,
+    SendPing { short_addr: [u8; 8] },
+    SendMessage { short_addr: [u8; 8], body: String },
 }
 
 pub struct CompanionRuntime {

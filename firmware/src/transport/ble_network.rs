@@ -28,6 +28,7 @@ use routing_core::config::{H2H_CONNECTION_TIMEOUT_SECS, H2H_MTU, H2H_PSM};
 use routing_core::crypto::identity::{NodeIdentity, ShortAddr};
 use routing_core::network::{
     DiscoveryEvent, H2hInitiator, H2hResponder, InboundH2h, NetworkError, MAX_SCAN_RESULTS,
+    SESSION_KIND_H2H, SESSION_KIND_ROUTED,
 };
 use routing_core::onboarding::{CONSTELLATION_PROTOCOL_SIGNATURE, ONBOARDING_READY_MARKER};
 use routing_core::protocol::h2h::{H2hFrame, H2hPayload};
@@ -328,6 +329,14 @@ pub struct BleResponder<'stack, C: Controller> {
     )>,
 }
 
+pub enum InboundBleSession {
+    H2h(InboundH2h),
+    Routed {
+        peer_transport_addr: TransportAddr,
+        payload: Vec<u8, 512>,
+    },
+}
+
 impl<'stack, C: Controller> BleResponder<'stack, C> {
     pub fn new(
         peripheral: Peripheral<'stack, C, DefaultPacketPool>,
@@ -352,15 +361,9 @@ impl<'stack, C: Controller> BleResponder<'stack, C> {
             pending: None,
         }
     }
-}
 
-impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
-    async fn receive_h2h(&mut self) -> Result<InboundH2h, NetworkError> {
-        // Drop any stale pending state from a previous (failed) exchange.
-        self.pending = None;
-
+    pub async fn receive_session(&mut self) -> Result<InboundBleSession, NetworkError> {
         'advertise: loop {
-            // Build advertisement
             let mut disc_buf = [0u8; DISCOVERY_PAYLOAD_SIZE];
             if serialize_discovery(&self.identity_short, self.capabilities, &mut disc_buf).is_none()
             {
@@ -380,17 +383,12 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
                 &mut adv_data[..],
             ) {
                 Ok(len) => len,
-                Err(e) => {
-                    esp_println::println!("[periph] AD encode error: {:?}", e);
+                Err(_) => {
                     Timer::after(Duration::from_secs(1)).await;
                     continue;
                 }
             };
 
-            // Service UUID goes in scan response — 128-bit UUID (18 bytes)
-            // doesn't fit in the 31-byte advertising data alongside flags +
-            // manufacturer data (combined 35 bytes). CoreBluetooth checks
-            // scan response data for service UUIDs when filtering scans.
             let mut scan_data = [0u8; 31];
             let scan_len = match AdStructure::encode_slice(
                 &[AdStructure::CompleteServiceUuids128(&[
@@ -399,10 +397,7 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
                 &mut scan_data[..],
             ) {
                 Ok(len) => len,
-                Err(e) => {
-                    esp_println::println!("[periph] Scan response encode error: {:?}", e);
-                    0
-                }
+                Err(_) => 0,
             };
 
             let advertiser = match self
@@ -417,8 +412,7 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
                 .await
             {
                 Ok(a) => a,
-                Err(e) => {
-                    log::warn!("[periph] Advertise error: {:?}", e);
+                Err(_) => {
                     Timer::after(Duration::from_secs(3)).await;
                     continue;
                 }
@@ -426,33 +420,17 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
 
             let conn = match advertiser.accept().await {
                 Ok(c) => c,
-                Err(e) => {
-                    log::warn!("[periph] Accept error: {:?}", e);
-                    continue;
-                }
+                Err(_) => continue,
             };
             let gatt_conn = match conn.with_attribute_server(&self.server) {
                 Ok(c) => c,
-                Err(e) => {
-                    log::warn!("[periph] GATT attach error: {:?}", e);
-                    continue;
-                }
+                Err(_) => continue,
             };
-
-            log::debug!(
-                "[periph] Connection from {:02x?}",
-                gatt_conn.raw().peer_address().addr.raw()
-            );
 
             let l2cap_config = L2capChannelConfig {
                 mtu: Some(H2H_MTU),
                 ..Default::default()
             };
-
-            // trouble-host now models inbound CoC setup as a pending listener on
-            // the already-accepted BLE connection. Accepting here keeps the
-            // channel open across the whole H2H session, including delayed-
-            // delivery follow-up frames added above the base peer-sync exchange.
             let listener = L2capChannel::listen(self.stack, gatt_conn.raw());
             let mut channel = loop {
                 match select(
@@ -469,53 +447,67 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
                 {
                     Either::First(result) => match result {
                         Ok(ch) => break ch,
-                        Err(e) => {
-                            log::warn!("[periph] L2CAP accept error: {:?}", e);
-                            continue 'advertise;
-                        }
+                        Err(_) => continue 'advertise,
                     },
                     Either::Second(result) => match result {
                         Ok(true) => continue,
-                        Ok(false) => continue 'advertise,
-                        Err(e) => {
-                            log::warn!("[periph] GATT event error: {:?}", e);
-                            continue 'advertise;
-                        }
+                        Ok(false) | Err(_) => continue 'advertise,
                     },
                 }
             };
 
-            // Receive peer's payload
             let mut rx_buf = [0u8; 512];
             let rx_len = match channel.receive(self.stack, &mut rx_buf).await {
                 Ok(n) => n,
-                Err(e) => {
-                    log::warn!("[periph] L2CAP rx error: {:?}", e);
-                    continue;
-                }
+                Err(_) => continue,
             };
-
-            let peer_payload = match H2hPayload::deserialize(&rx_buf[..rx_len]) {
-                Ok(p) => p,
-                Err(_) => {
-                    log::warn!("[periph] H2H deserialize FAILED ({} bytes)", rx_len);
-                    continue;
-                }
-            };
+            if rx_len < 2 {
+                continue;
+            }
 
             let mut peer_mac = [0u8; 6];
             peer_mac.copy_from_slice(gatt_conn.raw().peer_address().addr.raw());
             let peer_transport_addr = TransportAddr::ble(peer_mac);
 
-            // Store connection + channel for send_h2h_response
-            let conn = gatt_conn.raw().clone();
-            drop(gatt_conn);
-            self.pending = Some((conn, channel));
+            match rx_buf[0] {
+                SESSION_KIND_H2H => {
+                    let peer_payload = match H2hPayload::deserialize(&rx_buf[1..rx_len]) {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    };
+                    let conn = gatt_conn.raw().clone();
+                    drop(gatt_conn);
+                    self.pending = Some((conn, channel));
+                    return Ok(InboundBleSession::H2h(InboundH2h {
+                        peer_transport_addr,
+                        peer_payload,
+                    }));
+                }
+                SESSION_KIND_ROUTED => {
+                    let mut payload = Vec::new();
+                    if payload.extend_from_slice(&rx_buf[1..rx_len]).is_err() {
+                        continue;
+                    }
+                    drop(channel);
+                    drop(gatt_conn);
+                    return Ok(InboundBleSession::Routed {
+                        peer_transport_addr,
+                        payload,
+                    });
+                }
+                _ => continue,
+            }
+        }
+    }
+}
 
-            return Ok(InboundH2h {
-                peer_transport_addr,
-                peer_payload,
-            });
+impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
+    async fn receive_h2h(&mut self) -> Result<InboundH2h, NetworkError> {
+        loop {
+            match self.receive_session().await? {
+                InboundBleSession::H2h(inbound) => return Ok(inbound),
+                InboundBleSession::Routed { .. } => continue,
+            }
         }
     }
 
@@ -523,12 +515,13 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
         let (_conn, channel) = self.pending.as_mut().ok_or(NetworkError::ProtocolError)?;
 
         let mut tx_buf = [0u8; 512];
+        tx_buf[0] = SESSION_KIND_H2H;
         let tx_len = payload
-            .serialize(&mut tx_buf)
+            .serialize(&mut tx_buf[1..])
             .map_err(|_| NetworkError::ProtocolError)?;
 
         channel
-            .send(self.stack, &tx_buf[..tx_len])
+            .send(self.stack, &tx_buf[..tx_len + 1])
             .await
             .map_err(|e| {
                 log::warn!("[periph] L2CAP send error: {:?}", e);
@@ -625,6 +618,64 @@ where
             discovery_rx,
             pending: None,
         }
+    }
+
+    pub async fn send_routed_packet(
+        &mut self,
+        peer_transport_addr: TransportAddr,
+        packet: &[u8],
+    ) -> Result<(), NetworkError> {
+        let peer_mac = peer_transport_addr
+            .as_ble_mac()
+            .ok_or(NetworkError::ProtocolError)?;
+        let central = self
+            .central
+            .as_mut()
+            .expect("BleInitiator: central missing during send_routed_packet");
+
+        let target = Address::random(peer_mac);
+        let connect_config = ConnectConfig {
+            scan_config: ScanConfig {
+                filter_accept_list: &[target],
+                timeout: Duration::from_secs(H2H_CONNECTION_TIMEOUT_SECS),
+                ..Default::default()
+            },
+            connect_params: Default::default(),
+        };
+
+        let conn = central.connect(&connect_config).await.map_err(|e| {
+            log::warn!("[central] Routed connect failed: {:?}", e);
+            NetworkError::ConnectionFailed
+        })?;
+
+        let l2cap_config = L2capChannelConfig {
+            mtu: Some(H2H_MTU),
+            ..Default::default()
+        };
+
+        let mut channel = L2capChannel::create(self.stack, &conn, H2H_PSM, &l2cap_config)
+            .await
+            .map_err(|e| {
+                log::warn!("[central] Routed L2CAP create error: {:?}", e);
+                NetworkError::ConnectionFailed
+            })?;
+
+        let mut tx_buf = [0u8; 512];
+        if packet.len() + 1 > tx_buf.len() {
+            return Err(NetworkError::ProtocolError);
+        }
+        tx_buf[0] = SESSION_KIND_ROUTED;
+        tx_buf[1..1 + packet.len()].copy_from_slice(packet);
+
+        channel
+            .send(self.stack, &tx_buf[..1 + packet.len()])
+            .await
+            .map_err(|e| {
+                log::warn!("[central] Routed send error: {:?}", e);
+                NetworkError::ConnectionFailed
+            })?;
+
+        Ok(())
     }
 }
 
@@ -727,12 +778,13 @@ where
 
         // Initiator sends first
         let mut tx_buf = [0u8; 512];
+        tx_buf[0] = SESSION_KIND_H2H;
         let tx_len = our_payload
-            .serialize(&mut tx_buf)
+            .serialize(&mut tx_buf[1..])
             .map_err(|_| NetworkError::ProtocolError)?;
 
         channel
-            .send(self.stack, &tx_buf[..tx_len])
+            .send(self.stack, &tx_buf[..tx_len + 1])
             .await
             .map_err(|e| {
                 log::warn!("[central] L2CAP send error: {:?}", e);
@@ -748,9 +800,12 @@ where
                 log::warn!("[central] L2CAP rx error: {:?}", e);
                 NetworkError::ConnectionFailed
             })?;
+        if rx_len < 2 || rx_buf[0] != SESSION_KIND_H2H {
+            return Err(NetworkError::ProtocolError);
+        }
 
         let peer_payload =
-            H2hPayload::deserialize(&rx_buf[..rx_len]).map_err(|_| NetworkError::ProtocolError)?;
+            H2hPayload::deserialize(&rx_buf[1..rx_len]).map_err(|_| NetworkError::ProtocolError)?;
 
         // Keep the session alive so higher layers can exchange delayed-delivery
         // control/data frames before explicitly closing the connection.

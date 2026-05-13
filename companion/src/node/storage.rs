@@ -34,7 +34,7 @@ struct PersistedNode {
 pub fn load_or_create_local_node() -> Result<LocalNodeRecord, Box<dyn Error>> {
     let storage_dir = storage_dir()?;
     fs::create_dir_all(&storage_dir)?;
-    let path = storage_dir.join("node.json");
+    let path = node_path(&storage_dir);
 
     let persisted = if path.exists() {
         serde_json::from_slice::<PersistedNode>(&fs::read(&path)?)?
@@ -82,12 +82,38 @@ pub fn load_or_create_local_node() -> Result<LocalNodeRecord, Box<dyn Error>> {
     })
 }
 
+pub fn regenerate_network_authority() -> Result<LocalNodeRecord, Box<dyn Error>> {
+    let storage_dir = storage_dir()?;
+    fs::create_dir_all(&storage_dir)?;
+    let path = node_path(&storage_dir);
+
+    let persisted = if path.exists() {
+        serde_json::from_slice::<PersistedNode>(&fs::read(&path)?)?
+    } else {
+        load_or_create_local_node()?;
+        serde_json::from_slice::<PersistedNode>(&fs::read(&path)?)?
+    };
+
+    let repaired = PersistedNode {
+        secret_hex: persisted.secret_hex,
+        authority_secret_hex: hex(&new_secret()),
+        capabilities: persisted.capabilities,
+        network_marker_hex: hex(ONBOARDING_READY_MARKER),
+    };
+    fs::write(&path, serde_json::to_vec_pretty(&repaired)?)?;
+    load_or_create_local_node()
+}
+
 fn storage_dir() -> Result<PathBuf, Box<dyn Error>> {
     if let Ok(dir) = env::var("CONSTELLATION_COMPANION_HOME") {
         return Ok(PathBuf::from(dir));
     }
     let home = env::var("HOME")?;
     Ok(Path::new(&home).join(".constellation").join("companion"))
+}
+
+fn node_path(storage_dir: &Path) -> PathBuf {
+    storage_dir.join("node.json")
 }
 
 fn new_secret() -> [u8; 32] {

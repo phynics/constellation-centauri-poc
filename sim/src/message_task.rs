@@ -5,11 +5,10 @@ use std::sync::{Arc, Mutex};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex as AsyncMutex;
 use embassy_time::{Duration, Timer};
-use heapless::Vec as HeaplessVec;
 use rand::Rng as _;
 
-use routing_core::config::BROADCAST_ADDR;
 use routing_core::config::DEFAULT_TTL;
+use routing_core::message::{broadcast_destination, route_message, MessageDecision, RoutedMessage};
 use routing_core::node::roles::Capabilities;
 use routing_core::protocol::packet::PACKET_TYPE_DATA;
 use routing_core::routing::table::RoutingTable;
@@ -52,75 +51,35 @@ pub async fn run_message_loop(
             );
         }
 
-        if msg.ttl == 0 {
-            let mut state = tui_state.lock().unwrap();
-            state.push_trace_event(
-                msg.trace_id,
-                node_idx,
-                msg.ttl,
-                msg.hop_count,
-                TraceEventKind::TtlExpired,
-                "ttl exhausted before processing",
-            );
-            state.set_trace_terminal_status(msg.trace_id, TraceStatus::TtlExpired);
-            continue;
-        }
-
-        {
-            let mut table = routing_table.lock().await;
-            if table.seen.check_and_insert(&msg.message_id) {
-                let mut state = tui_state.lock().unwrap();
-                state.push_trace_event(
-                    msg.trace_id,
-                    node_idx,
-                    msg.ttl,
-                    msg.hop_count,
-                    TraceEventKind::Deduped,
-                    "dedup rejected packet",
-                );
-                state.set_trace_terminal_status(msg.trace_id, TraceStatus::Deduped);
-                continue;
-            }
-        }
-
-        if !msg.is_broadcast && node_idx == msg.to_idx {
-            let mut state = tui_state.lock().unwrap();
-            state.push_trace_event(
-                msg.trace_id,
-                node_idx,
-                msg.ttl,
-                msg.hop_count,
-                TraceEventKind::Delivered,
-                "destination consumed packet",
-            );
-            state.mark_trace_delivered(msg.trace_id);
-            state.msgs_received[node_idx] = state.msgs_received[node_idx].saturating_add(1);
-            continue;
-        }
-
-        let dst_addr = if msg.is_broadcast {
-            BROADCAST_ADDR
+        let destination = if msg.is_broadcast {
+            broadcast_destination()
         } else {
             all_nodes[msg.to_idx].short_addr
         };
-        let candidates: HeaplessVec<([u8; 8], routing_core::transport::TransportAddr), 8> = {
-            let table = routing_table.lock().await;
-            if msg.is_broadcast {
-                let mut peers = HeaplessVec::new();
-                for peer in table.peers.iter() {
-                    if peer.trust <= routing_core::routing::table::TRUST_EXPIRED
-                        || peer.transport_addr.is_empty()
-                    {
-                        continue;
-                    }
-                    if peers.push((peer.short_addr, peer.transport_addr)).is_err() {
-                        break;
-                    }
-                }
-                peers
-            } else {
-                table.forwarding_candidates(&dst_addr)
-            }
+        let destination_is_low_power = !msg.is_broadcast && {
+            let cfg = sim_config.lock().unwrap();
+            Capabilities::is_low_power_endpoint_bits(cfg.capabilities[msg.to_idx])
+        };
+        let holder_caps = {
+            let cfg = sim_config.lock().unwrap();
+            cfg.capabilities[node_idx]
+        };
+        let routed = RoutedMessage {
+            destination,
+            is_broadcast: msg.is_broadcast,
+            message_id: msg.message_id,
+            ttl: msg.ttl,
+            hop_count: msg.hop_count,
+        };
+        let decision = {
+            let mut table = routing_table.lock().await;
+            route_message(
+                &mut table,
+                holder_caps,
+                destination_is_low_power,
+                all_nodes[node_idx].short_addr,
+                &routed,
+            )
         };
 
         if msg.is_broadcast {
@@ -136,222 +95,245 @@ pub async fn run_message_loop(
             );
         }
 
-        if candidates.is_empty() {
-            let destination_is_low_power = !msg.is_broadcast && {
-                let cfg = sim_config.lock().unwrap();
-                Capabilities::is_low_power_endpoint_bits(cfg.capabilities[msg.to_idx])
-            };
-            let holder_caps = {
-                let cfg = sim_config.lock().unwrap();
-                cfg.capabilities[node_idx]
-            };
-
-            if destination_is_low_power && Capabilities::is_store_router_bits(holder_caps) {
-                let body = tui_state
-                    .lock()
-                    .unwrap()
-                    .traces
-                    .iter()
-                    .find(|trace| trace.id == msg.trace_id)
-                    .map(|trace| trace.body.clone())
-                    .unwrap_or_default();
-                let now_secs = tui_state.lock().unwrap().elapsed_secs;
-                let retained = store_forward_state.lock().unwrap().retain(RetainedMessage {
-                    trace_id: msg.trace_id,
-                    message_id: msg.message_id,
-                    from_idx: msg.from_idx,
-                    to_idx: msg.to_idx,
-                    holder_idx: node_idx,
-                    owner_router_idx: node_idx,
-                    body,
-                    enqueued_at_secs: now_secs,
-                    announced: false,
-                });
-
-                if retained {
-                    let mut state = tui_state.lock().unwrap();
-                    state.push_trace_event(
-                        msg.trace_id,
-                        node_idx,
-                        msg.ttl,
-                        msg.hop_count,
-                        TraceEventKind::Deferred,
-                        format!(
-                            "router {} retained packet for low-power destination {}",
-                            node_idx, msg.to_idx
-                        ),
-                    );
-                    continue;
-                }
-            }
-
-            let mut state = tui_state.lock().unwrap();
-            state.push_trace_event(
-                msg.trace_id,
-                node_idx,
-                msg.ttl,
-                msg.hop_count,
-                TraceEventKind::NoRoute,
-                "no forwarding candidate from routing table",
-            );
-            state.set_trace_terminal_status(
-                msg.trace_id,
-                if msg.is_broadcast {
-                    TraceStatus::Delivered
-                } else {
-                    TraceStatus::NoRoute
-                },
-            );
-            continue;
-        }
-
-        let mut forwarded_any = false;
-        let mut had_drop = false;
-
-        for (peer_addr, transport) in candidates.iter().copied() {
-            let next_idx = transport.addr[0] as usize;
-            if next_idx >= MAX_NODES || next_idx == msg.sender_idx || next_idx == node_idx {
-                continue;
-            }
-
-            let (active, link_enabled, drop_prob) = {
-                let cfg = sim_config.lock().unwrap();
-                (
-                    next_idx < cfg.n_active,
-                    cfg.link_enabled[node_idx][next_idx],
-                    cfg.drop_prob[node_idx][next_idx],
-                )
-            };
-
-            if !active || !link_enabled {
-                tui_state.lock().unwrap().push_trace_event(
-                    msg.trace_id,
-                    node_idx,
-                    msg.ttl,
-                    msg.hop_count,
-                    TraceEventKind::Blocked { to_node: next_idx },
-                    format!("candidate {} blocked by inactive/disabled link", next_idx),
-                );
-                continue;
-            }
-
-            if drop_prob > 0 && rand::thread_rng().gen_range(0u8..100) < drop_prob {
-                had_drop = true;
+        match decision {
+            MessageDecision::TtlExpired => {
                 let mut state = tui_state.lock().unwrap();
                 state.push_trace_event(
                     msg.trace_id,
                     node_idx,
                     msg.ttl,
                     msg.hop_count,
-                    TraceEventKind::Dropped {
-                        to_node: Some(next_idx),
+                    TraceEventKind::TtlExpired,
+                    "ttl exhausted before processing",
+                );
+                state.set_trace_terminal_status(msg.trace_id, TraceStatus::TtlExpired);
+                continue;
+            }
+            MessageDecision::Duplicate => {
+                let mut state = tui_state.lock().unwrap();
+                state.push_trace_event(
+                    msg.trace_id,
+                    node_idx,
+                    msg.ttl,
+                    msg.hop_count,
+                    TraceEventKind::Deduped,
+                    "dedup rejected packet",
+                );
+                state.set_trace_terminal_status(msg.trace_id, TraceStatus::Deduped);
+                continue;
+            }
+            MessageDecision::DeliveredLocal => {
+                let mut state = tui_state.lock().unwrap();
+                state.push_trace_event(
+                    msg.trace_id,
+                    node_idx,
+                    msg.ttl,
+                    msg.hop_count,
+                    TraceEventKind::Delivered,
+                    "destination consumed packet",
+                );
+                state.mark_trace_delivered(msg.trace_id);
+                state.msgs_received[node_idx] = state.msgs_received[node_idx].saturating_add(1);
+                continue;
+            }
+            MessageDecision::NoRoute {
+                should_retain_for_lpn,
+                ..
+            } => {
+                if should_retain_for_lpn {
+                    let body = tui_state
+                        .lock()
+                        .unwrap()
+                        .traces
+                        .iter()
+                        .find(|trace| trace.id == msg.trace_id)
+                        .map(|trace| trace.body.clone())
+                        .unwrap_or_default();
+                    let now_secs = tui_state.lock().unwrap().elapsed_secs;
+                    let retained = store_forward_state.lock().unwrap().retain(RetainedMessage {
+                        trace_id: msg.trace_id,
+                        message_id: msg.message_id,
+                        from_idx: msg.from_idx,
+                        to_idx: msg.to_idx,
+                        holder_idx: node_idx,
+                        owner_router_idx: node_idx,
+                        body,
+                        enqueued_at_secs: now_secs,
+                        announced: false,
+                    });
+
+                    if retained {
+                        let mut state = tui_state.lock().unwrap();
+                        state.push_trace_event(
+                            msg.trace_id,
+                            node_idx,
+                            msg.ttl,
+                            msg.hop_count,
+                            TraceEventKind::Deferred,
+                            format!(
+                                "router {} retained packet for low-power destination {}",
+                                node_idx, msg.to_idx
+                            ),
+                        );
+                        continue;
+                    }
+                }
+
+                let mut state = tui_state.lock().unwrap();
+                state.push_trace_event(
+                    msg.trace_id,
+                    node_idx,
+                    msg.ttl,
+                    msg.hop_count,
+                    TraceEventKind::NoRoute,
+                    "no forwarding candidate from routing table",
+                );
+                state.set_trace_terminal_status(
+                    msg.trace_id,
+                    if msg.is_broadcast {
+                        TraceStatus::Delivered
+                    } else {
+                        TraceStatus::NoRoute
                     },
-                    format!(
-                        "candidate {} dropped by simulated loss ({}%)",
-                        next_idx, drop_prob
-                    ),
                 );
                 continue;
             }
+            MessageDecision::Forward(plan) => {
+                let mut forwarded_any = false;
+                let mut had_drop = false;
 
-            let forwarded = SimDataMessage {
-                trace_id: msg.trace_id,
-                from_idx: msg.from_idx,
-                to_idx: msg.to_idx,
-                is_broadcast: msg.is_broadcast,
-                sender_idx: node_idx,
-                message_id: msg.message_id,
-                ttl: msg.ttl.saturating_sub(1),
-                hop_count: msg.hop_count.saturating_add(1),
-            };
+                for (_peer_addr, transport) in plan.candidates.iter().copied() {
+                    let next_idx = transport.addr[0] as usize;
+                    if next_idx >= MAX_NODES || next_idx == msg.sender_idx || next_idx == node_idx {
+                        continue;
+                    }
 
-            medium.msg_inbox[next_idx].send(forwarded).await;
-            forwarded_any = true;
+                    let (active, link_enabled, drop_prob) = {
+                        let cfg = sim_config.lock().unwrap();
+                        (
+                            next_idx < cfg.n_active,
+                            cfg.link_enabled[node_idx][next_idx],
+                            cfg.drop_prob[node_idx][next_idx],
+                        )
+                    };
 
-            tui_state.lock().unwrap().push_trace_event(
-                msg.trace_id,
-                node_idx,
-                msg.ttl.saturating_sub(1),
-                msg.hop_count.saturating_add(1),
-                TraceEventKind::Forwarded { to_node: next_idx },
-                format!(
-                    "forwarded to node {} via {:02x?} toward peer {:02x?}",
-                    next_idx,
-                    transport.addr,
-                    &peer_addr[..4]
-                ),
-            );
-        }
+                    if !active || !link_enabled {
+                        tui_state.lock().unwrap().push_trace_event(
+                            msg.trace_id,
+                            node_idx,
+                            msg.ttl,
+                            msg.hop_count,
+                            TraceEventKind::Blocked { to_node: next_idx },
+                            format!("candidate {} blocked by inactive/disabled link", next_idx),
+                        );
+                        continue;
+                    }
 
-        if !forwarded_any {
-            let destination_is_low_power = !msg.is_broadcast && {
-                let cfg = sim_config.lock().unwrap();
-                Capabilities::is_low_power_endpoint_bits(cfg.capabilities[msg.to_idx])
-            };
-            let holder_caps = {
-                let cfg = sim_config.lock().unwrap();
-                cfg.capabilities[node_idx]
-            };
+                    if drop_prob > 0 && rand::thread_rng().gen_range(0u8..100) < drop_prob {
+                        had_drop = true;
+                        let mut state = tui_state.lock().unwrap();
+                        state.push_trace_event(
+                            msg.trace_id,
+                            node_idx,
+                            msg.ttl,
+                            msg.hop_count,
+                            TraceEventKind::Dropped {
+                                to_node: Some(next_idx),
+                            },
+                            format!(
+                                "candidate {} dropped by simulated loss ({}%)",
+                                next_idx, drop_prob
+                            ),
+                        );
+                        continue;
+                    }
 
-            if destination_is_low_power && Capabilities::is_store_router_bits(holder_caps) {
-                let body = tui_state
-                    .lock()
-                    .unwrap()
-                    .traces
-                    .iter()
-                    .find(|trace| trace.id == msg.trace_id)
-                    .map(|trace| trace.body.clone())
-                    .unwrap_or_default();
-                let now_secs = tui_state.lock().unwrap().elapsed_secs;
-                let retained = store_forward_state.lock().unwrap().retain(RetainedMessage {
-                    trace_id: msg.trace_id,
-                    message_id: msg.message_id,
-                    from_idx: msg.from_idx,
-                    to_idx: msg.to_idx,
-                    holder_idx: node_idx,
-                    owner_router_idx: node_idx,
-                    body,
-                    enqueued_at_secs: now_secs,
-                    announced: false,
-                });
-                if retained {
+                    let forwarded = SimDataMessage {
+                        trace_id: msg.trace_id,
+                        from_idx: msg.from_idx,
+                        to_idx: msg.to_idx,
+                        is_broadcast: msg.is_broadcast,
+                        sender_idx: node_idx,
+                        message_id: msg.message_id,
+                        ttl: msg.ttl.saturating_sub(1),
+                        hop_count: msg.hop_count.saturating_add(1),
+                    };
+
+                    medium.msg_inbox[next_idx].send(forwarded).await;
+                    forwarded_any = true;
+
+                    tui_state.lock().unwrap().push_trace_event(
+                        msg.trace_id,
+                        node_idx,
+                        msg.ttl.saturating_sub(1),
+                        msg.hop_count.saturating_add(1),
+                        TraceEventKind::Forwarded { to_node: next_idx },
+                        format!("forwarded to node {} via {:02x?}", next_idx, transport.addr),
+                    );
+                }
+                if !forwarded_any {
+                    if plan.should_retain_for_lpn {
+                        let body = tui_state
+                            .lock()
+                            .unwrap()
+                            .traces
+                            .iter()
+                            .find(|trace| trace.id == msg.trace_id)
+                            .map(|trace| trace.body.clone())
+                            .unwrap_or_default();
+                        let now_secs = tui_state.lock().unwrap().elapsed_secs;
+                        let retained =
+                            store_forward_state.lock().unwrap().retain(RetainedMessage {
+                                trace_id: msg.trace_id,
+                                message_id: msg.message_id,
+                                from_idx: msg.from_idx,
+                                to_idx: msg.to_idx,
+                                holder_idx: node_idx,
+                                owner_router_idx: node_idx,
+                                body,
+                                enqueued_at_secs: now_secs,
+                                announced: false,
+                            });
+                        if retained {
+                            let mut state = tui_state.lock().unwrap();
+                            state.push_trace_event(
+                                msg.trace_id,
+                                node_idx,
+                                msg.ttl,
+                                msg.hop_count,
+                                TraceEventKind::Deferred,
+                                format!(
+                                    "router {} retained packet for low-power destination {} after transient forward failure",
+                                    node_idx, msg.to_idx
+                                ),
+                            );
+                            continue;
+                        }
+                    }
+
                     let mut state = tui_state.lock().unwrap();
                     state.push_trace_event(
                         msg.trace_id,
                         node_idx,
                         msg.ttl,
                         msg.hop_count,
-                        TraceEventKind::Deferred,
-                        format!(
-                            "router {} retained packet for low-power destination {} after transient forward failure",
-                            node_idx, msg.to_idx
-                        ),
+                        if msg.ttl <= 1 {
+                            TraceEventKind::TtlExpired
+                        } else {
+                            TraceEventKind::NoRoute
+                        },
+                        "no candidate accepted packet",
                     );
-                    continue;
+                    if msg.ttl <= 1 {
+                        state.set_trace_terminal_status(msg.trace_id, TraceStatus::TtlExpired);
+                    } else if had_drop {
+                        state.set_trace_terminal_status(msg.trace_id, TraceStatus::Dropped);
+                    } else if msg.is_broadcast {
+                        state.set_trace_terminal_status(msg.trace_id, TraceStatus::Delivered);
+                    } else {
+                        state.set_trace_terminal_status(msg.trace_id, TraceStatus::NoRoute);
+                    }
                 }
-            }
-
-            let mut state = tui_state.lock().unwrap();
-            state.push_trace_event(
-                msg.trace_id,
-                node_idx,
-                msg.ttl,
-                msg.hop_count,
-                if msg.ttl <= 1 {
-                    TraceEventKind::TtlExpired
-                } else {
-                    TraceEventKind::NoRoute
-                },
-                "no candidate accepted packet",
-            );
-            if msg.ttl <= 1 {
-                state.set_trace_terminal_status(msg.trace_id, TraceStatus::TtlExpired);
-            } else if had_drop {
-                state.set_trace_terminal_status(msg.trace_id, TraceStatus::Dropped);
-            } else if msg.is_broadcast {
-                state.set_trace_terminal_status(msg.trace_id, TraceStatus::Delivered);
-            } else {
-                state.set_trace_terminal_status(msg.trace_id, TraceStatus::NoRoute);
             }
         }
     }

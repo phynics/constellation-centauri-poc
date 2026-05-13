@@ -18,6 +18,14 @@ mod ui;
 
 use app::{App, UiAction};
 
+fn network_peer_addrs(state: &SharedState) -> Vec<[u8; 8]> {
+    state
+        .routing_peers
+        .iter()
+        .map(|peer| peer.short_addr)
+        .collect()
+}
+
 pub fn run(
     shared: Arc<Mutex<SharedState>>,
     shutdown_tx: watch::Sender<bool>,
@@ -53,8 +61,18 @@ fn run_loop(
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
-                let peers = shared.lock().unwrap().peers.clone();
-                match app.handle_key(key, peers.len()) {
+                let state = shared.lock().unwrap();
+                let peers = state.peers.clone();
+                let network_addrs = network_peer_addrs(&state);
+                drop(state);
+
+                let selectable_count = if app.view == app::ViewMode::Network {
+                    network_addrs.len()
+                } else {
+                    peers.len()
+                };
+
+                match app.handle_key(key, selectable_count) {
                     UiAction::Quit => {
                         break;
                     }
@@ -63,6 +81,28 @@ fn run_loop(
                             peers.get(app.selected_peer.min(peers.len().saturating_sub(1)))
                         {
                             let _ = cmd_tx.send(CompanionCommand::EnrollSelected(peer.id.clone()));
+                        }
+                    }
+                    UiAction::ResetNetworkKey => {
+                        let _ = cmd_tx.send(CompanionCommand::ResetNetworkKey);
+                    }
+                    UiAction::PingSelected => {
+                        if let Some(short_addr) = network_addrs
+                            .get(app.selected_peer.min(network_addrs.len().saturating_sub(1)))
+                        {
+                            let _ = cmd_tx.send(CompanionCommand::SendPing {
+                                short_addr: *short_addr,
+                            });
+                        }
+                    }
+                    UiAction::SendMessage { body } => {
+                        if let Some(short_addr) = network_addrs
+                            .get(app.selected_peer.min(network_addrs.len().saturating_sub(1)))
+                        {
+                            let _ = cmd_tx.send(CompanionCommand::SendMessage {
+                                short_addr: *short_addr,
+                                body,
+                            });
                         }
                     }
                     UiAction::None => {}

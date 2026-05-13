@@ -8,6 +8,7 @@ use blew::{Central, DeviceId};
 use routing_core::crypto::identity::short_addr_of;
 use routing_core::network::{
     DiscoveryEvent, H2hInitiator, H2hResponder, InboundH2h, NetworkError, MAX_SCAN_RESULTS,
+    SESSION_KIND_H2H, SESSION_KIND_ROUTED,
 };
 use routing_core::protocol::h2h::{H2hFrame, H2hPayload};
 use routing_core::transport::TransportAddr;
@@ -38,6 +39,7 @@ pub struct AcceptedSession {
     pub device_id: DeviceId,
     pub transport_addr: TransportAddr,
     pub channel: L2capChannel,
+    pub initial_payload: Vec<u8>,
 }
 
 pub struct MacInitiator {
@@ -57,6 +59,63 @@ impl MacInitiator {
 
     pub fn known_devices(&self) -> Arc<Mutex<HashMap<TransportAddr, DeviceId>>> {
         Arc::clone(&self.known_devices)
+    }
+
+    pub async fn send_routed_packet(
+        &self,
+        peer_transport_addr: TransportAddr,
+        packet: &[u8],
+    ) -> Result<(), NetworkError> {
+        let device_id = self
+            .known_devices
+            .lock()
+            .unwrap()
+            .get(&peer_transport_addr)
+            .cloned()
+            .ok_or(NetworkError::ConnectionFailed)?;
+
+        self.central
+            .connect(&device_id)
+            .await
+            .map_err(|_| NetworkError::ConnectionFailed)?;
+        self.central
+            .discover_services(&device_id)
+            .await
+            .map_err(|_| NetworkError::ProtocolError)?;
+
+        let psm_bytes = self
+            .central
+            .read_characteristic(&device_id, L2CAP_PSM_CHAR_UUID)
+            .await
+            .map_err(|_| NetworkError::ProtocolError)?;
+        if psm_bytes.len() < 2 {
+            let _ = self.central.disconnect(&device_id).await;
+            return Err(NetworkError::ProtocolError);
+        }
+
+        let psm = Psm(u16::from_le_bytes([psm_bytes[0], psm_bytes[1]]));
+        let mut channel = self
+            .central
+            .open_l2cap_channel(&device_id, psm)
+            .await
+            .map_err(|_| NetworkError::ConnectionFailed)?;
+
+        let mut tx_buf = [0u8; L2CAP_FRAME_BUF_SIZE];
+        if packet.len() + 1 > tx_buf.len() {
+            let _ = channel.close().await;
+            let _ = self.central.disconnect(&device_id).await;
+            return Err(NetworkError::ProtocolError);
+        }
+        tx_buf[0] = SESSION_KIND_ROUTED;
+        tx_buf[1..1 + packet.len()].copy_from_slice(packet);
+        channel
+            .write_all(&tx_buf[..1 + packet.len()])
+            .await
+            .map_err(|_| NetworkError::ConnectionFailed)?;
+
+        let _ = channel.close().await;
+        let _ = self.central.disconnect(&device_id).await;
+        Ok(())
     }
 }
 
@@ -175,11 +234,12 @@ impl H2hInitiator for MacInitiator {
             .map_err(|_| NetworkError::ConnectionFailed)?;
 
         let mut tx_buf = [0u8; L2CAP_FRAME_BUF_SIZE];
+        tx_buf[0] = SESSION_KIND_H2H;
         let tx_len = our_payload
-            .serialize(&mut tx_buf)
+            .serialize(&mut tx_buf[1..])
             .map_err(|_| NetworkError::ProtocolError)?;
         channel
-            .write_all(&tx_buf[..tx_len])
+            .write_all(&tx_buf[..tx_len + 1])
             .await
             .map_err(|_| NetworkError::ConnectionFailed)?;
 
@@ -188,8 +248,11 @@ impl H2hInitiator for MacInitiator {
             .read(&mut rx_buf)
             .await
             .map_err(|_| NetworkError::ConnectionFailed)?;
+        if rx_len < 2 || rx_buf[0] != SESSION_KIND_H2H {
+            return Err(NetworkError::ProtocolError);
+        }
         let peer_payload =
-            H2hPayload::deserialize(&rx_buf[..rx_len]).map_err(|_| NetworkError::ProtocolError)?;
+            H2hPayload::deserialize(&rx_buf[1..rx_len]).map_err(|_| NetworkError::ProtocolError)?;
 
         self.pending = Some((device_id, channel));
         Ok(peer_payload)
@@ -248,14 +311,22 @@ impl H2hResponder for MacResponder {
             .await
             .ok_or(NetworkError::ConnectionFailed)?;
 
-        let mut buf = [0u8; L2CAP_FRAME_BUF_SIZE];
-        let len = session
-            .channel
-            .read(&mut buf)
-            .await
-            .map_err(|_| NetworkError::ConnectionFailed)?;
+        let initial = if session.initial_payload.is_empty() {
+            let mut buf = [0u8; L2CAP_FRAME_BUF_SIZE];
+            let len = session
+                .channel
+                .read(&mut buf)
+                .await
+                .map_err(|_| NetworkError::ConnectionFailed)?;
+            buf[..len].to_vec()
+        } else {
+            core::mem::take(&mut session.initial_payload)
+        };
+        if initial.len() < 2 || initial[0] != SESSION_KIND_H2H {
+            return Err(NetworkError::ProtocolError);
+        }
         let peer_payload =
-            H2hPayload::deserialize(&buf[..len]).map_err(|_| NetworkError::ProtocolError)?;
+            H2hPayload::deserialize(&initial[1..]).map_err(|_| NetworkError::ProtocolError)?;
 
         let inbound = InboundH2h {
             peer_transport_addr: session.transport_addr,

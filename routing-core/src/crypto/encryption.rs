@@ -117,11 +117,17 @@ fn derive_shared_key(
     // Step 3: Perform ECDH
     let shared_secret = our_x25519_secret.diffie_hellman(&their_x25519_public);
 
-    // Step 4: Derive symmetric key with HKDF
-    // Use both public keys as salt to ensure unique keys per pair
+    // Step 4: Derive symmetric key with HKDF.
+    // Canonicalize the public-key ordering so both sides derive the same salt.
+    let our_pubkey = our_identity.pubkey();
+    let (lo, hi) = if our_pubkey <= *their_pubkey {
+        (our_pubkey, *their_pubkey)
+    } else {
+        (*their_pubkey, our_pubkey)
+    };
     let mut salt = [0u8; 64];
-    salt[0..32].copy_from_slice(&our_identity.pubkey());
-    salt[32..64].copy_from_slice(their_pubkey);
+    salt[0..32].copy_from_slice(&lo);
+    salt[32..64].copy_from_slice(&hi);
 
     let hk = Hkdf::<Sha256>::new(Some(&salt), shared_secret.as_bytes());
     let mut symmetric_key = [0u8; 32];
@@ -158,9 +164,21 @@ fn ed25519_to_x25519_public(ed25519_pubkey: &PubKey) -> Result<PublicKey, Crypto
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::crypto::identity::NodeIdentity;
+
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
-        // This test would work in a std environment with proper RNG.
-        // For no_std, we'd need to provide external RNG in integration tests.
+        let alice = NodeIdentity::from_bytes(&[1u8; 32]);
+        let bob = NodeIdentity::from_bytes(&[2u8; 32]);
+        let nonce = [9u8; 12];
+        let mut encrypted = [0u8; 128];
+        let mut decrypted = [0u8; 64];
+
+        let written = encrypt(&alice, &bob.pubkey(), b"secret", &nonce, &mut encrypted).unwrap();
+        let plain_len =
+            decrypt(&bob, &alice.pubkey(), &encrypted[..written], &mut decrypted).unwrap();
+
+        assert_eq!(&decrypted[..plain_len], b"secret");
     }
 }

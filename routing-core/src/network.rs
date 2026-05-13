@@ -8,6 +8,9 @@ use crate::protocol::h2h::{H2hFrame, H2hPayload};
 use crate::transport::TransportAddr;
 use heapless::Vec;
 
+pub const SESSION_KIND_H2H: u8 = 0x48;
+pub const SESSION_KIND_ROUTED: u8 = 0x52;
+
 /// Maximum scan results returned per `scan()` call.
 pub const MAX_SCAN_RESULTS: usize = 16;
 

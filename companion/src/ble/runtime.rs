@@ -4,37 +4,61 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use blew::central::{CentralEvent, ScanFilter};
+use blew::central::CentralEvent;
 use blew::gatt::props::{AttributePermissions, CharacteristicProperties};
 use blew::gatt::service::{GattCharacteristic, GattService};
+use blew::l2cap::Psm;
 use blew::peripheral::{AdvertisingConfig, PeripheralRequest, PeripheralStateEvent};
 use blew::{Central, Peripheral};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::mutex::Mutex as AsyncMutex;
+use rand::RngCore as _;
+use routing_core::behavior::{apply_discovery_events, build_h2h_payload, run_initiator_h2h_once};
 use routing_core::crypto::identity::NodeIdentity;
+use routing_core::message::{route_message, MessageDecision, RoutedMessage};
+use routing_core::network::H2hResponder;
+use routing_core::network::{H2hInitiator, SESSION_KIND_H2H, SESSION_KIND_ROUTED};
 use routing_core::onboarding::{
     is_constellation_protocol_signature, parse_network_marker, NetworkMarker, NodeCertificate,
 };
+use routing_core::protocol::app::{
+    EncryptedAppFrame, InfraFrame, InfraKind, PingPayload, PongPayload, APP_CONTENT_TYPE_UTF8,
+    NONCE_LEN,
+};
+use routing_core::protocol::h2h::H2hFrame;
+use routing_core::protocol::packet::{
+    build_packet_with_message_id, PacketHeader, PACKET_TYPE_FRAME_APP, PACKET_TYPE_FRAME_INFRA,
+};
+use routing_core::routing::table::RoutingTable;
+use tokio::io::AsyncReadExt as _;
+use tokio::sync::mpsc as tokio_mpsc;
 use tokio::sync::watch;
+use tokio::time::{Duration, Instant};
 use tokio_stream::StreamExt as _;
 
 use super::constants::{
     AUTHORITY_PUBKEY_CHAR_UUID, CAPABILITIES_CHAR_UUID, CERT_CAPABILITIES_CHAR_UUID,
-    CERT_SIGNATURE_CHAR_UUID, COMMIT_ENROLLMENT_CHAR_UUID, NETWORK_MARKER_CHAR_UUID,
-    NODE_PUBKEY_CHAR_UUID, ONBOARDING_SERVICE_UUID, PROTOCOL_SIGNATURE_CHAR_UUID,
-    SHORT_ADDR_CHAR_UUID,
+    CERT_SIGNATURE_CHAR_UUID, COMMIT_ENROLLMENT_CHAR_UUID, L2CAP_PSM_CHAR_UUID,
+    NETWORK_MARKER_CHAR_UUID, NODE_PUBKEY_CHAR_UUID, ONBOARDING_SERVICE_UUID,
+    PROTOCOL_SIGNATURE_CHAR_UUID, SHORT_ADDR_CHAR_UUID,
 };
+use super::network::{transport_addr_for_device_id, AcceptedSession, MacInitiator, MacResponder};
 use crate::diagnostics::state::{DiscoveredPeer, SharedState};
-use crate::node::storage::LocalNodeRecord;
+use crate::node::storage::{regenerate_network_authority, LocalNodeRecord};
+use crate::onboarding::marker_summary;
 use crate::runtime::CompanionCommand;
 
 pub async fn run(
     shared: Arc<Mutex<SharedState>>,
-    local_node: LocalNodeRecord,
+    mut local_node: LocalNodeRecord,
     mut shutdown_rx: watch::Receiver<bool>,
     cmd_rx: mpsc::Receiver<CompanionCommand>,
 ) -> Result<(), Box<dyn Error>> {
     let central: Central = Central::new().await?;
     let peripheral: Peripheral = Peripheral::new().await?;
     let central = Arc::new(central);
+    let mut initiator = MacInitiator::new(Arc::clone(&central));
+    let known_devices = initiator.known_devices();
 
     central
         .wait_ready(std::time::Duration::from_secs(5))
@@ -42,6 +66,9 @@ pub async fn run(
     peripheral
         .wait_ready(std::time::Duration::from_secs(5))
         .await?;
+
+    let (l2cap_psm, mut l2cap_channels) = peripheral.l2cap_listener().await?;
+    let (accepted_tx, accepted_rx) = tokio_mpsc::channel(8);
 
     peripheral
         .add_service(&GattService {
@@ -83,6 +110,13 @@ pub async fn run(
                     value: vec![],
                     descriptors: vec![],
                 },
+                GattCharacteristic {
+                    uuid: L2CAP_PSM_CHAR_UUID,
+                    properties: CharacteristicProperties::READ,
+                    permissions: AttributePermissions::READ,
+                    value: vec![],
+                    descriptors: vec![],
+                },
             ],
         })
         .await?;
@@ -99,6 +133,27 @@ pub async fn run(
             service_uuids: vec![ONBOARDING_SERVICE_UUID],
         })
         .await?;
+
+    let routing_table = Arc::new(AsyncMutex::new(RoutingTable::new(local_node.short_addr)));
+    let uptime = Arc::new(AsyncMutex::new(0u32));
+    let responder_shared = Arc::clone(&shared);
+    let responder_table = Arc::clone(&routing_table);
+    let responder_uptime = Arc::clone(&uptime);
+    let responder_identity = NodeIdentity::from_bytes(&local_node.secret);
+    let responder_caps = local_node.capabilities;
+    tokio::task::spawn_local(async move {
+        let mut responder = MacResponder::new(accepted_rx);
+        run_companion_responder(
+            responder_shared,
+            &mut responder,
+            &responder_identity,
+            responder_caps,
+            responder_table,
+            responder_uptime,
+        )
+        .await;
+    });
+
     {
         let mut state = shared.lock().unwrap();
         state.scanning = true;
@@ -106,15 +161,9 @@ pub async fn run(
         state.push_event("BLE scan + advertising started");
     }
 
-    central
-        .start_scan(ScanFilter {
-            services: vec![ONBOARDING_SERVICE_UUID],
-            ..Default::default()
-        })
-        .await?;
-
     let mut inspected: HashSet<String> = HashSet::new();
     let cmd_rx = Arc::new(Mutex::new(cmd_rx));
+    let mut next_mesh_cycle = Instant::now();
 
     loop {
         if let Ok(command) = cmd_rx.lock().unwrap().try_recv() {
@@ -138,8 +187,140 @@ pub async fn run(
                         }
                     }
                 }
+                CompanionCommand::ResetNetworkKey => {
+                    shared
+                        .lock()
+                        .unwrap()
+                        .push_event("regenerating local network authority...".to_string());
+                    match regenerate_network_authority() {
+                        Ok(updated) => {
+                            local_node = updated;
+                            let mut state = shared.lock().unwrap();
+                            state.update_local_network_authority(
+                                local_node.authority_pubkey,
+                                marker_summary(&local_node.network_marker),
+                            );
+                            state.push_event(format!(
+                                "new local authority pubkey {}",
+                                hex(&local_node.authority_pubkey)
+                            ));
+                        }
+                        Err(err) => {
+                            shared.lock().unwrap().push_event(format!(
+                                "failed to regenerate network authority: {err}"
+                            ));
+                        }
+                    }
+                }
+                CompanionCommand::SendPing { short_addr } => {
+                    shared
+                        .lock()
+                        .unwrap()
+                        .push_event(format!("sending ping to {:02x?}", &short_addr[..4]));
+                    match send_ping_to_peer(
+                        &initiator,
+                        &shared,
+                        &routing_table,
+                        &local_node,
+                        short_addr,
+                    )
+                    .await
+                    {
+                        Ok(request_id) => {
+                            shared
+                                .lock()
+                                .unwrap()
+                                .push_event(format!("ping {} sent", hex(&request_id)));
+                        }
+                        Err(err) => {
+                            shared
+                                .lock()
+                                .unwrap()
+                                .push_event(format!("ping failed: {err}"));
+                        }
+                    }
+                }
+                CompanionCommand::SendMessage { short_addr, body } => {
+                    shared.lock().unwrap().push_event(format!(
+                        "sending mesh message to {:02x?}: {}",
+                        &short_addr[..4],
+                        body.chars().take(32).collect::<String>()
+                    ));
+                    match send_message_to_peer(
+                        &initiator,
+                        &shared,
+                        &routing_table,
+                        &local_node,
+                        short_addr,
+                        &body,
+                    )
+                    .await
+                    {
+                        Ok(message_id) => {
+                            shared
+                                .lock()
+                                .unwrap()
+                                .push_event(format!("message {} sent", hex(&message_id),));
+                        }
+                        Err(err) => {
+                            shared
+                                .lock()
+                                .unwrap()
+                                .push_event(format!("mesh message failed: {err}"));
+                        }
+                    }
+                }
             }
         }
+
+        if Instant::now() >= next_mesh_cycle {
+            let events = initiator.scan(2_000).await;
+            {
+                let mut state = shared.lock().unwrap();
+                for device_id in known_devices.lock().unwrap().values() {
+                    let peer = DiscoveredPeer {
+                        id: device_id.to_string(),
+                        short_addr: None,
+                        name: None,
+                        rssi: None,
+                        last_seen_unix_secs: now_secs(),
+                        has_onboarding_service: true,
+                        has_constellation_signature: false,
+                        onboarding_ready: false,
+                        network_pubkey_hex: None,
+                        node_pubkey_hex: None,
+                        capabilities: None,
+                        last_error: None,
+                    };
+                    state.upsert_peer(peer);
+                }
+            }
+            apply_discovery_events(&routing_table, &events).await;
+
+            let discovered_ids: Vec<_> = known_devices.lock().unwrap().values().cloned().collect();
+            for device_id in discovered_ids {
+                if inspected.insert(device_id.to_string()) {
+                    if let Err(err) = inspect_device(&central, &shared, &device_id).await {
+                        let mut state = shared.lock().unwrap();
+                        state.set_peer_error(device_id.to_string(), err.to_string());
+                        state.push_event(format!("inspect {} failed: {err}", device_id));
+                    }
+                }
+            }
+
+            let identity = NodeIdentity::from_bytes(&local_node.secret);
+            run_initiator_h2h_once(
+                &mut initiator,
+                &identity,
+                local_node.capabilities,
+                &routing_table,
+                &uptime,
+            )
+            .await;
+            update_routing_snapshot(&shared, &routing_table, &uptime).await;
+            next_mesh_cycle = Instant::now() + Duration::from_secs(10);
+        }
+
         tokio::select! {
             changed = shutdown_rx.changed() => {
                 if changed.is_err() || *shutdown_rx.borrow() {
@@ -152,32 +333,7 @@ pub async fn run(
                     CentralEvent::AdapterStateChanged { powered } => {
                         shared.lock().unwrap().push_event(format!("central adapter powered={powered}"));
                     }
-                    CentralEvent::DeviceDiscovered(device) => {
-                        let peer = DiscoveredPeer {
-                            id: device.id.to_string(),
-                            name: device.name.clone(),
-                            rssi: device.rssi,
-                            last_seen_unix_secs: now_secs(),
-                            has_onboarding_service: device.services.iter().any(|svc| *svc == ONBOARDING_SERVICE_UUID),
-                            has_constellation_signature: false,
-                            onboarding_ready: false,
-                            network_pubkey_hex: None,
-                            node_pubkey_hex: None,
-                            capabilities: None,
-                            last_error: None,
-                        };
-                        {
-                            let mut state = shared.lock().unwrap();
-                            state.upsert_peer(peer);
-                        }
-                        if inspected.insert(device.id.to_string()) {
-                            if let Err(err) = inspect_device(&central, &shared, &device.id).await {
-                                let mut state = shared.lock().unwrap();
-                                state.set_peer_error(device.id.to_string(), err.to_string());
-                                state.push_event(format!("inspect {} failed: {err}", device.id));
-                            }
-                        }
-                    }
+                    CentralEvent::DeviceDiscovered(_) => {}
                     CentralEvent::DeviceConnected { device_id } => {
                         shared.lock().unwrap().push_event(format!("connected to {device_id}"));
                     }
@@ -200,9 +356,66 @@ pub async fn run(
                     }
                 }
             }
+            incoming = l2cap_channels.next() => {
+                let Some(result) = incoming else { break; };
+                match result {
+                    Ok((device_id, mut channel)) => {
+                        let transport_addr = transport_addr_for_device_id(&device_id);
+                        let mut buf = [0u8; 512];
+                        match channel.read(&mut buf).await {
+                            Ok(len) if len >= 2 => {
+                                let kind = buf[0];
+                                let initial_payload = buf[..len].to_vec();
+                                if kind == SESSION_KIND_H2H {
+                                    let _ = accepted_tx.send(AcceptedSession {
+                                        device_id,
+                                        transport_addr,
+                                        channel,
+                                        initial_payload,
+                                    }).await;
+                                } else if kind == SESSION_KIND_ROUTED {
+                                    handle_companion_routed_packet(
+                                        &shared,
+                                        &initiator,
+                                        &routing_table,
+                                        &local_node,
+                                        transport_addr,
+                                        &initial_payload[1..],
+                                    ).await;
+                                    let _ = channel.close().await;
+                                } else {
+                                    shared.lock().unwrap().push_event(format!(
+                                        "unknown session kind {} from {}",
+                                        kind,
+                                        device_id
+                                    ));
+                                    let _ = channel.close().await;
+                                }
+                            }
+                            Ok(_) => {
+                                shared.lock().unwrap().push_event(format!(
+                                    "short l2cap session from {}",
+                                    device_id
+                                ));
+                                let _ = channel.close().await;
+                            }
+                            Err(err) => {
+                                shared.lock().unwrap().push_event(format!(
+                                    "l2cap read error from {}: {}",
+                                    device_id,
+                                    err
+                                ));
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        shared.lock().unwrap().push_event(format!("l2cap accept error: {err}"));
+                    }
+                }
+            }
             request = requests.next() => {
                 let Some(request) = request else { break; };
-                handle_peripheral_request(&local_node, request, &shared);
+                handle_peripheral_request(&local_node, l2cap_psm, request, &shared);
             }
         }
     }
@@ -220,6 +433,7 @@ pub async fn run(
 
 fn handle_peripheral_request(
     local_node: &LocalNodeRecord,
+    l2cap_psm: Psm,
     request: PeripheralRequest,
     shared: &Arc<Mutex<SharedState>>,
 ) {
@@ -240,6 +454,8 @@ fn handle_peripheral_request(
                 local_node.capabilities.to_le_bytes().to_vec()
             } else if char_uuid == SHORT_ADDR_CHAR_UUID {
                 local_node.short_addr.to_vec()
+            } else if char_uuid == L2CAP_PSM_CHAR_UUID {
+                l2cap_psm.value().to_le_bytes().to_vec()
             } else {
                 Vec::new()
             };
@@ -356,6 +572,9 @@ async fn inspect_device(
     let capabilities = central
         .read_characteristic(device_id, CAPABILITIES_CHAR_UUID)
         .await?;
+    let short_addr = central
+        .read_characteristic(device_id, SHORT_ADDR_CHAR_UUID)
+        .await?;
 
     let peer_id = device_id.to_string();
     let protocol = trim_trailing_nuls(&protocol);
@@ -369,6 +588,13 @@ async fn inspect_device(
     let mut state = shared.lock().unwrap();
     state.update_peer_inspection(
         peer_id.clone(),
+        if short_addr.len() == 8 {
+            let mut addr = [0u8; 8];
+            addr.copy_from_slice(&short_addr);
+            Some(addr)
+        } else {
+            None
+        },
         is_constellation_protocol_signature(protocol),
         onboarding_ready,
         if pubkey.len() == 32 {
@@ -390,6 +616,384 @@ async fn inspect_device(
 
     let _ = central.disconnect(device_id).await;
     Ok(())
+}
+
+async fn run_companion_responder(
+    shared: Arc<Mutex<SharedState>>,
+    responder: &mut MacResponder,
+    identity: &NodeIdentity,
+    capabilities: u16,
+    routing_table: Arc<AsyncMutex<NoopRawMutex, RoutingTable>>,
+    uptime: Arc<AsyncMutex<NoopRawMutex, u32>>,
+) -> ! {
+    loop {
+        match responder.receive_h2h().await {
+            Ok(inbound) => {
+                let partner_short = match inbound.peer_payload.full_pubkey {
+                    Some(pk) => routing_core::crypto::identity::short_addr_of(&pk),
+                    None => {
+                        let table = routing_table.lock().await;
+                        table
+                            .peers
+                            .iter()
+                            .find(|p| p.transport_addr == inbound.peer_transport_addr)
+                            .map(|p| p.short_addr)
+                            .unwrap_or([0u8; 8])
+                    }
+                };
+
+                let response = build_h2h_payload(
+                    identity,
+                    capabilities,
+                    &uptime,
+                    &routing_table,
+                    &partner_short,
+                )
+                .await;
+
+                {
+                    let mut table = routing_table.lock().await;
+                    table.update_peer_from_h2h(
+                        &inbound.peer_payload,
+                        partner_short,
+                        inbound.peer_transport_addr,
+                        embassy_time::Instant::now().as_ticks(),
+                    );
+                }
+
+                if responder.send_h2h_response(&response).await.is_ok() {
+                    shared
+                        .lock()
+                        .unwrap()
+                        .push_event(format!("mesh sync from {:02x?}", &partner_short[..4]));
+                }
+
+                loop {
+                    match responder.receive_h2h_frame().await {
+                        Ok(H2hFrame::SessionDone) => break,
+                        Ok(_) => {}
+                        Err(_) => break,
+                    }
+                }
+
+                update_routing_snapshot(&shared, &routing_table, &uptime).await;
+                let _ = responder.finish_h2h_session().await;
+            }
+            Err(err) => {
+                shared
+                    .lock()
+                    .unwrap()
+                    .push_event(format!("mesh responder error: {err:?}"));
+            }
+        }
+    }
+}
+
+async fn update_routing_snapshot(
+    shared: &Arc<Mutex<SharedState>>,
+    routing_table: &AsyncMutex<NoopRawMutex, RoutingTable>,
+    uptime: &AsyncMutex<NoopRawMutex, u32>,
+) {
+    let peers = {
+        let table = routing_table.lock().await;
+        table
+            .peers
+            .iter()
+            .map(|peer| crate::diagnostics::state::RoutingPeerView {
+                short_addr: peer.short_addr,
+                capabilities: peer.capabilities,
+                trust: peer.trust,
+                hop_count: peer.hop_count,
+                last_seen_ticks: peer.last_seen_ticks,
+                transport_len: peer.transport_addr.len,
+            })
+            .collect::<Vec<_>>()
+    };
+    let uptime_secs = *uptime.lock().await;
+    shared
+        .lock()
+        .unwrap()
+        .update_routing_snapshot(uptime_secs, peers);
+}
+
+async fn send_message_to_peer(
+    initiator: &MacInitiator,
+    shared: &Arc<Mutex<SharedState>>,
+    routing_table: &Arc<AsyncMutex<NoopRawMutex, RoutingTable>>,
+    local_node: &LocalNodeRecord,
+    destination: [u8; 8],
+    body: &str,
+) -> Result<[u8; 8], Box<dyn Error>> {
+    let (next_hop_transport, destination_pubkey) = {
+        let table = routing_table.lock().await;
+        let destination_entry = table
+            .find_peer(&destination)
+            .ok_or("destination not present in routing table")?;
+        if destination_entry.pubkey == [0u8; 32] {
+            return Err("destination pubkey unknown".into());
+        }
+        let candidates = table.forwarding_candidates(&destination);
+        let (_, next_hop_transport) = candidates.first().ok_or("no route to destination")?;
+        (*next_hop_transport, destination_entry.pubkey)
+    };
+
+    let destination_label = {
+        let state = shared.lock().unwrap();
+        state
+            .peers
+            .iter()
+            .find(|peer| peer.short_addr == Some(destination))
+            .map(|peer| peer.id.clone())
+            .unwrap_or_else(|| format!("{:02x?}", &destination[..4]))
+    };
+    shared.lock().unwrap().push_event(format!(
+        "routing toward {} via next hop transport_len={}",
+        destination_label, next_hop_transport.len
+    ));
+
+    let identity = NodeIdentity::from_bytes(&local_node.secret);
+    let mut message_id = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut message_id);
+    let mut nonce = [0u8; NONCE_LEN];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let encrypted = EncryptedAppFrame::encrypt_user_data(
+        &identity,
+        &destination_pubkey,
+        nonce,
+        APP_CONTENT_TYPE_UTF8,
+        body.as_bytes(),
+    )
+    .map_err(|err| format!("crypto error: {err:?}"))?;
+    let mut payload = [0u8; 256];
+    let payload_len = encrypted
+        .serialize(&mut payload)
+        .map_err(|_| "failed to serialize encrypted app frame")?;
+
+    let mut packet = [0u8; 512];
+    let packet_len = build_packet_with_message_id(
+        &identity,
+        PACKET_TYPE_FRAME_APP,
+        0,
+        destination,
+        message_id,
+        &payload[..payload_len],
+        &mut packet,
+    )
+    .map_err(|_| "failed to serialize routed app packet")?;
+
+    initiator
+        .send_routed_packet(next_hop_transport, &packet[..packet_len])
+        .await
+        .map_err(|_| "failed to send routed packet")?;
+    Ok(message_id)
+}
+
+async fn send_ping_to_peer(
+    initiator: &MacInitiator,
+    shared: &Arc<Mutex<SharedState>>,
+    routing_table: &Arc<AsyncMutex<NoopRawMutex, RoutingTable>>,
+    local_node: &LocalNodeRecord,
+    destination: [u8; 8],
+) -> Result<[u8; 8], Box<dyn Error>> {
+    let next_hop_transport = {
+        let table = routing_table.lock().await;
+        let candidates = table.forwarding_candidates(&destination);
+        let (_, next_hop_transport) = candidates.first().ok_or("no route to destination")?;
+        *next_hop_transport
+    };
+    let mut request_id = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut request_id);
+
+    let ping = PingPayload {
+        request_id,
+        origin_time_ms: now_secs().saturating_mul(1000),
+    };
+    let mut ping_buf = [0u8; 32];
+    let ping_len = ping
+        .serialize(&mut ping_buf)
+        .map_err(|_| "serialize ping failed")?;
+    let mut infra_payload = heapless::Vec::new();
+    infra_payload
+        .extend_from_slice(&ping_buf[..ping_len])
+        .map_err(|_| "ping payload too large")?;
+    let infra = InfraFrame {
+        kind: InfraKind::Ping,
+        payload: infra_payload,
+    };
+    let mut payload = [0u8; 256];
+    let payload_len = infra
+        .serialize(&mut payload)
+        .map_err(|_| "serialize infra frame failed")?;
+    let identity = NodeIdentity::from_bytes(&local_node.secret);
+    let mut packet = [0u8; 512];
+    let packet_len = build_packet_with_message_id(
+        &identity,
+        PACKET_TYPE_FRAME_INFRA,
+        0,
+        destination,
+        request_id,
+        &payload[..payload_len],
+        &mut packet,
+    )
+    .map_err(|_| "failed to build ping packet")?;
+    shared.lock().unwrap().push_event(format!(
+        "ping routed via next hop transport_len={}",
+        next_hop_transport.len
+    ));
+    initiator
+        .send_routed_packet(next_hop_transport, &packet[..packet_len])
+        .await
+        .map_err(|_| "failed to send ping packet")?;
+    Ok(request_id)
+}
+
+async fn handle_companion_routed_packet(
+    shared: &Arc<Mutex<SharedState>>,
+    _initiator: &MacInitiator,
+    routing_table: &Arc<AsyncMutex<NoopRawMutex, RoutingTable>>,
+    local_node: &LocalNodeRecord,
+    peer_transport_addr: routing_core::transport::TransportAddr,
+    packet: &[u8],
+) {
+    let Ok((header, payload)) = PacketHeader::deserialize(packet) else {
+        shared
+            .lock()
+            .unwrap()
+            .push_event("invalid routed packet header".to_string());
+        return;
+    };
+    let sender_pubkey = {
+        let table = routing_table.lock().await;
+        table
+            .peers
+            .iter()
+            .find(|p| p.transport_addr == peer_transport_addr || p.short_addr == header.src)
+            .map(|p| p.pubkey)
+    };
+    if let Some(sender_pubkey) = sender_pubkey {
+        if !header.verify(&sender_pubkey, payload) {
+            shared.lock().unwrap().push_event(format!(
+                "routed signature verify failed from {:02x?}",
+                &header.src[..4]
+            ));
+            return;
+        }
+    }
+    if header.dst != local_node.short_addr {
+        let decision = {
+            let mut table = routing_table.lock().await;
+            route_message(
+                &mut table,
+                local_node.capabilities,
+                false,
+                local_node.short_addr,
+                &RoutedMessage {
+                    destination: header.dst,
+                    is_broadcast: false,
+                    message_id: header.message_id,
+                    ttl: header.ttl,
+                    hop_count: header.hop_count,
+                },
+            )
+        };
+        match decision {
+            MessageDecision::Forward(_) => shared.lock().unwrap().push_event(format!(
+                "non-local routed packet for {:02x?} reached companion; forwarding not implemented here",
+                &header.dst[..4]
+            )),
+            MessageDecision::Duplicate => shared
+                .lock()
+                .unwrap()
+                .push_event("duplicate routed packet dropped".to_string()),
+            MessageDecision::NoRoute { .. } => shared
+                .lock()
+                .unwrap()
+                .push_event("no route for inbound non-local packet".to_string()),
+            MessageDecision::TtlExpired => shared
+                .lock()
+                .unwrap()
+                .push_event("inbound non-local packet ttl expired".to_string()),
+            MessageDecision::DeliveredLocal => {}
+        }
+        return;
+    }
+
+    match header.packet_type {
+        PACKET_TYPE_FRAME_INFRA => match InfraFrame::deserialize(payload) {
+            Ok(frame) => match frame.kind {
+                InfraKind::Ping => {
+                    if let Ok(ping) = PingPayload::deserialize(frame.payload.as_slice()) {
+                        shared.lock().unwrap().push_event(format!(
+                            "ping from {:02x?} req={} sent_ms={}",
+                            &header.src[..4],
+                            hex(&ping.request_id),
+                            ping.origin_time_ms
+                        ));
+                    }
+                }
+                InfraKind::Pong => {
+                    if let Ok(pong) = PongPayload::deserialize(frame.payload.as_slice()) {
+                        shared.lock().unwrap().push_event(format!(
+                            "pong from {:02x?} req={} recv_ttl={}",
+                            &pong.responder_addr[..4],
+                            hex(&pong.request_id),
+                            pong.received_ttl
+                        ));
+                    }
+                }
+                other => shared.lock().unwrap().push_event(format!(
+                    "infra {:?} from {:02x?}",
+                    other,
+                    &header.src[..4]
+                )),
+            },
+            Err(_) => shared
+                .lock()
+                .unwrap()
+                .push_event("failed to decode infra frame".to_string()),
+        },
+        PACKET_TYPE_FRAME_APP => match EncryptedAppFrame::deserialize(payload) {
+            Ok(frame) => {
+                let Some(sender_pubkey) = sender_pubkey else {
+                    shared
+                        .lock()
+                        .unwrap()
+                        .push_event("missing sender pubkey for app packet".to_string());
+                    return;
+                };
+                let identity = NodeIdentity::from_bytes(&local_node.secret);
+                let mut plain = [0u8; 192];
+                match frame.decrypt_user_data(&identity, &sender_pubkey, &mut plain) {
+                    Ok((APP_CONTENT_TYPE_UTF8, len)) => {
+                        let text = String::from_utf8_lossy(&plain[..len]).into_owned();
+                        shared.lock().unwrap().push_event(format!(
+                            "app from {:02x?}: {}",
+                            &header.src[..4],
+                            text
+                        ));
+                    }
+                    Ok((content_type, len)) => shared.lock().unwrap().push_event(format!(
+                        "app from {:02x?} content_type={} bytes={}",
+                        &header.src[..4],
+                        content_type,
+                        len
+                    )),
+                    Err(err) => shared
+                        .lock()
+                        .unwrap()
+                        .push_event(format!("app decrypt failed: {:?}", err)),
+                }
+            }
+            Err(_) => shared
+                .lock()
+                .unwrap()
+                .push_event("failed to decode encrypted app frame".to_string()),
+        },
+        other => shared
+            .lock()
+            .unwrap()
+            .push_event(format!("unsupported routed packet_type={}", other)),
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {

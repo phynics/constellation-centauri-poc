@@ -18,6 +18,7 @@ pub struct LocalNodeView {
 #[derive(Clone)]
 pub struct DiscoveredPeer {
     pub id: String,
+    pub short_addr: Option<ShortAddr>,
     pub name: Option<String>,
     pub rssi: Option<i16>,
     pub last_seen_unix_secs: u64,
@@ -100,12 +101,14 @@ impl SharedState {
     pub fn update_peer_inspection(
         &mut self,
         id: String,
+        short_addr: Option<ShortAddr>,
         has_constellation_signature: bool,
         onboarding_ready: bool,
         node_pubkey_hex: Option<String>,
         capabilities: Option<u16>,
     ) {
         if let Some(peer) = self.peers.iter_mut().find(|peer| peer.id == id) {
+            peer.short_addr = short_addr;
             peer.has_constellation_signature = has_constellation_signature;
             peer.onboarding_ready = onboarding_ready;
             peer.node_pubkey_hex = node_pubkey_hex;
@@ -130,6 +133,15 @@ impl SharedState {
     pub fn update_routing_snapshot(&mut self, uptime_secs: u32, peers: Vec<RoutingPeerView>) {
         self.uptime_secs = uptime_secs;
         self.routing_peers = peers;
+    }
+
+    pub fn update_local_network_authority(
+        &mut self,
+        authority_pubkey: PubKey,
+        network_marker: String,
+    ) {
+        self.local.authority_pubkey = authority_pubkey;
+        self.local.network_marker = network_marker;
     }
 }
 

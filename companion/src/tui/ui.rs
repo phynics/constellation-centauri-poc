@@ -21,15 +21,20 @@ pub fn render(frame: &mut Frame, app: &App, state: &SharedState) {
     render_summary(frame, app, state, chunks[0]);
     match app.view {
         ViewMode::Peers => render_peers(frame, app, state, chunks[1]),
+        ViewMode::Network => render_network(frame, app, state, chunks[1]),
         ViewMode::Local => render_local(frame, state, chunks[1]),
         ViewMode::Events => render_events(frame, state, chunks[1]),
     }
     render_footer(frame, app, state, chunks[2]);
+    if app.composing_message {
+        render_compose_modal(frame, app);
+    }
 }
 
 fn render_summary(frame: &mut Frame, app: &App, state: &SharedState, area: ratatui::layout::Rect) {
     let title = match app.view {
         ViewMode::Peers => "Peers",
+        ViewMode::Network => "Network",
         ViewMode::Local => "Local",
         ViewMode::Events => "Events",
     };
@@ -46,8 +51,9 @@ fn render_summary(frame: &mut Frame, app: &App, state: &SharedState, area: ratat
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
-            "  peers={}  scanning={}  advertising={}  [N]/Tab cycle  [E] enroll selected  [Q] quit",
+            "  peers={}  network={}  scanning={}  advertising={}  [N]/Tab cycle  [Q] quit",
             state.peers.len(),
+            state.routing_peers.len(),
             state.scanning,
             state.advertising
         )),
@@ -119,6 +125,47 @@ fn render_peers(frame: &mut Frame, app: &App, state: &SharedState, area: ratatui
     frame.render_widget(List::new(items), inner);
 }
 
+fn render_network(frame: &mut Frame, app: &App, state: &SharedState, area: ratatui::layout::Rect) {
+    let block = Block::default()
+        .title(" Network nodes ")
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if state.routing_peers.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No routing-core peers learned yet.")
+                .style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = state
+        .routing_peers
+        .iter()
+        .enumerate()
+        .map(|(idx, peer)| {
+            let line = format!(
+                "{} {:02x?} trust={} hop={} caps={} transport_len={}",
+                if idx == app.selected_peer { '>' } else { ' ' },
+                &peer.short_addr[..4],
+                peer.trust,
+                peer.hop_count,
+                capability_summary(peer.capabilities),
+                peer.transport_len,
+            );
+            let style = if idx == app.selected_peer {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            ListItem::new(line).style(style)
+        })
+        .collect();
+    frame.render_widget(List::new(items), inner);
+}
+
 fn render_local(frame: &mut Frame, state: &SharedState, area: ratatui::layout::Rect) {
     let block = Block::default().title(" Local node ").borders(Borders::ALL);
     let inner = block.inner(area);
@@ -161,18 +208,55 @@ fn render_events(frame: &mut Frame, state: &SharedState, area: ratatui::layout::
 }
 
 fn render_footer(frame: &mut Frame, app: &App, state: &SharedState, area: ratatui::layout::Rect) {
-    let block = Block::default()
-        .title(" Selected peer ")
-        .borders(Borders::ALL);
+    let block = Block::default().title(" Details ").borders(Borders::ALL);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let Some(peer) = state
-        .peers
-        .get(app.selected_peer.min(state.peers.len().saturating_sub(1)))
-    else {
+    if app.view == ViewMode::Local {
+        let lines = vec![
+            Line::from("[R] regenerate local network authority"),
+            Line::from("This only rotates the companion authority for future enrollments."),
+        ];
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        return;
+    }
+
+    let selected = match app.view {
+        ViewMode::Peers => state
+            .peers
+            .get(app.selected_peer.min(state.peers.len().saturating_sub(1))),
+        ViewMode::Network => None,
+        ViewMode::Events => None,
+        ViewMode::Local => None,
+    };
+    if app.view == ViewMode::Network {
+        let Some(peer) = state.routing_peers.get(
+            app.selected_peer
+                .min(state.routing_peers.len().saturating_sub(1)),
+        ) else {
+            frame.render_widget(Paragraph::new("No network node selected."), inner);
+            return;
+        };
+        let lines = vec![
+            Line::from(format!("Short addr: {:02x?}", &peer.short_addr[..4])),
+            Line::from(format!("Trust: {}", peer.trust)),
+            Line::from(format!("Hop count: {}", peer.hop_count)),
+            Line::from(format!(
+                "Capabilities: {}",
+                capability_summary(peer.capabilities)
+            )),
+            Line::from(format!("Transport len: {}", peer.transport_len)),
+            Line::from(format!("Last seen ticks: {}", peer.last_seen_ticks)),
+            Line::from("[P] ping selected network node"),
+            Line::from("[M] send message if this peer is directly reachable"),
+        ];
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        return;
+    }
+    let Some(peer) = selected else {
         frame.render_widget(Paragraph::new("No peer selected."), inner);
         return;
     };
+
     let lines = vec![
         Line::from(format!("ID: {}", peer.id)),
         Line::from(format!(
@@ -192,6 +276,11 @@ fn render_footer(frame: &mut Frame, app: &App, state: &SharedState, area: ratatu
                 .unwrap_or_else(|| "?".to_string())
         )),
         Line::from(format!("Ready for onboarding: {}", peer.onboarding_ready)),
+        Line::from(if app.view == ViewMode::Network {
+            "[P] ping  [M] send message to selected network node".to_string()
+        } else {
+            "[E] enroll selected onboarding peer".to_string()
+        }),
     ];
     let mut lines = lines;
     if !state.routing_peers.is_empty() {
@@ -215,4 +304,36 @@ fn render_footer(frame: &mut Frame, app: &App, state: &SharedState, area: ratatu
         }
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_compose_modal(frame: &mut Frame, app: &App) {
+    let area = centered_rect(80, 5, frame.area());
+    let block = Block::default()
+        .title(" Send message (Enter=send, Esc=cancel) ")
+        .borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(app.message_input.as_str()).wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn centered_rect(
+    width_pct: u16,
+    height: u16,
+    area: ratatui::layout::Rect,
+) -> ratatui::layout::Rect {
+    let vertical = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(height),
+        Constraint::Fill(1),
+    ])
+    .split(area);
+    Layout::horizontal([
+        Constraint::Percentage((100 - width_pct) / 2),
+        Constraint::Percentage(width_pct),
+        Constraint::Percentage((100 - width_pct) / 2),
+    ])
+    .split(vertical[1])[1]
 }

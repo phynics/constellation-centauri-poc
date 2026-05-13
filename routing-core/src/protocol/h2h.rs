@@ -32,6 +32,10 @@ pub const H2H_VERSION: u8 = 0x02;
 /// Keeping the frame body bounded preserves the fixed-buffer/no-std model and
 /// is sufficient for the current trace-driven simulator behavior.
 pub const H2H_DELIVERY_BODY_MAX: usize = 96;
+/// Maximum plaintext bytes carried by a simple host-originated application
+/// message frame. This is intentionally small for the current direct-message
+/// debugging UX.
+pub const H2H_APP_MESSAGE_BODY_MAX: usize = 160;
 /// Upper bound on the number of per-frame delivery acknowledgements.
 pub const H2H_ACK_IDS_MAX: usize = 8;
 
@@ -111,6 +115,15 @@ pub enum H2hFrame {
     DeliveryAck {
         trace_ids: Vec<u64, H2H_ACK_IDS_MAX>,
     },
+    /// Simple host-originated application message.
+    ///
+    /// This is a direct-session payload used by the companion to send short
+    /// plaintext messages to an already connected peer after the normal H2H
+    /// sync exchange completes.
+    AppMessage {
+        message_id: [u8; 8],
+        body: Vec<u8, H2H_APP_MESSAGE_BODY_MAX>,
+    },
     /// Router-to-router retained-delivery replica transfer. This keeps
     /// redundancy inside the same direct peer session model as sync/delivery,
     /// instead of growing a separate replication transport beside H2H.
@@ -147,10 +160,11 @@ impl H2hFrame {
     const TYPE_DELIVERY_SUMMARY: u8 = 0x03;
     const TYPE_DELIVERY_DATA: u8 = 0x04;
     const TYPE_DELIVERY_ACK: u8 = 0x05;
-    const TYPE_RETENTION_REPLICA: u8 = 0x06;
-    const TYPE_RETENTION_ACK: u8 = 0x07;
-    const TYPE_RETENTION_TOMBSTONE: u8 = 0x08;
-    const TYPE_SESSION_DONE: u8 = 0x09;
+    const TYPE_APP_MESSAGE: u8 = 0x06;
+    const TYPE_RETENTION_REPLICA: u8 = 0x07;
+    const TYPE_RETENTION_ACK: u8 = 0x08;
+    const TYPE_RETENTION_TOMBSTONE: u8 = 0x09;
+    const TYPE_SESSION_DONE: u8 = 0x0A;
 
     pub fn serialize(&self, buf: &mut [u8]) -> Result<usize, PacketError> {
         if buf.len() < 2 {
@@ -163,6 +177,7 @@ impl H2hFrame {
             H2hFrame::DeliverySummary { .. } => Self::TYPE_DELIVERY_SUMMARY,
             H2hFrame::DeliveryData { .. } => Self::TYPE_DELIVERY_DATA,
             H2hFrame::DeliveryAck { .. } => Self::TYPE_DELIVERY_ACK,
+            H2hFrame::AppMessage { .. } => Self::TYPE_APP_MESSAGE,
             H2hFrame::RetentionReplica { .. } => Self::TYPE_RETENTION_REPLICA,
             H2hFrame::RetentionAck { .. } => Self::TYPE_RETENTION_ACK,
             H2hFrame::RetentionTombstone { .. } => Self::TYPE_RETENTION_TOMBSTONE,
@@ -223,6 +238,20 @@ impl H2hFrame {
                     buf[off..off + 8].copy_from_slice(&trace_id.to_le_bytes());
                     off += 8;
                 }
+                Ok(needed)
+            }
+            H2hFrame::AppMessage { message_id, body } => {
+                let needed = 2 + 8 + 2 + body.len();
+                if buf.len() < needed {
+                    return Err(PacketError::BufferTooSmall);
+                }
+                let mut off = 2;
+                buf[off..off + 8].copy_from_slice(message_id);
+                off += 8;
+                let body_len = body.len() as u16;
+                buf[off..off + 2].copy_from_slice(&body_len.to_le_bytes());
+                off += 2;
+                buf[off..off + body.len()].copy_from_slice(body.as_slice());
                 Ok(needed)
             }
             H2hFrame::RetentionReplica {
@@ -349,6 +378,25 @@ impl H2hFrame {
                         .map_err(|_| PacketError::InvalidHeader)?;
                 }
                 Ok(Self::DeliveryAck { trace_ids })
+            }
+            Self::TYPE_APP_MESSAGE => {
+                if buf.len() < 12 {
+                    return Err(PacketError::InvalidHeader);
+                }
+                let mut off = 2;
+                let mut message_id = [0u8; 8];
+                message_id.copy_from_slice(&buf[off..off + 8]);
+                off += 8;
+                let body_len = u16::from_le_bytes([buf[off], buf[off + 1]]) as usize;
+                off += 2;
+                if off + body_len > buf.len() || body_len > H2H_APP_MESSAGE_BODY_MAX {
+                    return Err(PacketError::InvalidHeader);
+                }
+                let mut body = Vec::new();
+                for byte in &buf[off..off + body_len] {
+                    body.push(*byte).map_err(|_| PacketError::InvalidHeader)?;
+                }
+                Ok(Self::AppMessage { message_id, body })
             }
             Self::TYPE_RETENTION_REPLICA => {
                 if buf.len() < 23 {
@@ -679,5 +727,25 @@ mod tests {
 
         assert_eq!(decoded.peer_count as usize, H2H_MAX_PEER_ENTRIES);
         assert!(decoded.peers[H2H_MAX_PEER_ENTRIES - 1].is_some());
+    }
+
+    #[test]
+    fn app_message_frame_roundtrips() {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"hello mesh").unwrap();
+        let frame = H2hFrame::AppMessage {
+            message_id: [0xAB; 8],
+            body,
+        };
+        let mut buf = [0u8; 512];
+        let written = frame.serialize(&mut buf).unwrap();
+
+        match H2hFrame::deserialize(&buf[..written]).unwrap() {
+            H2hFrame::AppMessage { message_id, body } => {
+                assert_eq!(message_id, [0xAB; 8]);
+                assert_eq!(body.as_slice(), b"hello mesh");
+            }
+            other => panic!("unexpected frame: {:?}", core::mem::discriminant(&other)),
+        }
     }
 }
