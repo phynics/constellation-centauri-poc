@@ -15,6 +15,7 @@ use routing_core::network::{
 };
 use routing_core::node::roles::Capabilities;
 use routing_core::protocol::h2h::{H2hFrame, H2hPayload};
+use routing_core::transport::TransportAddr;
 
 use crate::medium::{
     deserialize_frame, deserialize_payload, serialize_frame, serialize_payload, SimH2hFrame,
@@ -79,11 +80,11 @@ impl H2hResponder for SimResponder {
         let peer_payload = deserialize_payload(&req.payload_bytes, req.payload_len)
             .ok_or(NetworkError::ProtocolError)?;
 
-        let peer_mac = self.all_nodes[req.sender_idx].mac;
+        let peer_transport_addr = TransportAddr::ble(self.all_nodes[req.sender_idx].mac);
         self.pending_sender = Some(req.sender_idx);
 
         Ok(InboundH2h {
-            peer_mac,
+            peer_transport_addr,
             peer_payload,
         })
     }
@@ -210,7 +211,7 @@ impl H2hInitiator for SimInitiator {
                 let _ = results.push(DiscoveryEvent {
                     short_addr: node.short_addr,
                     capabilities: config.capabilities[idx],
-                    mac: node.mac,
+                    transport_addr: TransportAddr::ble(node.mac),
                 });
             }
             return results;
@@ -228,7 +229,7 @@ impl H2hInitiator for SimInitiator {
             let _ = results.push(DiscoveryEvent {
                 short_addr: node.short_addr,
                 capabilities: config.capabilities[idx],
-                mac: node.mac,
+                transport_addr: TransportAddr::ble(node.mac),
             });
         }
         results
@@ -236,9 +237,12 @@ impl H2hInitiator for SimInitiator {
 
     async fn initiate_h2h(
         &mut self,
-        peer_mac: [u8; 6],
+        peer_transport_addr: TransportAddr,
         our_payload: &H2hPayload,
     ) -> Result<H2hPayload, NetworkError> {
+        let peer_mac = peer_transport_addr
+            .as_ble_mac()
+            .ok_or(NetworkError::ProtocolError)?;
         // Convention: mac[0] = node_index in the simulator.
         let peer_idx = peer_mac[0] as usize;
         if peer_idx >= MAX_NODES {

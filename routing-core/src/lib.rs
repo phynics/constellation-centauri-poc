@@ -12,6 +12,7 @@ pub mod behavior;
 pub mod config;
 pub mod crypto;
 pub mod network;
+pub mod onboarding;
 pub mod node;
 pub mod protocol;
 pub mod routing;

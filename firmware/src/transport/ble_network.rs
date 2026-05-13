@@ -16,23 +16,231 @@ use bt_hci::cmd::le::{
 };
 use bt_hci::controller::{ControllerCmdAsync, ControllerCmdSync};
 use trouble_host::prelude::*;
+use trouble_host_macros::{gatt_server, gatt_service};
 
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_sync::mutex::Mutex;
+use embassy_futures::select::{select, Either};
 use embassy_time::with_timeout;
 
 use routing_core::config::{H2H_CONNECTION_TIMEOUT_SECS, H2H_MTU, H2H_PSM};
-use routing_core::crypto::identity::ShortAddr;
+use routing_core::crypto::identity::{NodeIdentity, ShortAddr};
 use routing_core::network::{
     DiscoveryEvent, H2hInitiator, H2hResponder, InboundH2h, NetworkError, MAX_SCAN_RESULTS,
 };
+use routing_core::onboarding::{CONSTELLATION_PROTOCOL_SIGNATURE, ONBOARDING_READY_MARKER};
 use routing_core::protocol::h2h::{H2hFrame, H2hPayload};
+use routing_core::transport::TransportAddr;
 
 use crate::CONSTELLATION_COMPANY_ID;
+use crate::node::storage::{self, EnrollmentError, ProvisioningState};
+use crate::reboot_after_enrollment_commit;
+use esp_storage::FlashStorage;
 
 // ── Discovery payload ─────────────────────────────────────────────────────────
 
 pub const DISCOVERY_PAYLOAD_SIZE: usize = 10;
+const PROTOCOL_SIGNATURE_LEN: usize = 32;
+const NETWORK_MARKER_LEN: usize = 33;
+const EMPTY_CAPABILITIES: [u8; 2] = [0u8; 2];
+const EMPTY_PUBKEY: [u8; 32] = [0xFFu8; 32];
+const EMPTY_SIGNATURE: [u8; 64] = [0xFFu8; 64];
+pub const ONBOARDING_SERVICE_UUID_BYTES: [u8; 16] = [
+    0x43, 0xd7, 0xaa, 0x10, 0x5f, 0x4b, 0x4c, 0x84, 0xa1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x01,
+];
+
+#[gatt_server(connections_max = 1, mutex_type = NoopRawMutex, attribute_table_size = 80)]
+pub struct OnboardingServer {
+    onboarding: OnboardingService,
+}
+
+#[gatt_service(uuid = "43d7aa10-5f4b-4c84-a100-000000000001")]
+pub struct OnboardingService {
+    #[characteristic(uuid = "43d7aa10-5f4b-4c84-a100-000000000002", read, value = [0u8; PROTOCOL_SIGNATURE_LEN])]
+    protocol_signature: [u8; PROTOCOL_SIGNATURE_LEN],
+    #[characteristic(uuid = "43d7aa10-5f4b-4c84-a100-000000000003", read, value = [0u8; NETWORK_MARKER_LEN])]
+    network_marker: [u8; NETWORK_MARKER_LEN],
+    #[characteristic(uuid = "43d7aa10-5f4b-4c84-a100-000000000004", read, value = [0u8; 32])]
+    node_pubkey: [u8; 32],
+    #[characteristic(uuid = "43d7aa10-5f4b-4c84-a100-000000000005", read, value = [0u8; 2])]
+    capabilities: [u8; 2],
+    #[characteristic(uuid = "43d7aa10-5f4b-4c84-a100-000000000006", read, value = [0u8; 8])]
+    short_addr: [u8; 8],
+    #[characteristic(uuid = "43d7aa10-5f4b-4c84-a100-000000000007", read, value = [0u8; 2])]
+    l2cap_psm: [u8; 2],
+    #[characteristic(uuid = "43d7aa10-5f4b-4c84-a100-000000000008", read, write, value = [0xFFu8; 32])]
+    authority_pubkey: [u8; 32],
+    #[characteristic(uuid = "43d7aa10-5f4b-4c84-a100-000000000009", read, write, value = [0u8; 2])]
+    cert_capabilities: [u8; 2],
+    #[characteristic(uuid = "43d7aa10-5f4b-4c84-a100-00000000000a", read, write, value = [0xFFu8; 64])]
+    cert_signature: [u8; 64],
+    #[characteristic(uuid = "43d7aa10-5f4b-4c84-a100-00000000000b", write, value = [0u8; 1])]
+    commit_enrollment: [u8; 1],
+}
+
+fn init_onboarding_server(
+    identity: &NodeIdentity,
+    capabilities: u16,
+    provisioning: &ProvisioningState,
+) -> OnboardingServer<'static> {
+    let server = OnboardingServer::new_with_config(GapConfig::Peripheral(PeripheralConfig {
+        name: "Constellation",
+        appearance: &appearance::power_device::GENERIC_POWER_DEVICE,
+    }))
+    .expect("failed to create onboarding gatt server");
+
+    let mut protocol_signature = [0u8; PROTOCOL_SIGNATURE_LEN];
+    protocol_signature[..CONSTELLATION_PROTOCOL_SIGNATURE.len()]
+        .copy_from_slice(CONSTELLATION_PROTOCOL_SIGNATURE);
+    let _ = server.set(&server.onboarding.protocol_signature, &protocol_signature);
+
+    apply_provisioning_to_server(&server, provisioning, identity, capabilities);
+    server
+}
+
+fn apply_provisioning_to_server(
+    server: &OnboardingServer<'static>,
+    provisioning: &ProvisioningState,
+    identity: &NodeIdentity,
+    capabilities: u16,
+) {
+    let mut network_marker = [0u8; NETWORK_MARKER_LEN];
+    let (authority_pubkey, cert_capabilities, cert_signature) =
+        if let Some(committed) = provisioning.committed {
+            network_marker[..32].copy_from_slice(&committed.network_pubkey);
+            (
+                committed.network_pubkey,
+                committed.cert_capabilities.to_le_bytes(),
+                committed.cert_signature,
+            )
+        } else {
+            network_marker[..ONBOARDING_READY_MARKER.len()].copy_from_slice(ONBOARDING_READY_MARKER);
+            (
+                provisioning.staged.authority_pubkey.unwrap_or(EMPTY_PUBKEY),
+                provisioning
+                    .staged
+                    .cert_capabilities
+                    .map(|caps| caps.to_le_bytes())
+                    .unwrap_or(EMPTY_CAPABILITIES),
+                provisioning.staged.cert_signature.unwrap_or(EMPTY_SIGNATURE),
+            )
+        };
+
+    let _ = server.set(&server.onboarding.network_marker, &network_marker);
+    let _ = server.set(&server.onboarding.authority_pubkey, &authority_pubkey);
+    let _ = server.set(&server.onboarding.cert_capabilities, &cert_capabilities);
+    let _ = server.set(&server.onboarding.cert_signature, &cert_signature);
+    let _ = server.set(&server.onboarding.node_pubkey, &identity.pubkey());
+    let _ = server.set(&server.onboarding.capabilities, &capabilities.to_le_bytes());
+    let _ = server.set(&server.onboarding.short_addr, identity.short_addr());
+    let _ = server.set(&server.onboarding.l2cap_psm, &H2H_PSM.to_le_bytes());
+}
+
+async fn handle_onboarding_gatt_event(
+    server: &OnboardingServer<'static>,
+    conn: &GattConnection<'_, '_, DefaultPacketPool>,
+    identity: &NodeIdentity,
+    provisioning_state: &Mutex<NoopRawMutex, ProvisioningState>,
+    flash: &Mutex<NoopRawMutex, FlashStorage<'static>>,
+) -> Result<bool, NetworkError> {
+    match conn.next().await {
+        GattConnectionEvent::Disconnected { .. } => Ok(false),
+        GattConnectionEvent::Gatt {
+            event: GattEvent::Write(event),
+        } => {
+            let handle = event.handle();
+            let mut provisioning = provisioning_state.lock().await;
+
+                if handle == server.onboarding.authority_pubkey.handle {
+                    if provisioning.committed.is_some() {
+                        drop(provisioning);
+                        event.reject(AttErrorCode::VALUE_NOT_ALLOWED)
+                            .map_err(|_| NetworkError::ProtocolError)?
+                            .send()
+                            .await;
+                        return Ok(true);
+                    }
+                    let authority = conn
+                        .get(&server.onboarding.authority_pubkey)
+                        .map_err(|_| NetworkError::ProtocolError)?;
+                    provisioning.staged.authority_pubkey = Some(authority);
+                } else if handle == server.onboarding.cert_capabilities.handle {
+                    if provisioning.committed.is_some() {
+                        drop(provisioning);
+                        event.reject(AttErrorCode::VALUE_NOT_ALLOWED)
+                            .map_err(|_| NetworkError::ProtocolError)?
+                            .send()
+                            .await;
+                        return Ok(true);
+                    }
+                    let cert_capabilities = conn
+                        .get(&server.onboarding.cert_capabilities)
+                        .map_err(|_| NetworkError::ProtocolError)?;
+                    provisioning.staged.cert_capabilities =
+                        Some(u16::from_le_bytes(cert_capabilities));
+                } else if handle == server.onboarding.cert_signature.handle {
+                    if provisioning.committed.is_some() {
+                        drop(provisioning);
+                        event.reject(AttErrorCode::VALUE_NOT_ALLOWED)
+                            .map_err(|_| NetworkError::ProtocolError)?
+                            .send()
+                            .await;
+                        return Ok(true);
+                    }
+                    let cert_signature = conn
+                        .get(&server.onboarding.cert_signature)
+                        .map_err(|_| NetworkError::ProtocolError)?;
+                    provisioning.staged.cert_signature = Some(cert_signature);
+                } else if handle == server.onboarding.commit_enrollment.handle {
+                    match storage::commit_staged_enrollment(identity, &mut provisioning) {
+                        Ok(_) => {}
+                        Err(EnrollmentError::AlreadyEnrolled | EnrollmentError::IncompleteStagedEnrollment | EnrollmentError::InvalidCertificate) => {
+                            drop(provisioning);
+                            event.reject(AttErrorCode::VALUE_NOT_ALLOWED)
+                                .map_err(|_| NetworkError::ProtocolError)?
+                                .send()
+                                .await;
+                            return Ok(true);
+                        }
+                    }
+
+                    let mut flash = flash.lock().await;
+                    storage::save_provisioning(&mut *flash, identity, &provisioning)
+                        .map_err(|_| NetworkError::ProtocolError)?;
+                } else {
+                drop(provisioning);
+                event.reject(AttErrorCode::WRITE_NOT_PERMITTED)
+                    .map_err(|_| NetworkError::ProtocolError)?
+                    .send()
+                    .await;
+                return Ok(true);
+            }
+
+            let advertised_capabilities = if let Some(membership) = provisioning.committed {
+                membership.cert_capabilities
+            } else {
+                u16::from_le_bytes(
+                    conn.get(&server.onboarding.capabilities)
+                        .map_err(|_| NetworkError::ProtocolError)?,
+                )
+            };
+            apply_provisioning_to_server(server, &provisioning, identity, advertised_capabilities);
+            drop(provisioning);
+            event.accept()
+                .map_err(|_| NetworkError::ProtocolError)?
+                .send()
+                .await;
+            if handle == server.onboarding.commit_enrollment.handle {
+                Timer::after(Duration::from_millis(100)).await;
+                reboot_after_enrollment_commit();
+            }
+            Ok(true)
+        }
+        _ => Ok(true),
+    }
+}
 
 /// Lightweight advertisement payload: [short_addr: 8][capabilities: 2]
 pub struct DiscoveryInfo {
@@ -98,8 +306,12 @@ pub fn parse_discovery_from_adv(data: &[u8]) -> Option<DiscoveryInfo> {
 pub struct BleResponder<'stack, C: Controller> {
     peripheral: Peripheral<'stack, C, DefaultPacketPool>,
     stack: &'stack Stack<'stack, C, DefaultPacketPool>,
+    identity: &'stack NodeIdentity,
     identity_short: ShortAddr,
     capabilities: u16,
+    server: OnboardingServer<'static>,
+    provisioning_state: &'static Mutex<NoopRawMutex, ProvisioningState>,
+    flash: &'static Mutex<NoopRawMutex, FlashStorage<'static>>,
     /// Open connection + channel from the last `receive_h2h` call.
     pending: Option<(
         Connection<'stack, DefaultPacketPool>,
@@ -111,14 +323,21 @@ impl<'stack, C: Controller> BleResponder<'stack, C> {
     pub fn new(
         peripheral: Peripheral<'stack, C, DefaultPacketPool>,
         stack: &'stack Stack<'stack, C, DefaultPacketPool>,
-        identity_short: ShortAddr,
+        identity: &'stack NodeIdentity,
         capabilities: u16,
+        provisioning_state: &'static Mutex<NoopRawMutex, ProvisioningState>,
+        flash: &'static Mutex<NoopRawMutex, FlashStorage<'static>>,
     ) -> Self {
+        let provisioning = provisioning_state.try_lock().expect("provisioning state unavailable during init");
         Self {
             peripheral,
             stack,
-            identity_short,
+            identity,
+            identity_short: *identity.short_addr(),
             capabilities,
+            server: init_onboarding_server(identity, capabilities, &provisioning),
+            provisioning_state,
+            flash,
             pending: None,
         }
     }
@@ -129,7 +348,7 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
         // Drop any stale pending state from a previous (failed) exchange.
         self.pending = None;
 
-        loop {
+        'advertise: loop {
             // Build advertisement
             let mut disc_buf = [0u8; DISCOVERY_PAYLOAD_SIZE];
             if serialize_discovery(&self.identity_short, self.capabilities, &mut disc_buf).is_none()
@@ -142,6 +361,7 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
             let adv_len = match AdStructure::encode_slice(
                 &[
                     AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
+                    AdStructure::CompleteServiceUuids128(&[ONBOARDING_SERVICE_UUID_BYTES]),
                     AdStructure::ManufacturerSpecificData {
                         company_identifier: CONSTELLATION_COMPANY_ID,
                         payload: &disc_buf,
@@ -183,10 +403,17 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
                     continue;
                 }
             };
+            let gatt_conn = match conn.with_attribute_server(&self.server) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("[periph] GATT attach error: {:?}", e);
+                    continue;
+                }
+            };
 
             log::debug!(
                 "[periph] Connection from {:02x?}",
-                conn.peer_address().addr.raw()
+                gatt_conn.raw().peer_address().addr.raw()
             );
 
             let l2cap_config = L2capChannelConfig {
@@ -198,14 +425,24 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
             // the already-accepted BLE connection. Accepting here keeps the
             // channel open across the whole H2H session, including delayed-
             // delivery follow-up frames added above the base peer-sync exchange.
-            let mut channel = match L2capChannel::listen(self.stack, &conn)
-                .accept(&l2cap_config)
-                .await
-            {
-                Ok(ch) => ch,
-                Err(e) => {
-                    log::warn!("[periph] L2CAP accept error: {:?}", e);
-                    continue;
+            let listener = L2capChannel::listen(self.stack, gatt_conn.raw());
+            let mut channel = loop {
+                match select(listener.accept(&l2cap_config), handle_onboarding_gatt_event(&self.server, &gatt_conn, self.identity, self.provisioning_state, self.flash)).await {
+                    Either::First(result) => match result {
+                        Ok(ch) => break ch,
+                        Err(e) => {
+                            log::warn!("[periph] L2CAP accept error: {:?}", e);
+                            continue 'advertise;
+                        }
+                    },
+                    Either::Second(result) => match result {
+                        Ok(true) => continue,
+                        Ok(false) => continue 'advertise,
+                        Err(e) => {
+                            log::warn!("[periph] GATT event error: {:?}", e);
+                            continue 'advertise;
+                        }
+                    },
                 }
             };
 
@@ -228,21 +465,23 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
             };
 
             let mut peer_mac = [0u8; 6];
-            peer_mac.copy_from_slice(conn.peer_address().addr.raw());
+            peer_mac.copy_from_slice(gatt_conn.raw().peer_address().addr.raw());
+            let peer_transport_addr = TransportAddr::ble(peer_mac);
 
             // Store connection + channel for send_h2h_response
+            let conn = gatt_conn.raw().clone();
+            drop(gatt_conn);
             self.pending = Some((conn, channel));
 
             return Ok(InboundH2h {
-                peer_mac,
+                peer_transport_addr,
                 peer_payload,
             });
         }
     }
 
     async fn send_h2h_response(&mut self, payload: &H2hPayload) -> Result<(), NetworkError> {
-        let (conn, channel) = self.pending.as_mut().ok_or(NetworkError::ProtocolError)?;
-        let _ = conn; // keep conn alive while we use channel
+        let (_conn, channel) = self.pending.as_mut().ok_or(NetworkError::ProtocolError)?;
 
         let mut tx_buf = [0u8; 512];
         let tx_len = payload
@@ -261,8 +500,7 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
     }
 
     async fn send_h2h_frame(&mut self, frame: &H2hFrame) -> Result<(), NetworkError> {
-        let (conn, channel) = self.pending.as_mut().ok_or(NetworkError::ProtocolError)?;
-        let _ = conn;
+        let (_conn, channel) = self.pending.as_mut().ok_or(NetworkError::ProtocolError)?;
 
         let mut tx_buf = [0u8; 512];
         let tx_len = frame
@@ -281,8 +519,7 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
     }
 
     async fn receive_h2h_frame(&mut self) -> Result<H2hFrame, NetworkError> {
-        let (conn, channel) = self.pending.as_mut().ok_or(NetworkError::ProtocolError)?;
-        let _ = conn;
+        let (_conn, channel) = self.pending.as_mut().ok_or(NetworkError::ProtocolError)?;
 
         let mut rx_buf = [0u8; 512];
         let rx_len = channel
@@ -393,7 +630,7 @@ where
                             let _ = results.push(DiscoveryEvent {
                                 short_addr: info.short_addr,
                                 capabilities: info.capabilities,
-                                mac,
+                                transport_addr: TransportAddr::ble(mac),
                             });
                         }
                         Err(_timeout) => break,
@@ -411,9 +648,12 @@ where
 
     async fn initiate_h2h(
         &mut self,
-        peer_mac: [u8; 6],
+        peer_transport_addr: TransportAddr,
         our_payload: &H2hPayload,
     ) -> Result<H2hPayload, NetworkError> {
+        let peer_mac = peer_transport_addr
+            .as_ble_mac()
+            .ok_or(NetworkError::ProtocolError)?;
         let central = self
             .central
             .as_mut()

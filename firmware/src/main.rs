@@ -37,6 +37,7 @@ use embassy_sync::mutex::Mutex;
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_hal::rng::Rng;
+use esp_hal::system::software_reset;
 use esp_println::println;
 use esp_radio::ble::controller::BleConnector;
 use esp_storage::FlashStorage;
@@ -54,6 +55,7 @@ use routing_core::crypto::identity::NodeIdentity;
 use routing_core::node::roles::Capabilities;
 use routing_core::routing::table::RoutingTable;
 
+use node::storage::ProvisioningState;
 use transport::ble_network::{parse_discovery_from_adv, BleInitiator, BleResponder, DiscoveryInfo};
 
 // =============================================================================
@@ -72,6 +74,8 @@ pub const CONSTELLATION_COMPANY_ID: u16 = 0x1234;
 
 static ROUTING_TABLE: StaticCell<Mutex<NoopRawMutex, RoutingTable>> = StaticCell::new();
 static HEARTBEAT_UPTIME: StaticCell<Mutex<NoopRawMutex, u32>> = StaticCell::new();
+static FLASH_MUTEX: StaticCell<Mutex<NoopRawMutex, FlashStorage<'static>>> = StaticCell::new();
+static PROVISIONING_STATE: StaticCell<Mutex<NoopRawMutex, ProvisioningState>> = StaticCell::new();
 
 /// Scan handler delivers discovered peers into this channel.
 static DISCOVERY_RX: StaticCell<Channel<NoopRawMutex, (BdAddr, AddrKind, DiscoveryInfo), 4>> =
@@ -111,6 +115,30 @@ async fn main(_spawner: Spawner) {
     let mut flash = FlashStorage::new(peripherals.FLASH);
 
     let identity = load_or_generate_identity(&mut flash, &mut rng);
+    let mut provisioning_state = match node::storage::load_provisioning(&mut flash) {
+        Ok(state) => {
+            if let Some(committed) = state.committed {
+                println!("Network authority: {:02x?}", &committed.network_pubkey[..8]);
+            } else {
+                println!("Onboarding state: ready");
+            }
+            state
+        }
+        Err(e) => {
+            println!("Onboarding state unreadable: {:?}", e);
+            ProvisioningState::default()
+        }
+    };
+
+    let default_capabilities = Capabilities(Capabilities::ROUTE | Capabilities::APPLICATION).0;
+    let effective_capabilities = node::storage::effective_capabilities(
+        &identity,
+        &mut provisioning_state,
+        default_capabilities,
+    );
+    if provisioning_state.committed.is_none() && effective_capabilities == default_capabilities {
+        println!("Using default capabilities");
+    }
     println!("Node identity: {:02x?}", identity.short_addr());
     println!("Public key:    {:02x?}", identity.pubkey());
 
@@ -144,16 +172,18 @@ async fn main(_spawner: Spawner) {
     let routing_table = ROUTING_TABLE.init(Mutex::new(routing_table));
     let uptime = HEARTBEAT_UPTIME.init(Mutex::new(0u32));
     let discovery_rx = DISCOVERY_RX.init(Channel::new());
+    let flash = FLASH_MUTEX.init(Mutex::new(flash));
+    let provisioning_state = PROVISIONING_STATE.init(Mutex::new(provisioning_state));
 
     let scan_handler = ConstellationScanHandler {
         our_addr: address,
         discovery_rx,
     };
 
-    let capabilities = Capabilities(Capabilities::ROUTE | Capabilities::APPLICATION);
+    let capabilities = Capabilities(effective_capabilities);
 
     let mut ble_responder =
-        BleResponder::new(peripheral, &stack, *identity.short_addr(), capabilities.0);
+        BleResponder::new(peripheral, &stack, &identity, capabilities.0, provisioning_state, flash);
 
     let mut ble_initiator = BleInitiator::new(central, &stack, address, discovery_rx);
 
@@ -178,6 +208,10 @@ async fn main(_spawner: Spawner) {
         run_heartbeat_loop(uptime, routing_table),
     )
     .await;
+}
+
+pub fn reboot_after_enrollment_commit() -> ! {
+    software_reset()
 }
 
 // =============================================================================

@@ -283,7 +283,7 @@ impl SimHarness {
             )
             .await;
 
-            let Ok(peer_payload) = initiator.initiate_h2h(peer_mac, &payload).await else {
+            let Ok(peer_payload) = initiator.initiate_h2h(TransportAddr::ble(peer_mac), &payload).await else {
                 let _ = initiator.finish_h2h_session().await;
                 return false;
             };
@@ -512,7 +512,7 @@ impl SimHarness {
             )
             .await;
 
-            let Ok(peer_payload) = initiator.initiate_h2h(peer_mac, &payload).await else {
+            let Ok(peer_payload) = initiator.initiate_h2h(TransportAddr::ble(peer_mac), &payload).await else {
                 let _ = initiator.finish_h2h_session().await;
                 return false;
             };

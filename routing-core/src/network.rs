@@ -5,6 +5,7 @@
 
 use crate::crypto::identity::ShortAddr;
 use crate::protocol::h2h::{H2hFrame, H2hPayload};
+use crate::transport::TransportAddr;
 use heapless::Vec;
 
 /// Maximum scan results returned per `scan()` call.
@@ -14,12 +15,12 @@ pub const MAX_SCAN_RESULTS: usize = 16;
 pub struct DiscoveryEvent {
     pub short_addr: ShortAddr,
     pub capabilities: u16,
-    pub mac: [u8; 6],
+    pub transport_addr: TransportAddr,
 }
 
 /// Data received from an inbound H2H connection (responder side).
 pub struct InboundH2h {
-    pub peer_mac: [u8; 6],
+    pub peer_transport_addr: TransportAddr,
     pub peer_payload: H2hPayload,
 }
 
@@ -82,11 +83,11 @@ pub trait H2hInitiator {
     /// Returns all discovered peers within that window.
     async fn scan(&mut self, duration_ms: u64) -> Vec<DiscoveryEvent, MAX_SCAN_RESULTS>;
 
-    /// Connect to `peer_mac`, send `our_payload`, receive and return peer's
+    /// Connect to `peer_transport_addr`, send `our_payload`, receive and return peer's
     /// H2H payload. The connection is closed before this returns.
     async fn initiate_h2h(
         &mut self,
-        peer_mac: [u8; 6],
+        peer_transport_addr: TransportAddr,
         our_payload: &H2hPayload,
     ) -> Result<H2hPayload, NetworkError>;
 

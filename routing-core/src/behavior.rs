@@ -103,9 +103,8 @@ pub async fn apply_discovery_events<M: RawMutex>(
     let mut table = routing_table.lock().await;
     let now = Instant::now().as_ticks();
     for event in events.iter() {
-        let transport = TransportAddr::ble(event.mac);
         let is_new =
-            table.update_peer_compact(event.short_addr, event.capabilities, transport, now);
+            table.update_peer_compact(event.short_addr, event.capabilities, event.transport_addr, now);
         if is_new {
             log::info!(
                 "[central] New peer {:02x?} ({} total)",
@@ -121,7 +120,7 @@ pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
     identity: &NodeIdentity,
     capabilities: u16,
     routing_table: &Mutex<M, RoutingTable>,
-) -> heapless::Vec<(ShortAddr, [u8; 6]), 32> {
+) -> heapless::Vec<(ShortAddr, TransportAddr), 32> {
     let our_addr = *identity.short_addr();
     let table = routing_table.lock().await;
     let mut v = heapless::Vec::new();
@@ -138,11 +137,11 @@ pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
     // the next-best reachable router in the same cycle without inventing a
     // second connection policy just for delayed delivery.
     if is_low_power_endpoint {
-        let mut routers: heapless::Vec<(ShortAddr, [u8; 6], u8, u64, bool), 32> =
+        let mut routers: heapless::Vec<(ShortAddr, TransportAddr, u8, u64, bool), 32> =
             heapless::Vec::new();
 
         for peer in table.peers.iter() {
-            if peer.transport_addr.addr == [0u8; 6]
+            if peer.transport_addr.is_empty()
                 || (peer.capabilities & Capabilities::ROUTE == 0)
             {
                 continue;
@@ -150,7 +149,7 @@ pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
 
             let candidate = (
                 peer.short_addr,
-                peer.transport_addr.addr,
+                peer.transport_addr,
                 peer.trust,
                 peer.last_seen_ticks,
                 Capabilities::is_store_router_bits(peer.capabilities),
@@ -165,7 +164,7 @@ pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
             let should_replace = match primary_idx {
                 None => true,
                 Some(best_idx) => {
-                    let best: (ShortAddr, [u8; 6], u8, u64, bool) = routers[best_idx];
+                    let best: (ShortAddr, TransportAddr, u8, u64, bool) = routers[best_idx];
                     candidate.2 > best.2
                         || (candidate.2 == best.2 && candidate.3 > best.3)
                         || (candidate.2 == best.2 && candidate.3 == best.3 && candidate.0 < best.0)
@@ -192,15 +191,15 @@ pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
             let _ = v.push((primary.0, primary.1));
         }
 
-        for (peer_short, peer_mac, ..) in routers.into_iter() {
-            let _ = v.push((peer_short, peer_mac));
+        for (peer_short, peer_transport, ..) in routers.into_iter() {
+            let _ = v.push((peer_short, peer_transport));
         }
 
         return v;
     }
 
     for peer in table.peers.iter() {
-        if peer.transport_addr.addr == [0u8; 6] {
+        if peer.transport_addr.is_empty() {
             continue;
         }
 
@@ -214,7 +213,7 @@ pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
         }
 
         if h2h::is_initiator(&our_addr, &peer.short_addr) {
-            let _ = v.push((peer.short_addr, peer.transport_addr.addr));
+            let _ = v.push((peer.short_addr, peer.transport_addr));
         }
     }
     v
@@ -254,18 +253,17 @@ pub async fn run_initiator_h2h_once<M, I>(
 {
     let peer_snapshots = collect_h2h_peer_snapshots(identity, capabilities, routing_table).await;
 
-    for (peer_addr, peer_mac) in peer_snapshots.iter() {
+    for (peer_addr, peer_transport_addr) in peer_snapshots.iter() {
         let payload =
             build_h2h_payload(identity, capabilities, uptime, routing_table, peer_addr).await;
 
-        match initiator.initiate_h2h(*peer_mac, &payload).await {
+        match initiator.initiate_h2h(*peer_transport_addr, &payload).await {
             Ok(peer_payload) => {
-                let transport = TransportAddr::ble(*peer_mac);
                 let mut table = routing_table.lock().await;
                 table.update_peer_from_h2h(
                     &peer_payload,
                     *peer_addr,
-                    transport,
+                    *peer_transport_addr,
                     Instant::now().as_ticks(),
                 );
                 log::info!(
@@ -317,7 +315,7 @@ where
                         table
                             .peers
                             .iter()
-                            .find(|p| p.transport_addr.addr == inbound.peer_mac)
+                            .find(|p| p.transport_addr == inbound.peer_transport_addr)
                             .map(|p| p.short_addr)
                             .unwrap_or([0u8; 8])
                     }
@@ -325,7 +323,7 @@ where
 
                 log::debug!(
                     "[periph] H2H from {:02x?}, partner={:02x?}",
-                    inbound.peer_mac,
+                    &inbound.peer_transport_addr.addr[..inbound.peer_transport_addr.len as usize],
                     &partner_short[..4]
                 );
 
@@ -343,12 +341,11 @@ where
 
                 // Update routing table with peer's payload.
                 {
-                    let transport = TransportAddr::ble(inbound.peer_mac);
                     let mut table = routing_table.lock().await;
                     table.update_peer_from_h2h(
                         &inbound.peer_payload,
                         partner_short,
-                        transport,
+                        inbound.peer_transport_addr,
                         Instant::now().as_ticks(),
                     );
                     log::info!("[periph] H2H done, peers={}", table.peers.len());
@@ -411,7 +408,7 @@ where
             );
         }
 
-        for (peer_addr, peer_mac) in peer_snapshots.iter() {
+        for (peer_addr, peer_transport_addr) in peer_snapshots.iter() {
             let offset = if Capabilities::is_low_power_endpoint_bits(capabilities) {
                 0
             } else {
@@ -432,14 +429,13 @@ where
             let payload =
                 build_h2h_payload(identity, capabilities, uptime, routing_table, peer_addr).await;
 
-            match initiator.initiate_h2h(*peer_mac, &payload).await {
+            match initiator.initiate_h2h(*peer_transport_addr, &payload).await {
                 Ok(peer_payload) => {
-                    let transport = TransportAddr::ble(*peer_mac);
                     let mut table = routing_table.lock().await;
                     table.update_peer_from_h2h(
                         &peer_payload,
                         *peer_addr,
-                        transport,
+                        *peer_transport_addr,
                         Instant::now().as_ticks(),
                     );
                     log::info!(

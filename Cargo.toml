@@ -1,5 +1,5 @@
 [workspace]
-members = ["routing-core", "firmware", "sim"]
+members = ["routing-core", "firmware", "sim", "companion"]
 resolver = "2"
 
 # Patch esp-hal crates for trouble-host compatibility.

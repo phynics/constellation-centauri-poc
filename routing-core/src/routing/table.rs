@@ -133,7 +133,8 @@ impl RoutingTable {
                         bloom: BloomFilter::new(),
                         transport_addr: TransportAddr {
                             addr_type: 0,
-                            addr: [0u8; 6],
+                            len: 0,
+                            addr: [0u8; 16],
                         },
                         last_seen_ticks: now_ticks,
                         hop_count: hop,
@@ -320,7 +321,7 @@ impl RoutingTable {
     }
 
     fn is_usable_transport_peer(peer: &PeerEntry) -> bool {
-        peer.trust > TRUST_EXPIRED && peer.transport_addr.addr != [0u8; 6]
+        peer.trust > TRUST_EXPIRED && !peer.transport_addr.is_empty()
     }
 
     fn usable_peer_by_short_addr(&self, short_addr: &ShortAddr) -> Option<&PeerEntry> {
@@ -792,10 +793,7 @@ mod tests {
             pubkey: indirect_pubkey,
             capabilities: 0x5555,
             bloom: BloomFilter::new(),
-            transport_addr: TransportAddr {
-                addr_type: 0,
-                addr: [0u8; 6],
-            },
+            transport_addr: TransportAddr::empty(),
             last_seen_ticks: 20,
             hop_count: 2,
             trust: TRUST_INDIRECT,
@@ -823,10 +821,7 @@ mod tests {
             pubkey: learned_from_pubkey,
             capabilities: 0x1111,
             bloom: BloomFilter::new(),
-            transport_addr: TransportAddr {
-                addr_type: 0,
-                addr: [0u8; 6],
-            },
+            transport_addr: TransportAddr::empty(),
             last_seen_ticks: 10,
             hop_count: 0,
             trust: TRUST_DIRECT,
@@ -837,10 +832,7 @@ mod tests {
             pubkey: indirect_pubkey,
             capabilities: 0x2222,
             bloom: BloomFilter::new(),
-            transport_addr: TransportAddr {
-                addr_type: 0,
-                addr: [0u8; 6],
-            },
+            transport_addr: TransportAddr::empty(),
             last_seen_ticks: 20,
             hop_count: 3,
             trust: TRUST_INDIRECT,
@@ -868,10 +860,7 @@ mod tests {
             pubkey: learned_from_pubkey,
             capabilities: 0x1111,
             bloom: BloomFilter::new(),
-            transport_addr: TransportAddr {
-                addr_type: 0,
-                addr: [0u8; 6],
-            },
+            transport_addr: TransportAddr::empty(),
             last_seen_ticks: 10,
             hop_count: 0,
             trust: TRUST_DIRECT,
@@ -885,10 +874,7 @@ mod tests {
             pubkey: indirect_pubkey,
             capabilities: 0x2222,
             bloom: BloomFilter::new(),
-            transport_addr: TransportAddr {
-                addr_type: 0,
-                addr: [0u8; 6],
-            },
+            transport_addr: TransportAddr::empty(),
             last_seen_ticks: 20,
             hop_count: 3,
             trust: TRUST_INDIRECT,
@@ -929,10 +915,7 @@ mod tests {
             pubkey: indirect_a_pubkey,
             capabilities: 0x3333,
             bloom: BloomFilter::new(),
-            transport_addr: TransportAddr {
-                addr_type: 0,
-                addr: [0u8; 6],
-            },
+            transport_addr: TransportAddr::empty(),
             last_seen_ticks: 20,
             hop_count: 2,
             trust: TRUST_INDIRECT,
@@ -943,10 +926,7 @@ mod tests {
             pubkey: indirect_b_pubkey,
             capabilities: 0x4444,
             bloom: BloomFilter::new(),
-            transport_addr: TransportAddr {
-                addr_type: 0,
-                addr: [0u8; 6],
-            },
+            transport_addr: TransportAddr::empty(),
             last_seen_ticks: 20,
             hop_count: 2,
             trust: TRUST_INDIRECT,
@@ -987,10 +967,7 @@ mod tests {
             pubkey: c_pubkey,
             capabilities: 0x7777,
             bloom: BloomFilter::new(),
-            transport_addr: TransportAddr {
-                addr_type: 0,
-                addr: [0u8; 6],
-            },
+            transport_addr: TransportAddr::empty(),
             last_seen_ticks: 20,
             hop_count: 2,
             trust: TRUST_INDIRECT,
@@ -1078,10 +1055,7 @@ mod tests {
             pubkey: c_pubkey,
             capabilities: 0xAA00,
             bloom: BloomFilter::new(),
-            transport_addr: TransportAddr {
-                addr_type: 0,
-                addr: [0u8; 6],
-            },
+            transport_addr: TransportAddr::empty(),
             last_seen_ticks: 20,
             hop_count: 2,
             trust: TRUST_INDIRECT,
@@ -1094,10 +1068,7 @@ mod tests {
             pubkey: d_pubkey,
             capabilities: 0xBB00,
             bloom: BloomFilter::new(),
-            transport_addr: TransportAddr {
-                addr_type: 0,
-                addr: [0u8; 6],
-            },
+            transport_addr: TransportAddr::empty(),
             last_seen_ticks: 20,
             hop_count: 3,
             trust: TRUST_INDIRECT,
@@ -1192,10 +1163,7 @@ mod tests {
             pubkey: c_pubkey,
             capabilities: 0xEE00,
             bloom: BloomFilter::new(),
-            transport_addr: TransportAddr {
-                addr_type: 0,
-                addr: [0u8; 6],
-            },
+            transport_addr: TransportAddr::empty(),
             last_seen_ticks: 20,
             hop_count: 2,
             trust: TRUST_INDIRECT,

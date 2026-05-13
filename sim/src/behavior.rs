@@ -20,7 +20,6 @@ use routing_core::network::{H2hInitiator, H2hResponder};
 use routing_core::node::roles::Capabilities;
 use routing_core::protocol::h2h::{self, H2hFrame, H2H_DELIVERY_BODY_MAX};
 use routing_core::routing::table::RoutingTable;
-use routing_core::transport::TransportAddr;
 
 use crate::sim_state::{SimConfig, MAX_NODES};
 use crate::sim_state::{TraceEventKind, TuiState};
@@ -65,7 +64,7 @@ where
                         table
                             .peers
                             .iter()
-                            .find(|p| p.transport_addr.addr == inbound.peer_mac)
+                            .find(|p| p.transport_addr == inbound.peer_transport_addr)
                             .map(|p| p.short_addr)
                             .unwrap_or([0u8; 8])
                     }
@@ -82,12 +81,11 @@ where
                 .await;
 
                 {
-                    let transport = TransportAddr::ble(inbound.peer_mac);
                     let mut table = routing_table.lock().await;
                     table.update_peer_from_h2h(
                         &inbound.peer_payload,
                         partner_short,
-                        transport,
+                        inbound.peer_transport_addr,
                         Instant::now().as_ticks(),
                     );
                 }
@@ -98,7 +96,11 @@ where
                     continue;
                 }
 
-                let partner_idx = inbound.peer_mac[0] as usize;
+                let partner_idx = inbound
+                    .peer_transport_addr
+                    .as_ble_mac()
+                    .map(|mac| mac[0] as usize)
+                    .unwrap_or(MAX_NODES);
                 let partner_caps = if partner_idx < MAX_NODES {
                     current_capabilities(&sim_config, partner_idx)
                 } else {
@@ -369,7 +371,7 @@ where
         let peer_snapshots =
             collect_h2h_peer_snapshots(identity, capabilities, routing_table).await;
 
-        for (peer_addr, peer_mac) in peer_snapshots.iter() {
+        for (peer_addr, peer_transport_addr) in peer_snapshots.iter() {
             let offset = if Capabilities::is_low_power_endpoint_bits(capabilities) {
                 0
             } else {
@@ -384,18 +386,21 @@ where
             let payload =
                 build_h2h_payload(identity, capabilities, uptime, routing_table, peer_addr).await;
 
-            match initiator.initiate_h2h(*peer_mac, &payload).await {
+            match initiator.initiate_h2h(*peer_transport_addr, &payload).await {
                 Ok(peer_payload) => {
-                    let transport = TransportAddr::ble(*peer_mac);
                     let mut table = routing_table.lock().await;
                     table.update_peer_from_h2h(
                         &peer_payload,
                         *peer_addr,
-                        transport,
+                        *peer_transport_addr,
                         Instant::now().as_ticks(),
                     );
 
                     if Capabilities::is_low_power_endpoint_bits(capabilities) {
+                        let peer_node_idx = peer_transport_addr
+                            .as_ble_mac()
+                            .map(|mac| mac[0] as usize)
+                            .unwrap_or(MAX_NODES);
                         loop {
                             match initiator.receive_h2h_frame().await {
                                 Ok(H2hFrame::DeliverySummary { pending_count, .. }) => {
@@ -410,11 +415,11 @@ where
                                         0,
                                         0,
                                         TraceEventKind::LpnWakeSync {
-                                            router_node: peer_mac[0] as usize,
+                                            router_node: peer_node_idx,
                                         },
                                         format!(
                                             "LPN {} woke router {} for delayed-delivery sync",
-                                            node_idx, peer_mac[0] as usize
+                                            node_idx, peer_node_idx
                                         ),
                                     );
                                     tui_state.lock().unwrap().push_trace_event(
@@ -423,11 +428,11 @@ where
                                         0,
                                         0,
                                         TraceEventKind::DeliveredFromStore {
-                                            router_node: peer_mac[0] as usize,
+                                            router_node: peer_node_idx,
                                         },
                                         format!(
                                             "LPN {} received retained delivery from router {}",
-                                            node_idx, peer_mac[0] as usize
+                                            node_idx, peer_node_idx
                                         ),
                                     );
                                     tui_state.lock().unwrap().mark_trace_delivered(trace_id);

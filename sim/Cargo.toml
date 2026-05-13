@@ -7,7 +7,7 @@ edition = "2021"
 routing-core = { path = "../routing-core" }
 
 embassy-executor = { version = "0.9.1", features = ["arch-std", "executor-thread"] }
-embassy-sync = { version = "0.7.2" }
+embassy-sync = { version = "0.8.0" }
 embassy-time = { version = "0.5.0", features = ["std", "generic-queue-8"] }
 embassy-futures = { version = "0.1.1" }
 

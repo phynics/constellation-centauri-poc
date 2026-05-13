@@ -109,7 +109,7 @@ pub async fn run_message_loop(
                 let mut peers = HeaplessVec::new();
                 for peer in table.peers.iter() {
                     if peer.trust <= routing_core::routing::table::TRUST_EXPIRED
-                        || peer.transport_addr.addr == [0u8; 6]
+                        || peer.transport_addr.is_empty()
                     {
                         continue;
                     }
