@@ -58,7 +58,8 @@ impl SharedState {
                 pubkey: local_node.pubkey,
                 authority_pubkey: local_node.authority_pubkey,
                 capabilities: local_node.capabilities,
-                protocol_signature: String::from_utf8_lossy(&local_node.protocol_signature).into_owned(),
+                protocol_signature: String::from_utf8_lossy(&local_node.protocol_signature)
+                    .into_owned(),
                 network_marker: marker_summary(&local_node.network_marker),
                 storage_dir: local_node.storage_dir.display().to_string(),
             },
@@ -80,7 +81,11 @@ impl SharedState {
     }
 
     pub fn upsert_peer(&mut self, peer: DiscoveredPeer) {
-        match self.peers.iter_mut().find(|existing| existing.id == peer.id) {
+        match self
+            .peers
+            .iter_mut()
+            .find(|existing| existing.id == peer.id)
+        {
             Some(existing) => {
                 existing.name = peer.name;
                 existing.rssi = peer.rssi;
@@ -130,11 +135,27 @@ impl SharedState {
 
 pub fn capability_summary(bits: u16) -> String {
     let mut parts = Vec::new();
-    if bits & Capabilities::ROUTE != 0 { parts.push("ROUTE"); }
-    if bits & Capabilities::STORE != 0 { parts.push("STORE"); }
-    if bits & Capabilities::BRIDGE != 0 { parts.push("BRIDGE"); }
-    if bits & Capabilities::APPLICATION != 0 { parts.push("APP"); }
-    if bits & Capabilities::LOW_ENERGY != 0 { parts.push("LOW_ENERGY"); }
-    if bits & Capabilities::MOBILE != 0 { parts.push("MOBILE"); }
-    if parts.is_empty() { "none".to_string() } else { parts.join("|") }
+    if bits & Capabilities::ROUTE != 0 {
+        parts.push("ROUTE");
+    }
+    if bits & Capabilities::STORE != 0 {
+        parts.push("STORE");
+    }
+    if bits & Capabilities::BRIDGE != 0 {
+        parts.push("BRIDGE");
+    }
+    if bits & Capabilities::APPLICATION != 0 {
+        parts.push("APP");
+    }
+    if bits & Capabilities::LOW_ENERGY != 0 {
+        parts.push("LOW_ENERGY");
+    }
+    if bits & Capabilities::MOBILE != 0 {
+        parts.push("MOBILE");
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join("|")
+    }
 }

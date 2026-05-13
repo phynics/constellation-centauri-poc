@@ -59,7 +59,9 @@ fn run_loop(
                         break;
                     }
                     UiAction::EnrollSelected => {
-                        if let Some(peer) = peers.get(app.selected_peer.min(peers.len().saturating_sub(1))) {
+                        if let Some(peer) =
+                            peers.get(app.selected_peer.min(peers.len().saturating_sub(1)))
+                        {
                             let _ = cmd_tx.send(CompanionCommand::EnrollSelected(peer.id.clone()));
                         }
                     }

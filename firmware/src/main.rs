@@ -182,8 +182,14 @@ async fn main(_spawner: Spawner) {
 
     let capabilities = Capabilities(effective_capabilities);
 
-    let mut ble_responder =
-        BleResponder::new(peripheral, &stack, &identity, capabilities.0, provisioning_state, flash);
+    let mut ble_responder = BleResponder::new(
+        peripheral,
+        &stack,
+        &identity,
+        capabilities.0,
+        provisioning_state,
+        flash,
+    );
 
     let mut ble_initiator = BleInitiator::new(central, &stack, address, discovery_rx);
 

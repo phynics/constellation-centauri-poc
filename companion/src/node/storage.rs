@@ -87,9 +87,7 @@ fn storage_dir() -> Result<PathBuf, Box<dyn Error>> {
         return Ok(PathBuf::from(dir));
     }
     let home = env::var("HOME")?;
-    Ok(Path::new(&home)
-        .join(".constellation")
-        .join("companion"))
+    Ok(Path::new(&home).join(".constellation").join("companion"))
 }
 
 fn new_secret() -> [u8; 32] {
@@ -109,7 +107,9 @@ fn hex(bytes: &[u8]) -> String {
 
 fn decode_fixed_32(hex_str: &str) -> Result<[u8; 32], Box<dyn Error>> {
     let bytes = decode_hex(hex_str)?;
-    Ok(bytes.try_into().map_err(|_| "expected 32-byte secret key")?)
+    Ok(bytes
+        .try_into()
+        .map_err(|_| "expected 32-byte secret key")?)
 }
 
 fn decode_hex(hex_str: &str) -> Result<Vec<u8>, Box<dyn Error>> {

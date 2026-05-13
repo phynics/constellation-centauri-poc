@@ -15,7 +15,8 @@ pub fn render(frame: &mut Frame, app: &App, state: &SharedState) {
         Constraint::Length(3),
         Constraint::Fill(1),
         Constraint::Length(10),
-    ]).split(area);
+    ])
+    .split(area);
 
     render_summary(frame, app, state, chunks[0]);
     match app.view {
@@ -32,44 +33,89 @@ fn render_summary(frame: &mut Frame, app: &App, state: &SharedState, area: ratat
         ViewMode::Local => "Local",
         ViewMode::Events => "Events",
     };
-    let block = Block::default().title(" Constellation Companion ").borders(Borders::ALL);
+    let block = Block::default()
+        .title(" Constellation Companion ")
+        .borders(Borders::ALL);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let text = vec![Line::from(vec![
-        Span::styled(format!("view={title}"), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::raw(format!("  peers={}  scanning={}  advertising={}  [N]/Tab cycle  [E] enroll selected  [Q] quit",
-            state.peers.len(), state.scanning, state.advertising)),
+        Span::styled(
+            format!("view={title}"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(
+            "  peers={}  scanning={}  advertising={}  [N]/Tab cycle  [E] enroll selected  [Q] quit",
+            state.peers.len(),
+            state.scanning,
+            state.advertising
+        )),
     ])];
     frame.render_widget(Paragraph::new(text), inner);
 }
 
 fn render_peers(frame: &mut Frame, app: &App, state: &SharedState, area: ratatui::layout::Rect) {
-    let block = Block::default().title(" Discovered peers ").borders(Borders::ALL);
+    let block = Block::default()
+        .title(" Discovered peers ")
+        .borders(Borders::ALL);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if state.peers.is_empty() {
-        frame.render_widget(Paragraph::new("Waiting for peers...").style(Style::default().fg(Color::DarkGray)), inner);
+        frame.render_widget(
+            Paragraph::new("Waiting for peers...").style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
         return;
     }
-    let items: Vec<ListItem> = state.peers.iter().enumerate().map(|(idx, peer)| {
-        let mut flags = Vec::new();
-        if peer.has_onboarding_service { flags.push("svc"); }
-        if peer.has_constellation_signature { flags.push("sig"); }
-        if peer.onboarding_ready { flags.push("ready"); }
-        if peer.network_pubkey_hex.is_some() { flags.push("network"); }
-        let caps = peer.capabilities.map(capability_summary).unwrap_or_else(|| "?".to_string());
-        let line = format!(
-            "{} {:<18} rssi={:<4} flags={:<18} caps={}{}",
-            if idx == app.selected_peer { '>' } else { ' ' },
-            peer.name.clone().unwrap_or_else(|| peer.id.clone()),
-            peer.rssi.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
-            if flags.is_empty() { "-".into() } else { flags.join(",") },
-            caps,
-            peer.last_error.as_ref().map(|e| format!(" err={e}")).unwrap_or_default(),
-        );
-        let style = if idx == app.selected_peer { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() };
-        ListItem::new(line).style(style)
-    }).collect();
+    let items: Vec<ListItem> = state
+        .peers
+        .iter()
+        .enumerate()
+        .map(|(idx, peer)| {
+            let mut flags = Vec::new();
+            if peer.has_onboarding_service {
+                flags.push("svc");
+            }
+            if peer.has_constellation_signature {
+                flags.push("sig");
+            }
+            if peer.onboarding_ready {
+                flags.push("ready");
+            }
+            if peer.network_pubkey_hex.is_some() {
+                flags.push("network");
+            }
+            let caps = peer
+                .capabilities
+                .map(capability_summary)
+                .unwrap_or_else(|| "?".to_string());
+            let line = format!(
+                "{} {:<18} rssi={:<4} flags={:<18} caps={}{}",
+                if idx == app.selected_peer { '>' } else { ' ' },
+                peer.name.clone().unwrap_or_else(|| peer.id.clone()),
+                peer.rssi
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "?".into()),
+                if flags.is_empty() {
+                    "-".into()
+                } else {
+                    flags.join(",")
+                },
+                caps,
+                peer.last_error
+                    .as_ref()
+                    .map(|e| format!(" err={e}"))
+                    .unwrap_or_default(),
+            );
+            let style = if idx == app.selected_peer {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            ListItem::new(line).style(style)
+        })
+        .collect();
     frame.render_widget(List::new(items), inner);
 }
 
@@ -80,10 +126,19 @@ fn render_local(frame: &mut Frame, state: &SharedState, area: ratatui::layout::R
     let lines = vec![
         Line::from(format!("Short addr: {:02x?}", &state.local.short_addr[..4])),
         Line::from(format!("Pubkey: {:02x?}", &state.local.pubkey[..8])),
-        Line::from(format!("Authority pubkey: {:02x?}", &state.local.authority_pubkey[..8])),
-        Line::from(format!("Capabilities: {}", capability_summary(state.local.capabilities))),
+        Line::from(format!(
+            "Authority pubkey: {:02x?}",
+            &state.local.authority_pubkey[..8]
+        )),
+        Line::from(format!(
+            "Capabilities: {}",
+            capability_summary(state.local.capabilities)
+        )),
         Line::from(format!("Uptime: {}s", state.uptime_secs)),
-        Line::from(format!("Protocol signature: {}", state.local.protocol_signature)),
+        Line::from(format!(
+            "Protocol signature: {}",
+            state.local.protocol_signature
+        )),
         Line::from(format!("Network marker: {}", state.local.network_marker)),
         Line::from(format!("Routing peers: {}", state.routing_peers.len())),
         Line::from(format!("Storage: {}", state.local.storage_dir)),
@@ -95,29 +150,58 @@ fn render_events(frame: &mut Frame, state: &SharedState, area: ratatui::layout::
     let block = Block::default().title(" Event log ").borders(Borders::ALL);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let items: Vec<ListItem> = state.events.iter().rev().take(inner.height as usize).map(|event| ListItem::new(event.clone())).collect();
+    let items: Vec<ListItem> = state
+        .events
+        .iter()
+        .rev()
+        .take(inner.height as usize)
+        .map(|event| ListItem::new(event.clone()))
+        .collect();
     frame.render_widget(List::new(items), inner);
 }
 
 fn render_footer(frame: &mut Frame, app: &App, state: &SharedState, area: ratatui::layout::Rect) {
-    let block = Block::default().title(" Selected peer ").borders(Borders::ALL);
+    let block = Block::default()
+        .title(" Selected peer ")
+        .borders(Borders::ALL);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let Some(peer) = state.peers.get(app.selected_peer.min(state.peers.len().saturating_sub(1))) else {
+    let Some(peer) = state
+        .peers
+        .get(app.selected_peer.min(state.peers.len().saturating_sub(1)))
+    else {
         frame.render_widget(Paragraph::new("No peer selected."), inner);
         return;
     };
     let lines = vec![
         Line::from(format!("ID: {}", peer.id)),
-        Line::from(format!("Name: {}", peer.name.clone().unwrap_or_else(|| "<unnamed>".to_string()))),
-        Line::from(format!("Node pubkey: {}", peer.node_pubkey_hex.clone().unwrap_or_else(|| "?".to_string()))),
-        Line::from(format!("Network pubkey: {}", peer.network_pubkey_hex.clone().unwrap_or_else(|| "?".to_string()))),
+        Line::from(format!(
+            "Name: {}",
+            peer.name.clone().unwrap_or_else(|| "<unnamed>".to_string())
+        )),
+        Line::from(format!(
+            "Node pubkey: {}",
+            peer.node_pubkey_hex
+                .clone()
+                .unwrap_or_else(|| "?".to_string())
+        )),
+        Line::from(format!(
+            "Network pubkey: {}",
+            peer.network_pubkey_hex
+                .clone()
+                .unwrap_or_else(|| "?".to_string())
+        )),
         Line::from(format!("Ready for onboarding: {}", peer.onboarding_ready)),
     ];
     let mut lines = lines;
     if !state.routing_peers.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::styled("Routing snapshot", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+        lines.push(Line::styled(
+            "Routing snapshot",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
         for entry in state.routing_peers.iter().take(3) {
             lines.push(Line::from(format!(
                 "{:02x?} trust={} hop={} caps={} transport_len={} seen={}",

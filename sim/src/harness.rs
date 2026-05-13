@@ -170,7 +170,11 @@ impl SimHarness {
                 source_caps,
                 target_caps,
                 PACKET_TYPE_DATA,
-                if is_broadcast { routing_core::protocol::packet::FLAG_BROADCAST } else { 0 },
+                if is_broadcast {
+                    routing_core::protocol::packet::FLAG_BROADCAST
+                } else {
+                    0
+                },
                 dst_addr,
                 is_broadcast,
                 link_enabled_at_send,
@@ -283,7 +287,10 @@ impl SimHarness {
             )
             .await;
 
-            let Ok(peer_payload) = initiator.initiate_h2h(TransportAddr::ble(peer_mac), &payload).await else {
+            let Ok(peer_payload) = initiator
+                .initiate_h2h(TransportAddr::ble(peer_mac), &payload)
+                .await
+            else {
                 let _ = initiator.finish_h2h_session().await;
                 return false;
             };
@@ -512,7 +519,10 @@ impl SimHarness {
             )
             .await;
 
-            let Ok(peer_payload) = initiator.initiate_h2h(TransportAddr::ble(peer_mac), &payload).await else {
+            let Ok(peer_payload) = initiator
+                .initiate_h2h(TransportAddr::ble(peer_mac), &payload)
+                .await
+            else {
                 let _ = initiator.finish_h2h_session().await;
                 return false;
             };

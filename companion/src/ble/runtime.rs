@@ -19,7 +19,8 @@ use tokio_stream::StreamExt as _;
 use super::constants::{
     AUTHORITY_PUBKEY_CHAR_UUID, CAPABILITIES_CHAR_UUID, CERT_CAPABILITIES_CHAR_UUID,
     CERT_SIGNATURE_CHAR_UUID, COMMIT_ENROLLMENT_CHAR_UUID, NETWORK_MARKER_CHAR_UUID,
-    NODE_PUBKEY_CHAR_UUID, ONBOARDING_SERVICE_UUID, PROTOCOL_SIGNATURE_CHAR_UUID, SHORT_ADDR_CHAR_UUID,
+    NODE_PUBKEY_CHAR_UUID, ONBOARDING_SERVICE_UUID, PROTOCOL_SIGNATURE_CHAR_UUID,
+    SHORT_ADDR_CHAR_UUID,
 };
 use crate::diagnostics::state::{DiscoveredPeer, SharedState};
 use crate::node::storage::LocalNodeRecord;
@@ -35,8 +36,12 @@ pub async fn run(
     let peripheral: Peripheral = Peripheral::new().await?;
     let central = Arc::new(central);
 
-    central.wait_ready(std::time::Duration::from_secs(5)).await?;
-    peripheral.wait_ready(std::time::Duration::from_secs(5)).await?;
+    central
+        .wait_ready(std::time::Duration::from_secs(5))
+        .await?;
+    peripheral
+        .wait_ready(std::time::Duration::from_secs(5))
+        .await?;
 
     peripheral
         .add_service(&GattService {
@@ -82,7 +87,9 @@ pub async fn run(
         })
         .await?;
 
-    let mut requests = peripheral.take_requests().ok_or("peripheral request stream already taken")?;
+    let mut requests = peripheral
+        .take_requests()
+        .ok_or("peripheral request stream already taken")?;
     let mut peripheral_state = peripheral.state_events();
     let mut central_events = central.events();
 
@@ -113,10 +120,15 @@ pub async fn run(
         if let Ok(command) = cmd_rx.lock().unwrap().try_recv() {
             match command {
                 CompanionCommand::EnrollSelected(device_id) => {
-                    shared.lock().unwrap().push_event(format!("enrolling {device_id}..."));
+                    shared
+                        .lock()
+                        .unwrap()
+                        .push_event(format!("enrolling {device_id}..."));
                     match enroll_device(&central, &shared, &local_node, &device_id).await {
                         Ok(()) => {
-                            shared.lock().unwrap().push_event(format!("commit sent to {device_id}; waiting for reboot + rediscovery"));
+                            shared.lock().unwrap().push_event(format!(
+                                "commit sent to {device_id}; waiting for reboot + rediscovery"
+                            ));
                             inspected.remove(&device_id);
                         }
                         Err(err) => {
@@ -232,7 +244,10 @@ fn handle_peripheral_request(
                 Vec::new()
             };
             responder.respond(value);
-            shared.lock().unwrap().push_event(format!("served read {char_uuid} to {client_id}"));
+            shared
+                .lock()
+                .unwrap()
+                .push_event(format!("served read {char_uuid} to {client_id}"));
         }
         PeripheralRequest::Write {
             client_id,
@@ -243,7 +258,10 @@ fn handle_peripheral_request(
             if let Some(responder) = responder {
                 responder.success();
             }
-            shared.lock().unwrap().push_event(format!("ignored write {char_uuid} from {client_id}"));
+            shared
+                .lock()
+                .unwrap()
+                .push_event(format!("ignored write {char_uuid} from {client_id}"));
         }
     }
 }
@@ -274,7 +292,8 @@ async fn enroll_device(
     let mut node_pubkey_arr = [0u8; 32];
     node_pubkey_arr.copy_from_slice(&node_pubkey);
     let node_capabilities = u16::from_le_bytes([capabilities[0], capabilities[1]]);
-    let certificate = NodeCertificate::issue(&authority_identity, node_pubkey_arr, node_capabilities);
+    let certificate =
+        NodeCertificate::issue(&authority_identity, node_pubkey_arr, node_capabilities);
 
     central
         .write_characteristic(
@@ -331,7 +350,9 @@ async fn inspect_device(
     let marker = central
         .read_characteristic(device_id, NETWORK_MARKER_CHAR_UUID)
         .await?;
-    let pubkey = central.read_characteristic(device_id, NODE_PUBKEY_CHAR_UUID).await?;
+    let pubkey = central
+        .read_characteristic(device_id, NODE_PUBKEY_CHAR_UUID)
+        .await?;
     let capabilities = central
         .read_characteristic(device_id, CAPABILITIES_CHAR_UUID)
         .await?;
@@ -350,7 +371,11 @@ async fn inspect_device(
         peer_id.clone(),
         is_constellation_protocol_signature(protocol),
         onboarding_ready,
-        if pubkey.len() == 32 { Some(hex(&pubkey)) } else { None },
+        if pubkey.len() == 32 {
+            Some(hex(&pubkey))
+        } else {
+            None
+        },
         if capabilities.len() == 2 {
             Some(u16::from_le_bytes([capabilities[0], capabilities[1]]))
         } else {

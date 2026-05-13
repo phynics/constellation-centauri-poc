@@ -18,10 +18,10 @@ use bt_hci::controller::{ControllerCmdAsync, ControllerCmdSync};
 use trouble_host::prelude::*;
 use trouble_host_macros::{gatt_server, gatt_service};
 
+use embassy_futures::select::{select, Either};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
-use embassy_futures::select::{select, Either};
 use embassy_time::with_timeout;
 
 use routing_core::config::{H2H_CONNECTION_TIMEOUT_SECS, H2H_MTU, H2H_PSM};
@@ -33,9 +33,9 @@ use routing_core::onboarding::{CONSTELLATION_PROTOCOL_SIGNATURE, ONBOARDING_READ
 use routing_core::protocol::h2h::{H2hFrame, H2hPayload};
 use routing_core::transport::TransportAddr;
 
-use crate::CONSTELLATION_COMPANY_ID;
-use crate::node::storage::{self, EnrollmentError, ProvisioningState};
+use crate::node::storage::{self, ProvisioningState};
 use crate::reboot_after_enrollment_commit;
+use crate::CONSTELLATION_COMPANY_ID;
 use esp_storage::FlashStorage;
 
 // ── Discovery payload ─────────────────────────────────────────────────────────
@@ -54,8 +54,7 @@ const EMPTY_SIGNATURE: [u8; 64] = [0xFFu8; 64];
 /// data to be transmitted in little-endian byte order. `trouble-host` writes
 /// the raw bytes as-is, so we must provide the LE-reversed form here.
 pub const ONBOARDING_SERVICE_UUID_BYTES: [u8; 16] = [
-    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa1, 0x84, 0x4c, 0x4b, 0x5f, 0x10, 0xaa, 0xd7,
-    0x43,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa1, 0x84, 0x4c, 0x4b, 0x5f, 0x10, 0xaa, 0xd7, 0x43,
 ];
 
 #[gatt_server(connections_max = 1, mutex_type = NoopRawMutex, attribute_table_size = 80)]
@@ -114,26 +113,30 @@ fn apply_provisioning_to_server(
     capabilities: u16,
 ) {
     let mut network_marker = [0u8; NETWORK_MARKER_LEN];
-    let (authority_pubkey, cert_capabilities, cert_signature) =
-        if let Some(committed) = provisioning.committed {
-            network_marker[..32].copy_from_slice(&committed.network_pubkey);
-            (
-                committed.network_pubkey,
-                committed.cert_capabilities.to_le_bytes(),
-                committed.cert_signature,
-            )
-        } else {
-            network_marker[..ONBOARDING_READY_MARKER.len()].copy_from_slice(ONBOARDING_READY_MARKER);
-            (
-                provisioning.staged.authority_pubkey.unwrap_or(EMPTY_PUBKEY),
-                provisioning
-                    .staged
-                    .cert_capabilities
-                    .map(|caps| caps.to_le_bytes())
-                    .unwrap_or(EMPTY_CAPABILITIES),
-                provisioning.staged.cert_signature.unwrap_or(EMPTY_SIGNATURE),
-            )
-        };
+    let (authority_pubkey, cert_capabilities, cert_signature) = if let Some(committed) =
+        provisioning.committed
+    {
+        network_marker[..32].copy_from_slice(&committed.network_pubkey);
+        (
+            committed.network_pubkey,
+            committed.cert_capabilities.to_le_bytes(),
+            committed.cert_signature,
+        )
+    } else {
+        network_marker[..ONBOARDING_READY_MARKER.len()].copy_from_slice(ONBOARDING_READY_MARKER);
+        (
+            provisioning.staged.authority_pubkey.unwrap_or(EMPTY_PUBKEY),
+            provisioning
+                .staged
+                .cert_capabilities
+                .map(|caps| caps.to_le_bytes())
+                .unwrap_or(EMPTY_CAPABILITIES),
+            provisioning
+                .staged
+                .cert_signature
+                .unwrap_or(EMPTY_SIGNATURE),
+        )
+    };
 
     let _ = server.set(&server.onboarding.network_marker, &network_marker);
     let _ = server.set(&server.onboarding.authority_pubkey, &authority_pubkey);
@@ -158,71 +161,25 @@ async fn handle_onboarding_gatt_event(
             event: GattEvent::Write(event),
         } => {
             let handle = event.handle();
+            let data = event.data();
             let mut provisioning = provisioning_state.lock().await;
 
-                if handle == server.onboarding.authority_pubkey.handle {
-                    if provisioning.committed.is_some() {
-                        drop(provisioning);
-                        event.reject(AttErrorCode::VALUE_NOT_ALLOWED)
-                            .map_err(|_| NetworkError::ProtocolError)?
-                            .send()
-                            .await;
-                        return Ok(true);
-                    }
-                    let authority = conn
-                        .get(&server.onboarding.authority_pubkey)
-                        .map_err(|_| NetworkError::ProtocolError)?;
-                    provisioning.staged.authority_pubkey = Some(authority);
-                } else if handle == server.onboarding.cert_capabilities.handle {
-                    if provisioning.committed.is_some() {
-                        drop(provisioning);
-                        event.reject(AttErrorCode::VALUE_NOT_ALLOWED)
-                            .map_err(|_| NetworkError::ProtocolError)?
-                            .send()
-                            .await;
-                        return Ok(true);
-                    }
-                    let cert_capabilities = conn
-                        .get(&server.onboarding.cert_capabilities)
-                        .map_err(|_| NetworkError::ProtocolError)?;
-                    provisioning.staged.cert_capabilities =
-                        Some(u16::from_le_bytes(cert_capabilities));
-                } else if handle == server.onboarding.cert_signature.handle {
-                    if provisioning.committed.is_some() {
-                        drop(provisioning);
-                        event.reject(AttErrorCode::VALUE_NOT_ALLOWED)
-                            .map_err(|_| NetworkError::ProtocolError)?
-                            .send()
-                            .await;
-                        return Ok(true);
-                    }
-                    let cert_signature = conn
-                        .get(&server.onboarding.cert_signature)
-                        .map_err(|_| NetworkError::ProtocolError)?;
-                    provisioning.staged.cert_signature = Some(cert_signature);
-                } else if handle == server.onboarding.commit_enrollment.handle {
-                    match storage::commit_staged_enrollment(identity, &mut provisioning) {
-                        Ok(_) => {}
-                        Err(EnrollmentError::AlreadyEnrolled | EnrollmentError::IncompleteStagedEnrollment | EnrollmentError::InvalidCertificate) => {
-                            drop(provisioning);
-                            event.reject(AttErrorCode::VALUE_NOT_ALLOWED)
-                                .map_err(|_| NetworkError::ProtocolError)?
-                                .send()
-                                .await;
-                            return Ok(true);
-                        }
-                    }
-
-                    let mut flash = flash.lock().await;
-                    storage::save_provisioning(&mut *flash, identity, &provisioning)
-                        .map_err(|_| NetworkError::ProtocolError)?;
-                } else {
+            if let Err(err) =
+                apply_onboarding_write(server, handle, data, identity, &mut provisioning)
+            {
                 drop(provisioning);
-                event.reject(AttErrorCode::WRITE_NOT_PERMITTED)
+                event
+                    .reject(err)
                     .map_err(|_| NetworkError::ProtocolError)?
                     .send()
                     .await;
                 return Ok(true);
+            }
+
+            if handle == server.onboarding.commit_enrollment.handle {
+                let mut flash = flash.lock().await;
+                storage::save_provisioning(&mut *flash, identity, &provisioning)
+                    .map_err(|_| NetworkError::ProtocolError)?;
             }
 
             let advertised_capabilities = if let Some(membership) = provisioning.committed {
@@ -235,7 +192,8 @@ async fn handle_onboarding_gatt_event(
             };
             apply_provisioning_to_server(server, &provisioning, identity, advertised_capabilities);
             drop(provisioning);
-            event.accept()
+            event
+                .accept()
                 .map_err(|_| NetworkError::ProtocolError)?
                 .send()
                 .await;
@@ -247,6 +205,50 @@ async fn handle_onboarding_gatt_event(
         }
         _ => Ok(true),
     }
+}
+
+fn apply_onboarding_write(
+    server: &OnboardingServer<'static>,
+    handle: u16,
+    data: &[u8],
+    identity: &NodeIdentity,
+    provisioning: &mut ProvisioningState,
+) -> Result<(), AttErrorCode> {
+    if handle == server.onboarding.authority_pubkey.handle {
+        if provisioning.committed.is_some() || data.len() != 32 {
+            return Err(AttErrorCode::VALUE_NOT_ALLOWED);
+        }
+        let mut authority = [0u8; 32];
+        authority.copy_from_slice(data);
+        provisioning.staged.authority_pubkey = Some(authority);
+        return Ok(());
+    }
+
+    if handle == server.onboarding.cert_capabilities.handle {
+        if provisioning.committed.is_some() || data.len() != 2 {
+            return Err(AttErrorCode::VALUE_NOT_ALLOWED);
+        }
+        provisioning.staged.cert_capabilities = Some(u16::from_le_bytes([data[0], data[1]]));
+        return Ok(());
+    }
+
+    if handle == server.onboarding.cert_signature.handle {
+        if provisioning.committed.is_some() || data.len() != 64 {
+            return Err(AttErrorCode::VALUE_NOT_ALLOWED);
+        }
+        let mut cert_signature = [0u8; 64];
+        cert_signature.copy_from_slice(data);
+        provisioning.staged.cert_signature = Some(cert_signature);
+        return Ok(());
+    }
+
+    if handle == server.onboarding.commit_enrollment.handle {
+        return storage::commit_staged_enrollment(identity, provisioning)
+            .map(|_| ())
+            .map_err(|_| AttErrorCode::VALUE_NOT_ALLOWED);
+    }
+
+    Err(AttErrorCode::WRITE_NOT_PERMITTED)
 }
 
 /// Lightweight advertisement payload: [short_addr: 8][capabilities: 2]
@@ -335,7 +337,9 @@ impl<'stack, C: Controller> BleResponder<'stack, C> {
         provisioning_state: &'static Mutex<NoopRawMutex, ProvisioningState>,
         flash: &'static Mutex<NoopRawMutex, FlashStorage<'static>>,
     ) -> Self {
-        let provisioning = provisioning_state.try_lock().expect("provisioning state unavailable during init");
+        let provisioning = provisioning_state
+            .try_lock()
+            .expect("provisioning state unavailable during init");
         Self {
             peripheral,
             stack,
@@ -389,7 +393,9 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
             // scan response data for service UUIDs when filtering scans.
             let mut scan_data = [0u8; 31];
             let scan_len = match AdStructure::encode_slice(
-                &[AdStructure::CompleteServiceUuids128(&[ONBOARDING_SERVICE_UUID_BYTES])],
+                &[AdStructure::CompleteServiceUuids128(&[
+                    ONBOARDING_SERVICE_UUID_BYTES,
+                ])],
                 &mut scan_data[..],
             ) {
                 Ok(len) => len,
@@ -449,7 +455,18 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
             // delivery follow-up frames added above the base peer-sync exchange.
             let listener = L2capChannel::listen(self.stack, gatt_conn.raw());
             let mut channel = loop {
-                match select(listener.accept(&l2cap_config), handle_onboarding_gatt_event(&self.server, &gatt_conn, self.identity, self.provisioning_state, self.flash)).await {
+                match select(
+                    listener.accept(&l2cap_config),
+                    handle_onboarding_gatt_event(
+                        &self.server,
+                        &gatt_conn,
+                        self.identity,
+                        self.provisioning_state,
+                        self.flash,
+                    ),
+                )
+                .await
+                {
                     Either::First(result) => match result {
                         Ok(ch) => break ch,
                         Err(e) => {

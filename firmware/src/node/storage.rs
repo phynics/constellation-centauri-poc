@@ -217,11 +217,15 @@ pub fn save_identity<S: NorFlash + ReadNorFlash>(
     save_provisioning(storage, identity, &provisioning)
 }
 
-pub fn load_onboarding<S: ReadNorFlash>(storage: &mut S) -> Result<Option<StoredMembership>, StorageError> {
+pub fn load_onboarding<S: ReadNorFlash>(
+    storage: &mut S,
+) -> Result<Option<StoredMembership>, StorageError> {
     Ok(load_provisioning(storage)?.committed)
 }
 
-pub fn load_provisioning<S: ReadNorFlash>(storage: &mut S) -> Result<ProvisioningState, StorageError> {
+pub fn load_provisioning<S: ReadNorFlash>(
+    storage: &mut S,
+) -> Result<ProvisioningState, StorageError> {
     let mut magic = [0u8; 4];
     storage
         .read(MAGIC_OFFSET as u32, &mut magic)
@@ -306,7 +310,8 @@ pub fn save_provisioning<S: NorFlash>(
     let mut buf = [0xFFu8; STORAGE_SIZE];
     buf[MAGIC_OFFSET..MAGIC_OFFSET + 4].copy_from_slice(&MAGIC);
     buf[VERSION_OFFSET] = STORAGE_VERSION_V3;
-    buf[SECRET_KEY_OFFSET..SECRET_KEY_OFFSET + 32].copy_from_slice(identity.signing_key().as_bytes());
+    buf[SECRET_KEY_OFFSET..SECRET_KEY_OFFSET + 32]
+        .copy_from_slice(identity.signing_key().as_bytes());
 
     let mut flags = 0u8;
     if let Some(committed) = provisioning.committed {
@@ -345,7 +350,10 @@ pub fn clear_identity<S: NorFlash>(storage: &mut S) -> Result<(), StorageError> 
     Ok(())
 }
 
-fn read_membership(buf: &[u8; STORAGE_SIZE], offset: usize) -> Result<Option<StoredMembership>, StorageError> {
+fn read_membership(
+    buf: &[u8; STORAGE_SIZE],
+    offset: usize,
+) -> Result<Option<StoredMembership>, StorageError> {
     let pubkey = read_pubkey(buf, offset)?;
     if pubkey.iter().all(|byte| *byte == 0xFF) {
         return Ok(None);
@@ -474,7 +482,10 @@ mod tests {
         save_provisioning(&mut storage, &identity, &provisioning).unwrap();
         let loaded = load_provisioning(&mut storage).unwrap();
         assert_eq!(loaded, provisioning);
-        assert_eq!(load_identity(&mut storage).unwrap().pubkey(), identity.pubkey());
+        assert_eq!(
+            load_identity(&mut storage).unwrap().pubkey(),
+            identity.pubkey()
+        );
     }
 
     #[test]
@@ -593,7 +604,10 @@ mod tests {
             staged: StagedEnrollment::default(),
         };
 
-        assert_eq!(effective_capabilities(&identity, &mut provisioning, 0x1111), 0x7777);
+        assert_eq!(
+            effective_capabilities(&identity, &mut provisioning, 0x1111),
+            0x7777
+        );
     }
 
     #[test]
@@ -608,7 +622,10 @@ mod tests {
             staged: StagedEnrollment::default(),
         };
 
-        assert_eq!(effective_capabilities(&identity, &mut provisioning, 0x1111), 0x1111);
+        assert_eq!(
+            effective_capabilities(&identity, &mut provisioning, 0x1111),
+            0x1111
+        );
         assert!(provisioning.committed.is_none());
     }
 }

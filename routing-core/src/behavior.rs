@@ -103,8 +103,12 @@ pub async fn apply_discovery_events<M: RawMutex>(
     let mut table = routing_table.lock().await;
     let now = Instant::now().as_ticks();
     for event in events.iter() {
-        let is_new =
-            table.update_peer_compact(event.short_addr, event.capabilities, event.transport_addr, now);
+        let is_new = table.update_peer_compact(
+            event.short_addr,
+            event.capabilities,
+            event.transport_addr,
+            now,
+        );
         if is_new {
             log::info!(
                 "[central] New peer {:02x?} ({} total)",
@@ -141,9 +145,7 @@ pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
             heapless::Vec::new();
 
         for peer in table.peers.iter() {
-            if peer.transport_addr.is_empty()
-                || (peer.capabilities & Capabilities::ROUTE == 0)
-            {
+            if peer.transport_addr.is_empty() || (peer.capabilities & Capabilities::ROUTE == 0) {
                 continue;
             }
 

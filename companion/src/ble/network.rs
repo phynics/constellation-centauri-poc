@@ -61,10 +61,7 @@ impl MacInitiator {
 }
 
 impl H2hInitiator for MacInitiator {
-    async fn scan(
-        &mut self,
-        duration_ms: u64,
-    ) -> heapless::Vec<DiscoveryEvent, MAX_SCAN_RESULTS> {
+    async fn scan(&mut self, duration_ms: u64) -> heapless::Vec<DiscoveryEvent, MAX_SCAN_RESULTS> {
         let mut out = heapless::Vec::new();
 
         if self
@@ -90,7 +87,11 @@ impl H2hInitiator for MacInitiator {
         let _ = self.central.stop_scan().await;
 
         for device in devices.into_iter() {
-            if !device.services.iter().any(|uuid| *uuid == ONBOARDING_SERVICE_UUID) {
+            if !device
+                .services
+                .iter()
+                .any(|uuid| *uuid == ONBOARDING_SERVICE_UUID)
+            {
                 continue;
             }
 

@@ -37,7 +37,11 @@ impl NodeCertificate {
     }
 
     pub fn verify_against_network(&self, network_pubkey: &PubKey) -> bool {
-        verify(network_pubkey, &self.signable_bytes(), &self.network_signature)
+        verify(
+            network_pubkey,
+            &self.signable_bytes(),
+            &self.network_signature,
+        )
     }
 
     pub fn issue(network_authority: &NodeIdentity, node_pubkey: PubKey, capabilities: u16) -> Self {

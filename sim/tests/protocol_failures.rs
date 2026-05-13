@@ -20,11 +20,13 @@ fn replayed_message_is_accepted_again_after_dedup_window_rollover() {
         let mut id = [0u8; 8];
         id[0] = i;
         id[7] = i.wrapping_mul(3);
-        let trace_id = sim.inject_message_with_id(0, 1, MessageKind::Manual, format!("fill-{i}"), id);
+        let trace_id =
+            sim.inject_message_with_id(0, 1, MessageKind::Manual, format!("fill-{i}"), id);
         sim.wait_for_trace_terminal(trace_id, Duration::from_secs(2));
     }
 
-    let replay = sim.inject_message_with_id(0, 1, MessageKind::Manual, "replay me again", replay_id);
+    let replay =
+        sim.inject_message_with_id(0, 1, MessageKind::Manual, "replay me again", replay_id);
     sim.wait_for_trace_terminal(replay, Duration::from_secs(2));
 
     // Desired property: old message IDs should remain non-replayable long
@@ -117,10 +119,10 @@ fn missing_delivery_ack_causes_duplicate_redelivery_on_next_wake() {
     // the router redelivers it on the next wake because delivery state is not
     // robust against ack loss.
     assert_eq!(
-        sim.trace_event_count(
-            trace_id,
-            |kind| matches!(kind, TraceEventKind::DeliveredFromStore { .. })
-        ),
+        sim.trace_event_count(trace_id, |kind| matches!(
+            kind,
+            TraceEventKind::DeliveredFromStore { .. }
+        )),
         1,
         "same retained payload was delivered again after a lost ack"
     );
