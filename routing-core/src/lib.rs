@@ -11,6 +11,7 @@ extern crate alloc;
 pub mod behavior;
 pub mod config;
 pub mod crypto;
+pub mod facade;
 pub mod message;
 pub mod network;
 pub mod node;

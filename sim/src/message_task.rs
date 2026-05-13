@@ -8,7 +8,7 @@ use embassy_time::{Duration, Timer};
 use rand::Rng as _;
 
 use routing_core::config::DEFAULT_TTL;
-use routing_core::message::{broadcast_destination, route_message, MessageDecision, RoutedMessage};
+use routing_core::facade::{broadcast_destination, decide_routed_message, RoutedDecision, RoutedEnvelope};
 use routing_core::node::roles::Capabilities;
 use routing_core::protocol::packet::PACKET_TYPE_DATA;
 use routing_core::routing::table::RoutingTable;
@@ -64,7 +64,7 @@ pub async fn run_message_loop(
             let cfg = sim_config.lock().unwrap();
             cfg.capabilities[node_idx]
         };
-        let routed = RoutedMessage {
+        let routed = RoutedEnvelope {
             destination,
             is_broadcast: msg.is_broadcast,
             message_id: msg.message_id,
@@ -73,12 +73,12 @@ pub async fn run_message_loop(
         };
         let decision = {
             let mut table = routing_table.lock().await;
-            route_message(
+            decide_routed_message(
                 &mut table,
                 holder_caps,
                 destination_is_low_power,
                 all_nodes[node_idx].short_addr,
-                &routed,
+                routed,
             )
         };
 
@@ -96,7 +96,7 @@ pub async fn run_message_loop(
         }
 
         match decision {
-            MessageDecision::TtlExpired => {
+            RoutedDecision::TtlExpired => {
                 let mut state = tui_state.lock().unwrap();
                 state.push_trace_event(
                     msg.trace_id,
@@ -109,7 +109,7 @@ pub async fn run_message_loop(
                 state.set_trace_terminal_status(msg.trace_id, TraceStatus::TtlExpired);
                 continue;
             }
-            MessageDecision::Duplicate => {
+            RoutedDecision::Duplicate => {
                 let mut state = tui_state.lock().unwrap();
                 state.push_trace_event(
                     msg.trace_id,
@@ -122,7 +122,7 @@ pub async fn run_message_loop(
                 state.set_trace_terminal_status(msg.trace_id, TraceStatus::Deduped);
                 continue;
             }
-            MessageDecision::DeliveredLocal => {
+            RoutedDecision::DeliveredLocal => {
                 let mut state = tui_state.lock().unwrap();
                 state.push_trace_event(
                     msg.trace_id,
@@ -136,7 +136,7 @@ pub async fn run_message_loop(
                 state.msgs_received[node_idx] = state.msgs_received[node_idx].saturating_add(1);
                 continue;
             }
-            MessageDecision::NoRoute {
+            RoutedDecision::NoRoute {
                 should_retain_for_lpn,
                 ..
             } => {
@@ -198,11 +198,14 @@ pub async fn run_message_loop(
                 );
                 continue;
             }
-            MessageDecision::Forward(plan) => {
+            RoutedDecision::Forward {
+                candidates,
+                should_retain_for_lpn,
+            } => {
                 let mut forwarded_any = false;
                 let mut had_drop = false;
 
-                for (_peer_addr, transport) in plan.candidates.iter().copied() {
+                for (_peer_addr, transport) in candidates.iter().copied() {
                     let next_idx = transport.addr[0] as usize;
                     if next_idx >= MAX_NODES || next_idx == msg.sender_idx || next_idx == node_idx {
                         continue;
@@ -272,7 +275,7 @@ pub async fn run_message_loop(
                     );
                 }
                 if !forwarded_any {
-                    if plan.should_retain_for_lpn {
+                    if should_retain_for_lpn {
                         let body = tui_state
                             .lock()
                             .unwrap()

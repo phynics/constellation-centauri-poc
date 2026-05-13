@@ -15,20 +15,16 @@ use embassy_sync::mutex::Mutex as AsyncMutex;
 use rand::RngCore as _;
 use routing_core::behavior::{apply_discovery_events, build_h2h_payload, run_initiator_h2h_once};
 use routing_core::crypto::identity::NodeIdentity;
-use routing_core::message::{route_message, MessageDecision, RoutedMessage};
+use routing_core::facade::{
+    DeliveredInfra, MeshFacade, RoutedReceiveOutcome,
+};
 use routing_core::network::H2hResponder;
 use routing_core::network::{H2hInitiator, SESSION_KIND_H2H, SESSION_KIND_ROUTED};
 use routing_core::onboarding::{
     is_constellation_protocol_signature, parse_network_marker, NetworkMarker, NodeCertificate,
 };
-use routing_core::protocol::app::{
-    EncryptedAppFrame, InfraFrame, InfraKind, PingPayload, PongPayload, APP_CONTENT_TYPE_UTF8,
-    NONCE_LEN,
-};
+use routing_core::protocol::app::NONCE_LEN;
 use routing_core::protocol::h2h::H2hFrame;
-use routing_core::protocol::packet::{
-    build_packet_with_message_id, PacketHeader, PACKET_TYPE_FRAME_APP, PACKET_TYPE_FRAME_INFRA,
-};
 use routing_core::routing::table::RoutingTable;
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -724,17 +720,17 @@ async fn send_message_to_peer(
     destination: [u8; 8],
     body: &str,
 ) -> Result<[u8; 8], Box<dyn Error>> {
-    let (next_hop_transport, destination_pubkey) = {
+    let mut message_id = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut message_id);
+    let mut nonce = [0u8; NONCE_LEN];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let tx = {
         let table = routing_table.lock().await;
-        let destination_entry = table
-            .find_peer(&destination)
-            .ok_or("destination not present in routing table")?;
-        if destination_entry.pubkey == [0u8; 32] {
-            return Err("destination pubkey unknown".into());
-        }
-        let candidates = table.forwarding_candidates(&destination);
-        let (_, next_hop_transport) = candidates.first().ok_or("no route to destination")?;
-        (*next_hop_transport, destination_entry.pubkey)
+        let mut table = table;
+        let identity = NodeIdentity::from_bytes(&local_node.secret);
+        let mut mesh = MeshFacade::new(&mut table, &identity, local_node.capabilities);
+        mesh.plan_utf8_message(destination, message_id, nonce, body.as_bytes())
+            .map_err(|err| format!("send plan error: {err:?}"))?
     };
 
     let destination_label = {
@@ -748,41 +744,11 @@ async fn send_message_to_peer(
     };
     shared.lock().unwrap().push_event(format!(
         "routing toward {} via next hop transport_len={}",
-        destination_label, next_hop_transport.len
+        destination_label, tx.next_hop_transport.len
     ));
 
-    let identity = NodeIdentity::from_bytes(&local_node.secret);
-    let mut message_id = [0u8; 8];
-    rand::thread_rng().fill_bytes(&mut message_id);
-    let mut nonce = [0u8; NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut nonce);
-    let encrypted = EncryptedAppFrame::encrypt_user_data(
-        &identity,
-        &destination_pubkey,
-        nonce,
-        APP_CONTENT_TYPE_UTF8,
-        body.as_bytes(),
-    )
-    .map_err(|err| format!("crypto error: {err:?}"))?;
-    let mut payload = [0u8; 256];
-    let payload_len = encrypted
-        .serialize(&mut payload)
-        .map_err(|_| "failed to serialize encrypted app frame")?;
-
-    let mut packet = [0u8; 512];
-    let packet_len = build_packet_with_message_id(
-        &identity,
-        PACKET_TYPE_FRAME_APP,
-        0,
-        destination,
-        message_id,
-        &payload[..payload_len],
-        &mut packet,
-    )
-    .map_err(|_| "failed to serialize routed app packet")?;
-
     initiator
-        .send_routed_packet(next_hop_transport, &packet[..packet_len])
+        .send_routed_packet(tx.next_hop_transport, &tx.packet[..tx.len])
         .await
         .map_err(|_| "failed to send routed packet")?;
     Ok(message_id)
@@ -795,53 +761,22 @@ async fn send_ping_to_peer(
     local_node: &LocalNodeRecord,
     destination: [u8; 8],
 ) -> Result<[u8; 8], Box<dyn Error>> {
-    let next_hop_transport = {
-        let table = routing_table.lock().await;
-        let candidates = table.forwarding_candidates(&destination);
-        let (_, next_hop_transport) = candidates.first().ok_or("no route to destination")?;
-        *next_hop_transport
-    };
     let mut request_id = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut request_id);
-
-    let ping = PingPayload {
-        request_id,
-        origin_time_ms: now_secs().saturating_mul(1000),
+    let tx = {
+        let table = routing_table.lock().await;
+        let mut table = table;
+        let identity = NodeIdentity::from_bytes(&local_node.secret);
+        let mut mesh = MeshFacade::new(&mut table, &identity, local_node.capabilities);
+        mesh.plan_ping(destination, request_id, now_secs().saturating_mul(1000))
+            .map_err(|err| format!("failed to build ping packet: {err:?}"))?
     };
-    let mut ping_buf = [0u8; 32];
-    let ping_len = ping
-        .serialize(&mut ping_buf)
-        .map_err(|_| "serialize ping failed")?;
-    let mut infra_payload = heapless::Vec::new();
-    infra_payload
-        .extend_from_slice(&ping_buf[..ping_len])
-        .map_err(|_| "ping payload too large")?;
-    let infra = InfraFrame {
-        kind: InfraKind::Ping,
-        payload: infra_payload,
-    };
-    let mut payload = [0u8; 256];
-    let payload_len = infra
-        .serialize(&mut payload)
-        .map_err(|_| "serialize infra frame failed")?;
-    let identity = NodeIdentity::from_bytes(&local_node.secret);
-    let mut packet = [0u8; 512];
-    let packet_len = build_packet_with_message_id(
-        &identity,
-        PACKET_TYPE_FRAME_INFRA,
-        0,
-        destination,
-        request_id,
-        &payload[..payload_len],
-        &mut packet,
-    )
-    .map_err(|_| "failed to build ping packet")?;
     shared.lock().unwrap().push_event(format!(
         "ping routed via next hop transport_len={}",
-        next_hop_transport.len
+        tx.next_hop_transport.len
     ));
     initiator
-        .send_routed_packet(next_hop_transport, &packet[..packet_len])
+        .send_routed_packet(tx.next_hop_transport, &tx.packet[..tx.len])
         .await
         .map_err(|_| "failed to send ping packet")?;
     Ok(request_id)
@@ -855,144 +790,92 @@ async fn handle_companion_routed_packet(
     peer_transport_addr: routing_core::transport::TransportAddr,
     packet: &[u8],
 ) {
-    let Ok((header, payload)) = PacketHeader::deserialize(packet) else {
-        shared
+    match {
+        let mut table = routing_table.lock().await;
+        let identity = NodeIdentity::from_bytes(&local_node.secret);
+        let mut mesh = MeshFacade::new(&mut table, &identity, local_node.capabilities);
+        mesh.receive(peer_transport_addr, packet)
+    } {
+        RoutedReceiveOutcome::InvalidPacket => shared
             .lock()
             .unwrap()
-            .push_event("invalid routed packet header".to_string());
-        return;
-    };
-    let sender_pubkey = {
-        let table = routing_table.lock().await;
-        table
-            .peers
-            .iter()
-            .find(|p| p.transport_addr == peer_transport_addr || p.short_addr == header.src)
-            .map(|p| p.pubkey)
-    };
-    if let Some(sender_pubkey) = sender_pubkey {
-        if !header.verify(&sender_pubkey, payload) {
-            shared.lock().unwrap().push_event(format!(
-                "routed signature verify failed from {:02x?}",
-                &header.src[..4]
-            ));
-            return;
-        }
-    }
-    if header.dst != local_node.short_addr {
-        let decision = {
-            let mut table = routing_table.lock().await;
-            route_message(
-                &mut table,
-                local_node.capabilities,
-                false,
-                local_node.short_addr,
-                &RoutedMessage {
-                    destination: header.dst,
-                    is_broadcast: false,
-                    message_id: header.message_id,
-                    ttl: header.ttl,
-                    hop_count: header.hop_count,
-                },
-            )
-        };
-        match decision {
-            MessageDecision::Forward(_) => shared.lock().unwrap().push_event(format!(
+            .push_event("invalid routed packet header".to_string()),
+        RoutedReceiveOutcome::SignatureFailed { source } => shared.lock().unwrap().push_event(
+            format!("routed signature verify failed from {:02x?}", &source[..4]),
+        ),
+        RoutedReceiveOutcome::Forward { destination, .. } => shared.lock().unwrap().push_event(
+            format!(
                 "non-local routed packet for {:02x?} reached companion; forwarding not implemented here",
-                &header.dst[..4]
-            )),
-            MessageDecision::Duplicate => shared
-                .lock()
-                .unwrap()
-                .push_event("duplicate routed packet dropped".to_string()),
-            MessageDecision::NoRoute { .. } => shared
-                .lock()
-                .unwrap()
-                .push_event("no route for inbound non-local packet".to_string()),
-            MessageDecision::TtlExpired => shared
-                .lock()
-                .unwrap()
-                .push_event("inbound non-local packet ttl expired".to_string()),
-            MessageDecision::DeliveredLocal => {}
-        }
-        return;
-    }
-
-    match header.packet_type {
-        PACKET_TYPE_FRAME_INFRA => match InfraFrame::deserialize(payload) {
-            Ok(frame) => match frame.kind {
-                InfraKind::Ping => {
-                    if let Ok(ping) = PingPayload::deserialize(frame.payload.as_slice()) {
-                        shared.lock().unwrap().push_event(format!(
-                            "ping from {:02x?} req={} sent_ms={}",
-                            &header.src[..4],
-                            hex(&ping.request_id),
-                            ping.origin_time_ms
-                        ));
-                    }
-                }
-                InfraKind::Pong => {
-                    if let Ok(pong) = PongPayload::deserialize(frame.payload.as_slice()) {
-                        shared.lock().unwrap().push_event(format!(
-                            "pong from {:02x?} req={} recv_ttl={}",
-                            &pong.responder_addr[..4],
-                            hex(&pong.request_id),
-                            pong.received_ttl
-                        ));
-                    }
-                }
-                other => shared.lock().unwrap().push_event(format!(
-                    "infra {:?} from {:02x?}",
-                    other,
-                    &header.src[..4]
-                )),
-            },
-            Err(_) => shared
-                .lock()
-                .unwrap()
-                .push_event("failed to decode infra frame".to_string()),
-        },
-        PACKET_TYPE_FRAME_APP => match EncryptedAppFrame::deserialize(payload) {
-            Ok(frame) => {
-                let Some(sender_pubkey) = sender_pubkey else {
-                    shared
-                        .lock()
-                        .unwrap()
-                        .push_event("missing sender pubkey for app packet".to_string());
-                    return;
-                };
-                let identity = NodeIdentity::from_bytes(&local_node.secret);
-                let mut plain = [0u8; 192];
-                match frame.decrypt_user_data(&identity, &sender_pubkey, &mut plain) {
-                    Ok((APP_CONTENT_TYPE_UTF8, len)) => {
-                        let text = String::from_utf8_lossy(&plain[..len]).into_owned();
-                        shared.lock().unwrap().push_event(format!(
-                            "app from {:02x?}: {}",
-                            &header.src[..4],
-                            text
-                        ));
-                    }
-                    Ok((content_type, len)) => shared.lock().unwrap().push_event(format!(
-                        "app from {:02x?} content_type={} bytes={}",
-                        &header.src[..4],
-                        content_type,
-                        len
-                    )),
-                    Err(err) => shared
-                        .lock()
-                        .unwrap()
-                        .push_event(format!("app decrypt failed: {:?}", err)),
-                }
-            }
-            Err(_) => shared
-                .lock()
-                .unwrap()
-                .push_event("failed to decode encrypted app frame".to_string()),
-        },
-        other => shared
+                &destination[..4]
+            ),
+        ),
+        RoutedReceiveOutcome::Duplicate { .. } => shared
             .lock()
             .unwrap()
-            .push_event(format!("unsupported routed packet_type={}", other)),
+            .push_event("duplicate routed packet dropped".to_string()),
+        RoutedReceiveOutcome::NoRoute { .. } => shared
+            .lock()
+            .unwrap()
+            .push_event("no route for inbound non-local packet".to_string()),
+        RoutedReceiveOutcome::TtlExpired { .. } => shared
+            .lock()
+            .unwrap()
+            .push_event("inbound non-local packet ttl expired".to_string()),
+        RoutedReceiveOutcome::DeliveredInfra(DeliveredInfra::Ping { source, payload, .. }) => {
+            shared.lock().unwrap().push_event(format!(
+                "ping from {:02x?} req={} sent_ms={}",
+                &source[..4],
+                hex(&payload.request_id),
+                payload.origin_time_ms
+            ));
+        }
+        RoutedReceiveOutcome::DeliveredInfra(DeliveredInfra::Pong { payload, .. }) => {
+            shared.lock().unwrap().push_event(format!(
+                "pong from {:02x?} req={} recv_ttl={}",
+                &payload.responder_addr[..4],
+                hex(&payload.request_id),
+                payload.received_ttl
+            ));
+        }
+        RoutedReceiveOutcome::DeliveredInfra(DeliveredInfra::Other { source, kind, .. }) => {
+            shared
+                .lock()
+                .unwrap()
+                .push_event(format!("infra {:?} from {:02x?}", kind, &source[..4]));
+        }
+        RoutedReceiveOutcome::DeliveredAppUtf8(app) => {
+            let text = String::from_utf8_lossy(&app.plaintext[..app.len]).into_owned();
+            shared
+                .lock()
+                .unwrap()
+                .push_event(format!("app from {:02x?}: {}", &app.source[..4], text));
+        }
+        RoutedReceiveOutcome::UnsupportedLocalApp {
+            source,
+            content_type,
+            len,
+        } => shared.lock().unwrap().push_event(format!(
+            "app from {:02x?} content_type={} bytes={}",
+            &source[..4],
+            content_type,
+            len
+        )),
+        RoutedReceiveOutcome::DecryptFailed { error, .. } => shared
+            .lock()
+            .unwrap()
+            .push_event(format!("app decrypt failed: {:?}", error)),
+        RoutedReceiveOutcome::MissingSenderPubkey { .. } => shared
+            .lock()
+            .unwrap()
+            .push_event("missing sender pubkey for app packet".to_string()),
+        RoutedReceiveOutcome::UnsupportedLocalPacket { packet_type, .. } => shared
+            .lock()
+            .unwrap()
+            .push_event(format!("unsupported routed packet_type={}", packet_type)),
+        RoutedReceiveOutcome::InvalidLocalPayload { packet_type, .. } => shared
+            .lock()
+            .unwrap()
+            .push_event(format!("failed to decode local payload for packet_type={}", packet_type)),
     }
 }
 
