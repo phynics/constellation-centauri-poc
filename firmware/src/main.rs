@@ -424,12 +424,13 @@ async fn handle_routed_packet(
                     if let Ok((mut fwd_header, fwd_payload)) =
                         PacketHeader::deserialize(&forwarded[..packet.len()])
                     {
+                        let forwarded_len = routing_core::config::HEADER_SIZE + fwd_payload.len();
                         fwd_header.ttl = fwd_header.ttl.saturating_sub(1);
                         fwd_header.hop_count = fwd_header.hop_count.saturating_add(1);
                         if fwd_header.serialize(&mut forwarded).is_ok() {
                             let _ = routed_forward_queue.try_send(RoutedForward {
                                 peer_transport_addr: *next_hop_transport,
-                                len: routing_core::config::HEADER_SIZE + fwd_payload.len(),
+                                len: forwarded_len,
                                 packet: forwarded,
                             });
                             log::info!(

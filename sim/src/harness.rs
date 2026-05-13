@@ -134,6 +134,18 @@ impl SimHarness {
         body: impl Into<String>,
         message_id: [u8; 8],
     ) -> u64 {
+        self.inject_message_with_id_and_ttl(from, to, kind, body, message_id, DEFAULT_TTL)
+    }
+
+    pub fn inject_message_with_id_and_ttl(
+        &self,
+        from: usize,
+        to: usize,
+        kind: MessageKind,
+        body: impl Into<String>,
+        message_id: [u8; 8],
+        ttl: u8,
+    ) -> u64 {
         let body = body.into();
         let is_broadcast = to == BROADCAST_NODE;
         let destination_idx = if is_broadcast { from } else { to };
@@ -180,7 +192,7 @@ impl SimHarness {
                 link_enabled_at_send,
                 drop_prob_at_send,
                 message_id,
-                DEFAULT_TTL,
+                ttl,
             )
         };
 
@@ -191,7 +203,7 @@ impl SimHarness {
             is_broadcast,
             sender_idx: from,
             message_id,
-            ttl: DEFAULT_TTL,
+            ttl,
             hop_count: 0,
         };
 
@@ -826,3 +838,99 @@ fn with_routing_table(
 
 #[allow(dead_code)]
 pub const BROADCAST_NODE: usize = MAX_NODES;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config_ops;
+    use crate::scenario;
+    use crate::sim_state::TraceStatus;
+
+    #[test]
+    fn routed_message_forwards_across_seeded_indirect_path() {
+        let harness = SimHarness::new(scenario::full_mesh_small(3));
+        harness.update_config(|cfg| {
+            for from in 0..3 {
+                for to in 0..3 {
+                    config_ops::set_link_enabled(cfg, from, to, false);
+                    cfg.drop_prob[from][to] = 0;
+                }
+            }
+            config_ops::set_bidirectional_link(cfg, 0, 1, true);
+            config_ops::set_bidirectional_link(cfg, 1, 2, true);
+        });
+
+        harness.seed_direct_peer(0, 1, 1);
+        harness.seed_direct_peer(1, 0, 1);
+        harness.seed_direct_peer(1, 2, 1);
+        harness.seed_direct_peer(2, 1, 1);
+        harness.seed_indirect_peer_via(0, 1, 2, 1, 1);
+
+        let trace_id = harness.send_message(0, 2, MessageKind::Manual, "hello mesh");
+        let trace = harness.wait_for_trace_terminal(trace_id, Duration::from_secs(2));
+
+        assert_eq!(trace.terminal_status, TraceStatus::Delivered);
+        harness.assert_forwarded_edges(trace_id, &[(0, 1), (1, 2)]);
+        harness.assert_delivered_to(trace_id, 2);
+    }
+
+    #[test]
+    fn routed_message_expires_when_ttl_too_small_for_indirect_hop() {
+        let harness = SimHarness::new(scenario::full_mesh_small(3));
+        harness.update_config(|cfg| {
+            for from in 0..3 {
+                for to in 0..3 {
+                    config_ops::set_link_enabled(cfg, from, to, false);
+                    cfg.drop_prob[from][to] = 0;
+                }
+            }
+            config_ops::set_bidirectional_link(cfg, 0, 1, true);
+            config_ops::set_bidirectional_link(cfg, 1, 2, true);
+        });
+
+        harness.seed_direct_peer(0, 1, 1);
+        harness.seed_direct_peer(1, 0, 1);
+        harness.seed_direct_peer(1, 2, 1);
+        harness.seed_direct_peer(2, 1, 1);
+        harness.seed_indirect_peer_via(0, 1, 2, 1, 1);
+
+        let trace_id = harness.inject_message_with_id_and_ttl(
+            0,
+            2,
+            MessageKind::Manual,
+            "ttl test",
+            [0xAA; 8],
+            1,
+        );
+        let trace = harness.wait_for_trace_terminal(trace_id, Duration::from_secs(2));
+
+        assert_eq!(trace.terminal_status, TraceStatus::TtlExpired);
+        harness.assert_forwarded_edges(trace_id, &[(0, 1)]);
+    }
+
+    #[test]
+    fn routed_duplicate_message_ids_are_suppressed() {
+        let harness = SimHarness::new(scenario::full_mesh_small(2));
+        harness.update_config(|cfg| {
+            for from in 0..2 {
+                for to in 0..2 {
+                    cfg.drop_prob[from][to] = 0;
+                }
+            }
+        });
+
+        harness.seed_direct_peer(0, 1, 1);
+        harness.seed_direct_peer(1, 0, 1);
+
+        let message_id = [0x44; 8];
+        let first = harness.inject_message_with_id(0, 1, MessageKind::Manual, "first", message_id);
+        let second = harness.inject_message_with_id(0, 1, MessageKind::Manual, "second", message_id);
+
+        let first_trace = harness.wait_for_trace_terminal(first, Duration::from_secs(2));
+        let second_trace = harness.wait_for_trace_terminal(second, Duration::from_secs(2));
+
+        assert_eq!(first_trace.terminal_status, TraceStatus::Delivered);
+        assert_eq!(second_trace.terminal_status, TraceStatus::Deduped);
+        harness.assert_delivered_to(first, 1);
+    }
+}
