@@ -368,7 +368,6 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
             let adv_len = match AdStructure::encode_slice(
                 &[
                     AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-                    AdStructure::CompleteServiceUuids128(&[ONBOARDING_SERVICE_UUID_BYTES]),
                     AdStructure::ManufacturerSpecificData {
                         company_identifier: CONSTELLATION_COMPANY_ID,
                         payload: &disc_buf,
@@ -378,9 +377,25 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
             ) {
                 Ok(len) => len,
                 Err(e) => {
-                    log::warn!("[periph] AD encode error: {:?}", e);
+                    esp_println::println!("[periph] AD encode error: {:?}", e);
                     Timer::after(Duration::from_secs(1)).await;
                     continue;
+                }
+            };
+
+            // Service UUID goes in scan response — 128-bit UUID (18 bytes)
+            // doesn't fit in the 31-byte advertising data alongside flags +
+            // manufacturer data (combined 35 bytes). CoreBluetooth checks
+            // scan response data for service UUIDs when filtering scans.
+            let mut scan_data = [0u8; 31];
+            let scan_len = match AdStructure::encode_slice(
+                &[AdStructure::CompleteServiceUuids128(&[ONBOARDING_SERVICE_UUID_BYTES])],
+                &mut scan_data[..],
+            ) {
+                Ok(len) => len,
+                Err(e) => {
+                    esp_println::println!("[periph] Scan response encode error: {:?}", e);
+                    0
                 }
             };
 
@@ -390,7 +405,7 @@ impl<'stack, C: Controller> H2hResponder for BleResponder<'stack, C> {
                     &Default::default(),
                     Advertisement::ConnectableScannableUndirected {
                         adv_data: &adv_data[..adv_len],
-                        scan_data: &[],
+                        scan_data: &scan_data[..scan_len],
                     },
                 )
                 .await
