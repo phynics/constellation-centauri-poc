@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 
 use blew::l2cap::{L2capChannel, Psm};
 use blew::{Central, DeviceId};
-use routing_core::crypto::identity::short_addr_of;
 use routing_core::network::{
     DiscoveryEvent, H2hInitiator, H2hResponder, InboundH2h, NetworkError, MAX_SCAN_RESULTS,
     SESSION_KIND_H2H, SESSION_KIND_ROUTED,
@@ -16,9 +15,7 @@ use sha2::Digest as _;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::mpsc;
 
-use super::constants::{
-    CAPABILITIES_CHAR_UUID, L2CAP_PSM_CHAR_UUID, NODE_PUBKEY_CHAR_UUID, ONBOARDING_SERVICE_UUID,
-};
+use super::constants::{L2CAP_PSM_CHAR_UUID, ONBOARDING_SERVICE_UUID};
 
 const CORE_BLUETOOTH_ADDR_LEN: u8 = 16;
 const L2CAP_FRAME_BUF_SIZE: usize = 512;
@@ -121,7 +118,7 @@ impl MacInitiator {
 
 impl H2hInitiator for MacInitiator {
     async fn scan(&mut self, duration_ms: u64) -> heapless::Vec<DiscoveryEvent, MAX_SCAN_RESULTS> {
-        let mut out = heapless::Vec::new();
+        let out = heapless::Vec::new();
 
         if self
             .central
@@ -160,38 +157,13 @@ impl H2hInitiator for MacInitiator {
                 .unwrap()
                 .insert(transport_addr, device.id.clone());
 
-            if self.central.connect(&device.id).await.is_err() {
-                continue;
-            }
-            let _ = self.central.discover_services(&device.id).await;
-
-            let pubkey = self
-                .central
-                .read_characteristic(&device.id, NODE_PUBKEY_CHAR_UUID)
-                .await;
-            let capabilities = self
-                .central
-                .read_characteristic(&device.id, CAPABILITIES_CHAR_UUID)
-                .await;
-
-            let _ = self.central.disconnect(&device.id).await;
-
-            let (Ok(pubkey), Ok(capabilities)) = (pubkey, capabilities) else {
-                continue;
-            };
-            if pubkey.len() != 32 || capabilities.len() != 2 {
-                continue;
-            }
-
-            let mut pubkey_arr = [0u8; 32];
-            pubkey_arr.copy_from_slice(&pubkey);
-            let _ = out.push(DiscoveryEvent {
-                short_addr: short_addr_of(&pubkey_arr),
-                capabilities: u16::from_le_bytes([capabilities[0], capabilities[1]]),
-                transport_addr,
-            });
         }
 
+        // Scan no longer emits DiscoveryEvents.  The real short_addr and
+        // capabilities come from GATT inspection (queued in the runtime
+        // loop) or from H2H exchanges, not from the scan itself.  This
+        // avoids serially connecting to every discovered device during scan,
+        // which was the main source of discovery latency.
         out
     }
 

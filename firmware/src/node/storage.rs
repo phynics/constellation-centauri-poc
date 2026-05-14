@@ -20,6 +20,10 @@ const MAGIC: [u8; 4] = [0x43, 0x53, 0x54, 0x4C];
 /// - staged_membership: 98 bytes
 ///
 /// The public key is derived from the secret key, so we don't store it.
+///
+/// TODO: This record lives at offset 0 within the application's flash sector.
+/// A future change should move it to a dedicated partition declared in the
+/// ESP32 partition table so that it survives firmware reflashes.
 const MAGIC_OFFSET: usize = 0;
 const VERSION_OFFSET: usize = 4;
 const FLAGS_OFFSET: usize = 5;
@@ -332,6 +336,11 @@ pub fn save_provisioning<S: NorFlash>(
     }
     buf[FLAGS_OFFSET] = flags;
 
+    // Erase before write: NOR flash requires erasing a sector before
+    // rewriting it, since write can only turn 1-bits into 0-bits.
+    storage
+        .erase(MAGIC_OFFSET as u32, (MAGIC_OFFSET + STORAGE_SIZE) as u32)
+        .map_err(|_| StorageError::EraseFailed)?;
     storage
         .write(MAGIC_OFFSET as u32, &buf)
         .map_err(|_| StorageError::WriteFailed)?;
@@ -406,6 +415,7 @@ fn write_signature(buf: &mut [u8; STORAGE_SIZE], offset: usize, signature: &Sign
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::convert::Infallible;
 
     // Mock storage for testing
     struct MockStorage {
@@ -421,7 +431,7 @@ mod tests {
     }
 
     impl embedded_storage::nor_flash::ErrorType for MockStorage {
-        type Error = ();
+        type Error = Infallible;
     }
 
     impl ReadNorFlash for MockStorage {

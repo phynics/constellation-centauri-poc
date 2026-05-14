@@ -161,12 +161,20 @@ async fn main(_spawner: Spawner) {
                     certificate.verify_against_network(&committed.network_pubkey)
                 );
             } else {
-                println!("Onboarding state: ready");
+                println!("Onboarding state: uninitialized");
             }
             state
         }
+        Err(node::storage::StorageError::InvalidMagic) => {
+            println!("Onboarding state: uninitialized");
+            ProvisioningState::default()
+        }
+        Err(node::storage::StorageError::InvalidVersion) => {
+            println!("Onboarding state: unsupported legacy record, using defaults");
+            ProvisioningState::default()
+        }
         Err(e) => {
-            println!("Onboarding state unreadable: {:?}", e);
+            println!("Onboarding state unreadable: {:?}; using defaults", e);
             ProvisioningState::default()
         }
     };
@@ -623,8 +631,18 @@ fn load_or_generate_identity(flash: &mut FlashStorage, rng: &mut Rng) -> NodeIde
                 }
             }
         }
-        Ok(false) | Err(_) => {
+        Ok(false) => {
             println!("No identity found. Generating new identity...");
+            let id = NodeIdentity::generate_insecure(rng);
+            match storage::save_identity(flash, &id) {
+                Ok(_) => println!("Identity saved to flash"),
+                Err(e) => println!("Warning: Failed to save identity: {:?}", e),
+            }
+            id
+        }
+        Err(e) => {
+            println!("Identity storage unreadable: {:?}", e);
+            println!("Generating new identity...");
             let id = NodeIdentity::generate_insecure(rng);
             match storage::save_identity(flash, &id) {
                 Ok(_) => println!("Identity saved to flash"),

@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::error::Error;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -13,7 +14,7 @@ use blew::{Central, Peripheral};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex as AsyncMutex;
 use rand::RngCore as _;
-use routing_core::behavior::{apply_discovery_events, build_h2h_payload, run_initiator_h2h_once};
+use routing_core::behavior::{build_h2h_payload, run_initiator_h2h_once};
 use routing_core::crypto::identity::NodeIdentity;
 use routing_core::facade::{
     DeliveredInfra, MeshFacade, RoutedReceiveOutcome,
@@ -43,6 +44,11 @@ use crate::diagnostics::state::{DiscoveredPeer, SharedState};
 use crate::node::storage::{regenerate_network_authority, LocalNodeRecord};
 use crate::onboarding::marker_summary;
 use crate::runtime::CompanionCommand;
+
+const DISCOVERY_SCAN_INTERVAL: Duration = Duration::from_secs(2);
+const DISCOVERY_SCAN_WINDOW_MS: u64 = 750;
+const MESH_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
+const MAX_INSPECTIONS_PER_PASS: usize = 2;
 
 pub async fn run(
     shared: Arc<Mutex<SharedState>>,
@@ -158,8 +164,11 @@ pub async fn run(
     }
 
     let mut inspected: HashSet<String> = HashSet::new();
+    let mut queued_for_inspection: HashSet<String> = HashSet::new();
+    let mut inspection_queue: VecDeque<String> = VecDeque::new();
     let cmd_rx = Arc::new(Mutex::new(cmd_rx));
-    let mut next_mesh_cycle = Instant::now();
+    let mut next_discovery_scan = Instant::now();
+    let mut next_mesh_maintenance = Instant::now();
 
     loop {
         if let Ok(command) = cmd_rx.lock().unwrap().try_recv() {
@@ -175,6 +184,8 @@ pub async fn run(
                                 "commit sent to {device_id}; waiting for reboot + rediscovery"
                             ));
                             inspected.remove(&device_id);
+                            queued_for_inspection.remove(&device_id);
+                            inspection_queue.push_back(device_id);
                         }
                         Err(err) => {
                             let mut state = shared.lock().unwrap();
@@ -269,8 +280,8 @@ pub async fn run(
             }
         }
 
-        if Instant::now() >= next_mesh_cycle {
-            let events = initiator.scan(2_000).await;
+        if Instant::now() >= next_discovery_scan {
+            initiator.scan(DISCOVERY_SCAN_WINDOW_MS).await;
             {
                 let mut state = shared.lock().unwrap();
                 for device_id in known_devices.lock().unwrap().values() {
@@ -291,19 +302,34 @@ pub async fn run(
                     state.upsert_peer(peer);
                 }
             }
-            apply_discovery_events(&routing_table, &events).await;
-
             let discovered_ids: Vec<_> = known_devices.lock().unwrap().values().cloned().collect();
             for device_id in discovered_ids {
-                if inspected.insert(device_id.to_string()) {
+                let id = device_id.to_string();
+                if !inspected.contains(&id) && queued_for_inspection.insert(id.clone()) {
+                    inspection_queue.push_back(id);
+                }
+            }
+
+            for _ in 0..MAX_INSPECTIONS_PER_PASS {
+                let Some(device_id) = inspection_queue.pop_front() else {
+                    break;
+                };
+                queued_for_inspection.remove(&device_id);
+                if !inspected.contains(&device_id) {
                     if let Err(err) = inspect_device(&central, &shared, &device_id).await {
                         let mut state = shared.lock().unwrap();
-                        state.set_peer_error(device_id.to_string(), err.to_string());
+                        state.set_peer_error(device_id.clone(), err.to_string());
                         state.push_event(format!("inspect {} failed: {err}", device_id));
+                    } else {
+                        inspected.insert(device_id);
                     }
                 }
             }
 
+            next_discovery_scan = Instant::now() + DISCOVERY_SCAN_INTERVAL;
+        }
+
+        if Instant::now() >= next_mesh_maintenance {
             let identity = NodeIdentity::from_bytes(&local_node.secret);
             run_initiator_h2h_once(
                 &mut initiator,
@@ -314,7 +340,7 @@ pub async fn run(
             )
             .await;
             update_routing_snapshot(&shared, &routing_table, &uptime).await;
-            next_mesh_cycle = Instant::now() + Duration::from_secs(10);
+            next_mesh_maintenance = Instant::now() + MESH_MAINTENANCE_INTERVAL;
         }
 
         tokio::select! {
@@ -329,7 +355,33 @@ pub async fn run(
                     CentralEvent::AdapterStateChanged { powered } => {
                         shared.lock().unwrap().push_event(format!("central adapter powered={powered}"));
                     }
-                    CentralEvent::DeviceDiscovered(_) => {}
+                    CentralEvent::DeviceDiscovered(device) => {
+                        if device.services.iter().any(|uuid| *uuid == ONBOARDING_SERVICE_UUID) {
+                            let transport_addr = transport_addr_for_device_id(&device.id);
+                            known_devices
+                                .lock()
+                                .unwrap()
+                                .insert(transport_addr, device.id.clone());
+                            let id = device.id.to_string();
+                            shared.lock().unwrap().upsert_peer(DiscoveredPeer {
+                                id: id.clone(),
+                                short_addr: None,
+                                name: device.name.clone(),
+                                rssi: device.rssi,
+                                last_seen_unix_secs: now_secs(),
+                                has_onboarding_service: true,
+                                has_constellation_signature: false,
+                                onboarding_ready: false,
+                                network_pubkey_hex: None,
+                                node_pubkey_hex: None,
+                                capabilities: None,
+                                last_error: None,
+                            });
+                            if !inspected.contains(&id) && queued_for_inspection.insert(id.clone()) {
+                                inspection_queue.push_back(id);
+                            }
+                        }
+                    }
                     CentralEvent::DeviceConnected { device_id } => {
                         shared.lock().unwrap().push_event(format!("connected to {device_id}"));
                     }
@@ -551,25 +603,26 @@ async fn enroll_device(
 async fn inspect_device(
     central: &Central,
     shared: &Arc<Mutex<SharedState>>,
-    device_id: &blew::types::DeviceId,
+    device_id: &str,
 ) -> Result<(), Box<dyn Error>> {
-    central.connect(device_id).await?;
-    let _ = central.discover_services(device_id).await?;
+    let device_id = blew::types::DeviceId::from(device_id);
+    central.connect(&device_id).await?;
+    let _ = central.discover_services(&device_id).await?;
 
     let protocol = central
-        .read_characteristic(device_id, PROTOCOL_SIGNATURE_CHAR_UUID)
+        .read_characteristic(&device_id, PROTOCOL_SIGNATURE_CHAR_UUID)
         .await?;
     let marker = central
-        .read_characteristic(device_id, NETWORK_MARKER_CHAR_UUID)
+        .read_characteristic(&device_id, NETWORK_MARKER_CHAR_UUID)
         .await?;
     let pubkey = central
-        .read_characteristic(device_id, NODE_PUBKEY_CHAR_UUID)
+        .read_characteristic(&device_id, NODE_PUBKEY_CHAR_UUID)
         .await?;
     let capabilities = central
-        .read_characteristic(device_id, CAPABILITIES_CHAR_UUID)
+        .read_characteristic(&device_id, CAPABILITIES_CHAR_UUID)
         .await?;
     let short_addr = central
-        .read_characteristic(device_id, SHORT_ADDR_CHAR_UUID)
+        .read_characteristic(&device_id, SHORT_ADDR_CHAR_UUID)
         .await?;
 
     let peer_id = device_id.to_string();
@@ -610,7 +663,7 @@ async fn inspect_device(
     state.push_event(format!("inspected peer {device_id}"));
     drop(state);
 
-    let _ = central.disconnect(device_id).await;
+    let _ = central.disconnect(&device_id).await;
     Ok(())
 }
 
