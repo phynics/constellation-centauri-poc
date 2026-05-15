@@ -125,11 +125,16 @@ All crates are `no_std` compatible and use `curve25519-dalek` (already a transit
 ### 3.5 Onboarding
 
 1. Mobile phone (companion app) generates or holds the **NetworkKey** private key
-2. New node generates an ed25519 keypair on first boot, persists to flash via `esp-storage`
-3. Node exposes its public key over a local onboarding transport to the companion app
-4. Companion app signs `NodeCertificate { pubkey, capabilities }` with the NetworkKey
-5. Signed certificate and the network public key are written back to the node and persisted
-6. Node is now an authenticated member of the mesh
+2. New node generates an ed25519 keypair on first boot, persists to dedicated flash partition
+3. Node advertises itself via BLE manufacturer data with `network_addr = ONBOARDING_READY_NETWORK_ADDR`
+4. Companion discovers the node via BLE scan, parses manufacturer data, identifies as onboarding-ready
+5. Companion optionally inspects the node's GATT service for full pubkey, capabilities, network marker
+6. Companion signs `NodeCertificate { pubkey, capabilities }` with the NetworkKey
+7. Companion writes authority pubkey, cert capabilities, cert signature to the node's GATT characteristics
+8. Companion writes the commit characteristic
+9. Node validates the certificate against the authority pubkey, persists enrollment to flash, ACKs, then software resets
+10. After reboot, the node advertises its real `NetworkAddr` in manufacturer data
+11. Node is now an authenticated member of the mesh
 
 The onboarding procedure is transport-neutral. Concrete deployments MAY realize
 it over BLE, USB, WiFi, or another local provisioning channel.
@@ -146,6 +151,22 @@ pub struct NodeCertificate {
 Each enrolled node possesses the network public key. Certificate validation is
 therefore a local operation: a node **MUST** verify peer certificates against
 its stored network public key before granting routing or storage authority.
+
+The GATT onboarding service exposes:
+
+| Characteristic | Access | Description |
+|---|---|---|
+| protocol_signature | read | Identifies Constellation devices |
+| network_marker | read | Onboarding-ready marker or 32-byte network pubkey |
+| node_pubkey | read | 32-byte ed25519 public key |
+| capabilities | read | 2-byte capability bitfield |
+| short_addr | read | 8-byte short address |
+| l2cap_psm | read | 2-byte L2CAP PSM for H2H/routed sessions |
+| authority_pubkey | read, write | Authority's 32-byte ed25519 public key |
+| cert_capabilities | read, write | Certified capabilities (2 bytes) |
+| cert_signature | read, write | Network signature (64 bytes) |
+| commit_enrollment | write | Trigger enrollment commit (1 byte) |
+| cert_data | read | Full certificate wire format (98 bytes) |
 
 ### 3.6 Threat Model
 
@@ -1033,20 +1054,39 @@ pub struct HeartbeatScheduler {
 
 ## 9. Storage Layer
 
-Node identity and certificates are persisted to flash:
+Node identity and certificates are persisted to a dedicated flash partition:
+
+```
+ESP-IDF Partition Table:
+  Name          Type    SubType    Offset     Size
+  nvs           data    nvs        0x9000     0x4000
+  phy_init      data    phy        0xf000     0x1000
+  factory       app     factory    0x10000    0x200000
+  constellation data    undefined  0x210000   0x1000     (4 KB)
+```
+
+The `constellation` partition holds identity and provisioning state:
+
+```
+Flash Layout (within constellation partition, 236 bytes used out of 4096):
+
+Offset  Field                         Size
+0x0000  magic (0xC0DECAFE)            4 bytes
+0x0004  version (STORAGE_VERSION_V3)  1 byte
+0x0005  flags                         1 byte
+0x0006  secret_key (ed25519)          32 bytes
+0x0026  committed_membership          106 bytes
+0x008E  staged_membership             98 bytes
+0x00F0  reserved                       70 bytes
+```
+
+`PartitionedFlash` wraps `FlashStorage` to translate partition-relative
+offsets (starting at 0) to absolute flash addresses. All reads use
+sector-aligned 4096-byte buffers to satisfy ESP32 alignment requirements
+(4-byte aligned in both offset and length). Erase-before-write is enforced
+since NOR flash can only turn 1-bits into 0-bits.
 
 ```rust
-/// Flash storage layout (fixed offsets in a reserved flash sector)
-pub struct FlashLayout;
-
-impl FlashLayout {
-    const NODE_PRIVKEY_OFFSET: u32 = 0x0000;  // 32 bytes
-    const NODE_PUBKEY_OFFSET: u32  = 0x0020;  // 32 bytes
-    const CERTIFICATE_OFFSET: u32  = 0x0040;  // ~98 bytes
-    const NETWORK_PUBKEY_OFFSET: u32 = 0x00A8; // 32 bytes
-    const MAGIC_OFFSET: u32 = 0x00C8;          // 4 bytes, 0xC0DE_CAFE
-}
-
 pub trait NodeStorage {
     fn is_provisioned(&self) -> bool;
     fn read_identity(&self) -> Option<NodeIdentity>;
@@ -1109,28 +1149,42 @@ Lightweight BLE advertisements for peer discovery. **No connection required.**
 AD Structure 1: Flags (LE General Discoverable, BR/EDR Not Supported)
 AD Structure 2: Manufacturer Specific Data
   Company ID:  0x1234 (2 bytes, little-endian)
-  Payload:     Discovery payload (10 bytes)
+  Payload:     Discovery payload (18 bytes)
 ```
 
-### 2.2 Discovery Payload (10 bytes)
+### 2.2 Discovery Payload (18 bytes)
 
 ```
 Offset  Size  Field
 ──────  ────  ──────────────
 0       8     short_addr      ShortAddr of the advertising node
 8       2     capabilities    Capability bitfield (LE u16)
+10      8     network_addr    NetworkAddr of the advertising node's authority
 ```
 
-Fits within the 31-byte BLE advertising data limit.
+`network_addr` is a compact 8-byte fingerprint of the network authority
+public key, derived via `SHA-256(pubkey)[0..8]`. Unenrolled nodes
+advertise `ONBOARDING_READY_NETWORK_ADDR = [0xFF; 8]` instead.
 
-This BLE discovery payload provides only observed-peer hints:
+This allows companions to identify network membership from advertisement
+data alone, without a GATT connection. Enrolled nodes advertise their
+real `NetworkAddr`; unenrolled nodes advertise the onboarding-ready sentinel.
+
+Fits within the 31-byte BLE advertising data limit (3 bytes flags + 22
+bytes manufacturer-specific AD structure = 25 bytes).
+
+This BLE discovery payload provides observed-peer hints:
 
 - `short_addr`
 - provisional capabilities
+- `network_addr` — identifies which network the node belongs to, or
+  whether it is unenrolled (onboarding-ready)
 
 It does **NOT** by itself grant routing or storage authority. In protocol
 version 1, authoritative peer promotion occurs during authenticated H2H, not
-from advertisement parsing alone.
+from advertisement parsing alone. However, the `network_addr` field enables
+fast filtering: companions can ignore advertisements from other networks and
+prioritize onboarding-ready devices without GATT connections.
 
 ### 2.3 BLE Address Derivation
 

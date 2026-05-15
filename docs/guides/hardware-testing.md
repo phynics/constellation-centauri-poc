@@ -19,6 +19,7 @@ cargo esp32c6
 - 2x ESP32-C6 development boards (e.g., ESP32-C6-DevKitC-1)
 - 2x USB-C cables
 - Computer with 2 USB ports (or a USB hub)
+- macOS device for companion (optional, for onboarding)
 
 ### Software
 - Rust toolchain with `riscv32imac-unknown-none-elf` target
@@ -31,7 +32,8 @@ cargo esp32c6
 
 ## Boot Sequence
 
-On first boot, each node generates an ed25519 keypair and persists it to flash:
+On first boot, each node generates an ed25519 keypair and persists it to the
+dedicated `constellation` flash partition:
 
 ```
 Constellation Mesh Node - H2H (Heart2Heart)
@@ -51,11 +53,15 @@ The **build fingerprint** is a hash of key source files computed at compile time
 
 ### Discovery
 
-Nodes discover each other via BLE advertising + scanning:
+Nodes discover each other via BLE advertising + scanning. The manufacturer data
+includes `short_addr`, `capabilities`, and `network_addr` (18 bytes):
 
 ```
 [central] New peer <short_addr> (1 total)
 ```
+
+Unenrolled nodes advertise `ONBOARDING_READY_NETWORK_ADDR = [0xFF; 8]` as their
+network_addr. Enrolled nodes advertise their real network fingerprint.
 
 ### H2H Exchange
 
@@ -81,6 +87,27 @@ The responder side:
 [periph] H2H step=4 tx ok
 [periph] Routing table: 1 peers
 ```
+
+### Onboarding via Companion
+
+The companion app (macOS) can enroll unprovisioned firmware nodes:
+
+1. Start the companion: `cargo run -p companion`
+2. Wait for the firmware node to appear in the Peers view (marked as onboarding-ready)
+3. Press `e` to enroll the selected node
+4. Watch the Events view (press `n`/Tab) for step-by-step progress
+5. The firmware console should show:
+   ```
+   BLE central connected
+   GATT write: authority_pubkey (32 bytes)
+   GATT write: cert_capabilities (2 bytes)
+   GATT write: cert_signature (64 bytes)
+   GATT write: commit_enrollment
+   Certificate verified, committed to network ab12cd34..
+   Enrollment committed to flash
+   Rebooting in 100ms...
+   ```
+6. After reboot, the node advertises its real network_addr instead of the onboarding-ready sentinel
 
 ### Delayed Delivery for Low-Power Endpoints
 
@@ -152,6 +179,12 @@ rustup target add riscv32imac-unknown-none-elf
 cargo update && cargo clean && cargo build --release
 ```
 
+**Building firmware from workspace root:**
+Cargo does not pick up `firmware/.cargo/config.toml` from the workspace root. Always build from the `firmware/` directory:
+```bash
+cd firmware && cargo check --no-default-features --features=esp32c6
+```
+
 ### Flash Errors
 
 **Permission denied on /dev/ttyUSB*:**
@@ -164,6 +197,11 @@ sudo usermod -a -G dialout $USER
 - Hold BOOT button while connecting
 - Press RESET button after connecting
 - Try different USB cable/port
+
+**Partition table not written:**
+When flashing with `espflash`, the partition table in `partitions.csv` is
+automatically written. If the `constellation` partition seems corrupted,
+reflash with `--partition-table partitions.csv` explicitly.
 
 ### Runtime Issues
 
@@ -181,22 +219,37 @@ sudo usermod -a -G dialout $USER
 - Ensure both are within BLE range
 - Verify neither node has disabled H2H behaviors
 
+**Onboarding fails on companion:**
+- Switch to Events view (press `n`/Tab) to see step-by-step progress
+- Check firmware serial console for GATT write diagnostics
+- Verify the firmware is advertising `ONBOARDING_READY_NETWORK_ADDR` in manufacturer data
+- After enrollment, firmware reboots — the companion should treat the disconnect as success
+
+**Flash read failures (ReadFailed):**
+- ESP32 requires 4-byte alignment in both offset AND length for flash reads
+- The firmware now uses sector-aligned 4096-byte reads to satisfy this requirement
+- If you see `ReadFailed` in logs, check the flash access alignment
+
 ## Current Implementation Status
 
 ✅ **Working:**
-- Identity generation with hardware TRNG + flash persistence
-- BLE advertising with discovery payload
-- BLE scanning for peer discovery
+- Identity generation with hardware TRNG + flash persistence (dedicated partition)
+- BLE advertising with discovery payload (18 bytes: short_addr + capabilities + network_addr)
+- BLE scanning for peer discovery and network identification
 - L2CAP H2H exchange (initiator + responder)
 - Extended H2H sessions for delayed delivery to low-power endpoints
 - Routing table updates from discovery + H2H
 - Build fingerprint for firmware equivalence checks
 - Simulator with full routing-core behavior
+- Onboarding GATT service with staged enrollment and commit
+- Companion enrollment of firmware nodes
 
 ⏳ **In Progress:**
+- End-to-end companion↔firmware onboarding validation on hardware
 - Indirect routing validation on hardware (works in sim)
 - Encrypted message exchange
 
 ❌ **Not Yet Implemented:**
 - WiFi/LoRa transport
-- Network key onboarding
+- H2H session authentication (signed H2H frames)
+- Packet counter / replay protection in code
