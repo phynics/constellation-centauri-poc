@@ -33,7 +33,7 @@ use routing_core::network::{
 use routing_core::onboarding::{
     CONSTELLATION_COMPANY_ID, CONSTELLATION_PROTOCOL_SIGNATURE, DISCOVERY_PAYLOAD_SIZE,
     ONBOARDING_READY_MARKER, ONBOARDING_READY_NETWORK_ADDR, NodeCertificate,
-    deserialize_discovery, parse_discovery_from_adv, serialize_discovery,
+    deserialize_discovery, serialize_discovery,
 };
 
 pub use routing_core::onboarding::{DiscoveryInfo, parse_discovery_from_adv};
