@@ -41,6 +41,7 @@ use routing_core::protocol::h2h::{H2hFrame, H2hPayload};
 use routing_core::transport::TransportAddr;
 
 use crate::node::storage::{self, ProvisioningState};
+use crate::node::partitioned_flash::PartitionedFlash;
 use crate::reboot_after_enrollment_commit;
 use esp_storage::FlashStorage;
 
@@ -168,7 +169,7 @@ async fn handle_onboarding_gatt_event(
     conn: &GattConnection<'_, '_, DefaultPacketPool>,
     identity: &NodeIdentity,
     provisioning_state: &Mutex<NoopRawMutex, ProvisioningState>,
-    flash: &Mutex<NoopRawMutex, FlashStorage<'static>>,
+    flash: &Mutex<NoopRawMutex, PartitionedFlash<FlashStorage<'static>>>,
 ) -> Result<bool, NetworkError> {
     match conn.next().await {
         GattConnectionEvent::Disconnected { .. } => Ok(false),
@@ -280,7 +281,7 @@ pub struct BleResponder<'stack, C: Controller> {
     capabilities: u16,
     server: OnboardingServer<'static>,
     provisioning_state: &'static Mutex<NoopRawMutex, ProvisioningState>,
-    flash: &'static Mutex<NoopRawMutex, FlashStorage<'static>>,
+    flash: &'static Mutex<NoopRawMutex, PartitionedFlash<FlashStorage<'static>>>,
     /// Open connection + channel from the last `receive_h2h` call.
     pending: Option<(
         Connection<'stack, DefaultPacketPool>,
@@ -303,7 +304,7 @@ impl<'stack, C: Controller> BleResponder<'stack, C> {
         identity: &'stack NodeIdentity,
         capabilities: u16,
         provisioning_state: &'static Mutex<NoopRawMutex, ProvisioningState>,
-        flash: &'static Mutex<NoopRawMutex, FlashStorage<'static>>,
+        flash: &'static Mutex<NoopRawMutex, PartitionedFlash<FlashStorage<'static>>>,
     ) -> Self {
         let provisioning = provisioning_state
             .try_lock()

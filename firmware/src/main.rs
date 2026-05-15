@@ -47,11 +47,14 @@ use esp_hal::rng::Rng;
 use esp_hal::system::software_reset;
 use esp_println::println;
 use esp_radio::ble::controller::BleConnector;
+use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use esp_storage::FlashStorage;
 
 use static_cell::StaticCell;
 
 use trouble_host::prelude::*;
+
+use esp_bootloader_esp_idf::partitions::read_partition_table;
 
 pub mod node;
 pub mod transport;
@@ -68,6 +71,7 @@ use routing_core::node::roles::Capabilities;
 use routing_core::protocol::h2h::H2hFrame;
 use routing_core::routing::table::RoutingTable;
 
+use node::partitioned_flash::PartitionedFlash;
 use node::storage::ProvisioningState;
 use transport::ble_network::{
     parse_discovery_from_adv, BleInitiator, BleResponder, DiscoveryInfo, InboundBleSession,
@@ -89,7 +93,7 @@ pub const CONSTELLATION_COMPANY_ID: u16 = 0x1234;
 
 static ROUTING_TABLE: StaticCell<Mutex<NoopRawMutex, RoutingTable>> = StaticCell::new();
 static HEARTBEAT_UPTIME: StaticCell<Mutex<NoopRawMutex, u32>> = StaticCell::new();
-static FLASH_MUTEX: StaticCell<Mutex<NoopRawMutex, FlashStorage<'static>>> = StaticCell::new();
+static FLASH_MUTEX: StaticCell<Mutex<NoopRawMutex, PartitionedFlash<FlashStorage<'static>>>> = StaticCell::new();
 static PROVISIONING_STATE: StaticCell<Mutex<NoopRawMutex, ProvisioningState>> = StaticCell::new();
 static ROUTED_FORWARD_QUEUE: StaticCell<Channel<NoopRawMutex, RoutedForward, 8>> =
     StaticCell::new();
@@ -136,7 +140,42 @@ async fn main(_spawner: Spawner) {
 
     println!("Initializing RNG (non-cryptographic - PoC only)...");
     let mut rng = Rng::new();
-    let mut flash = FlashStorage::new(peripherals.FLASH);
+    let mut raw_flash = FlashStorage::new(peripherals.FLASH);
+
+    // Look up the `constellation` data partition to find its base offset.
+    let constellation_base = {
+        let mut pt_buf = [0u8; esp_bootloader_esp_idf::partitions::PARTITION_TABLE_MAX_LEN];
+        match read_partition_table(&mut raw_flash, &mut pt_buf) {
+            Ok(pt) => {
+                let mut found: Option<u32> = None;
+                for entry in pt.iter() {
+                    if entry.label_as_str() == "constellation" {
+                        found = Some(entry.offset());
+                        break;
+                    }
+                }
+                match found {
+                    Some(offset) => {
+                        println!("Constellation partition at 0x{:x}", offset);
+                        offset
+                    }
+                    None => {
+                        println!("Warning: no `constellation` partition, falling back to offset 0");
+                        0
+                    }
+                }
+            }
+            Err(e) => {
+                println!("Warning: failed to read partition table ({:?}), falling back to offset 0", e);
+                0
+            }
+        }
+    };
+
+    let mut flash = PartitionedFlash {
+        inner: raw_flash,
+        base: constellation_base,
+    };
 
     let identity = load_or_generate_identity(&mut flash, &mut rng);
     let mut provisioning_state = match node::storage::load_provisioning(&mut flash) {
@@ -609,7 +648,10 @@ async fn ble_runner_task<C: Controller, E: EventHandler>(
 // Utility functions
 // =============================================================================
 
-fn load_or_generate_identity(flash: &mut FlashStorage, rng: &mut Rng) -> NodeIdentity {
+fn load_or_generate_identity<S: NorFlash + ReadNorFlash>(
+    flash: &mut S,
+    rng: &mut Rng,
+) -> NodeIdentity {
     use node::storage;
 
     match storage::is_provisioned(flash) {

@@ -1,4 +1,9 @@
 //! Flash-backed persistence for firmware node identities.
+//!
+//! All offsets are relative to the start of the flash region (i.e. the
+//! `constellation` partition). The caller must provide a `NorFlash` implementor
+//! whose read/write/erase methods address the partition — typically by wrapping
+//! `FlashStorage` with a base offset.
 
 use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use routing_core::crypto::identity::{NodeIdentity, PubKey, Signature};
@@ -8,7 +13,7 @@ use routing_core::onboarding::NodeCertificate;
 /// "CSTL" (Constellation) in ASCII.
 const MAGIC: [u8; 4] = [0x43, 0x53, 0x54, 0x4C];
 
-/// Flash storage layout offsets.
+/// Storage layout offsets (partition-relative).
 ///
 /// Layout:
 /// - magic: 4 bytes ("CSTL")
@@ -20,10 +25,6 @@ const MAGIC: [u8; 4] = [0x43, 0x53, 0x54, 0x4C];
 /// - staged_membership: 98 bytes
 ///
 /// The public key is derived from the secret key, so we don't store it.
-///
-/// TODO: This record lives at offset 0 within the application's flash sector.
-/// A future change should move it to a dedicated partition declared in the
-/// ESP32 partition table so that it survives firmware reflashes.
 const MAGIC_OFFSET: usize = 0;
 const VERSION_OFFSET: usize = 4;
 const FLAGS_OFFSET: usize = 5;
