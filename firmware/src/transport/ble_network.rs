@@ -382,10 +382,12 @@ impl<'stack, C: Controller> BleResponder<'stack, C> {
             let adv_len = match AdStructure::encode_slice(
                 &[
                     AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-                    AdStructure::ManufacturerSpecificData {
-                        company_identifier: CONSTELLATION_COMPANY_ID,
-                        payload: &disc_buf,
-                    },
+                    // Put 128-bit service UUID in primary advertising data so
+                    // CoreBluetooth's scanForPeripheralsWithServices: can match
+                    // it without relying on scan response data.
+                    AdStructure::CompleteServiceUuids128(&[
+                        ONBOARDING_SERVICE_UUID_BYTES,
+                    ]),
                 ],
                 &mut adv_data[..],
             ) {
@@ -398,9 +400,14 @@ impl<'stack, C: Controller> BleResponder<'stack, C> {
 
             let mut scan_data = [0u8; 31];
             let scan_len = match AdStructure::encode_slice(
-                &[AdStructure::CompleteServiceUuids128(&[
-                    ONBOARDING_SERVICE_UUID_BYTES,
-                ])],
+                &[
+                    // Move manufacturer data to scan response to fit the
+                    // 31-byte primary advertising limit.
+                    AdStructure::ManufacturerSpecificData {
+                        company_identifier: CONSTELLATION_COMPANY_ID,
+                        payload: &disc_buf,
+                    },
+                ],
                 &mut scan_data[..],
             ) {
                 Ok(len) => len,

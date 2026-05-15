@@ -280,7 +280,13 @@ pub async fn run(
         }
 
         if Instant::now() >= next_discovery_scan {
-            initiator.scan(DISCOVERY_SCAN_WINDOW_MS).await;
+            let scan_result = initiator.scan(DISCOVERY_SCAN_WINDOW_MS).await;
+            let known_count = known_devices.lock().unwrap().len();
+            shared.lock().unwrap().push_event(format!(
+                "scan done: {} discovery events, {} known devices",
+                scan_result.len(),
+                known_count
+            ));
             {
                 let mut state = shared.lock().unwrap();
                 for device_id in known_devices.lock().unwrap().values() {
@@ -356,7 +362,16 @@ pub async fn run(
                         shared.lock().unwrap().push_event(format!("central adapter powered={powered}"));
                     }
                     CentralEvent::DeviceDiscovered(device) => {
-                        if device.services.iter().any(|uuid| *uuid == ONBOARDING_SERVICE_UUID) {
+                        let has_service = device.services.iter().any(|uuid| *uuid == ONBOARDING_SERVICE_UUID);
+                        let has_mfr = device.manufacturer_data.is_some();
+                        shared.lock().unwrap().push_event(format!(
+                            "discovered {} (services={} ours={} mfr={})",
+                            device.id,
+                            device.services.len(),
+                            has_service,
+                            has_mfr,
+                        ));
+                        if has_service {
                             let transport_addr = transport_addr_for_device_id(&device.id);
                             known_devices
                                 .lock()
