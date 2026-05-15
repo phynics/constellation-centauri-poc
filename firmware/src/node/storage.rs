@@ -44,6 +44,9 @@ const STORAGE_VERSION_V1: u8 = 0x01;
 const STORAGE_VERSION: u8 = 0x02;
 const STORAGE_VERSION_V3: u8 = 0x03;
 
+/// NOR flash sector size on ESP32. Erase must be sector-aligned.
+const FLASH_SECTOR_SIZE: usize = 4096;
+
 const FLAG_COMMITTED_PRESENT: u8 = 1 << 0;
 const FLAG_STAGED_AUTHORITY_PRESENT: u8 = 1 << 1;
 const FLAG_STAGED_CAPABILITIES_PRESENT: u8 = 1 << 2;
@@ -336,10 +339,10 @@ pub fn save_provisioning<S: NorFlash>(
     }
     buf[FLAGS_OFFSET] = flags;
 
-    // Erase before write: NOR flash requires erasing a sector before
+    // Erase before write: NOR flash requires erasing a full sector before
     // rewriting it, since write can only turn 1-bits into 0-bits.
     storage
-        .erase(MAGIC_OFFSET as u32, (MAGIC_OFFSET + STORAGE_SIZE) as u32)
+        .erase(MAGIC_OFFSET as u32, (MAGIC_OFFSET + FLASH_SECTOR_SIZE) as u32)
         .map_err(|_| StorageError::EraseFailed)?;
     storage
         .write(MAGIC_OFFSET as u32, &buf)
@@ -353,7 +356,7 @@ pub fn save_provisioning<S: NorFlash>(
 /// Use with caution - this is irreversible!
 pub fn clear_identity<S: NorFlash>(storage: &mut S) -> Result<(), StorageError> {
     storage
-        .erase(MAGIC_OFFSET as u32, (MAGIC_OFFSET + STORAGE_SIZE) as u32)
+        .erase(MAGIC_OFFSET as u32, (MAGIC_OFFSET + FLASH_SECTOR_SIZE) as u32)
         .map_err(|_| StorageError::EraseFailed)?;
 
     Ok(())
@@ -419,13 +422,13 @@ mod tests {
 
     // Mock storage for testing
     struct MockStorage {
-        data: [u8; STORAGE_SIZE],
+        data: [u8; FLASH_SECTOR_SIZE],
     }
 
     impl MockStorage {
         fn new() -> Self {
             Self {
-                data: [0xFF; STORAGE_SIZE], // Flash default: all bits set
+                data: [0xFF; FLASH_SECTOR_SIZE], // Flash default: all bits set
             }
         }
     }
@@ -444,13 +447,13 @@ mod tests {
         }
 
         fn capacity(&self) -> usize {
-            STORAGE_SIZE
+            FLASH_SECTOR_SIZE
         }
     }
 
     impl NorFlash for MockStorage {
         const WRITE_SIZE: usize = 1;
-        const ERASE_SIZE: usize = STORAGE_SIZE;
+        const ERASE_SIZE: usize = FLASH_SECTOR_SIZE;
 
         fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
             let from = from as usize;
