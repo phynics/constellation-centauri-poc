@@ -48,6 +48,11 @@ const STORAGE_VERSION_V3: u8 = 0x03;
 /// NOR flash sector size on ESP32. Erase must be sector-aligned.
 const FLASH_SECTOR_SIZE: usize = 4096;
 
+/// Padded read size: must be a multiple of the flash word size (4 bytes)
+/// and the NOR flash erase size (4096). We read a full sector to satisfy
+/// alignment constraints and only parse the first STORAGE_SIZE bytes.
+const READ_SIZE: usize = FLASH_SECTOR_SIZE;
+
 const FLAG_COMMITTED_PRESENT: u8 = 1 << 0;
 const FLAG_STAGED_AUTHORITY_PRESENT: u8 = 1 << 1;
 const FLAG_STAGED_CAPABILITIES_PRESENT: u8 = 1 << 2;
@@ -169,12 +174,12 @@ pub fn commit_staged_enrollment(
 ///
 /// Returns true if magic bytes are present at MAGIC_OFFSET.
 pub fn is_provisioned<S: ReadNorFlash>(storage: &mut S) -> Result<bool, StorageError> {
-    let mut buf = [0u8; 4];
+    let mut buf = [0u8; READ_SIZE];
     storage
         .read(MAGIC_OFFSET as u32, &mut buf)
         .map_err(|_| StorageError::ReadFailed)?;
 
-    Ok(buf == MAGIC)
+    Ok(buf[MAGIC_OFFSET..MAGIC_OFFSET + 4] == MAGIC)
 }
 
 /// Load node identity from flash storage.
@@ -182,8 +187,8 @@ pub fn is_provisioned<S: ReadNorFlash>(storage: &mut S) -> Result<bool, StorageE
 /// Returns None if not provisioned or if read fails.
 /// Returns Some(NodeIdentity) if successfully loaded and validated.
 pub fn load_identity<S: ReadNorFlash>(storage: &mut S) -> Result<NodeIdentity, StorageError> {
-    // Read entire storage region
-    let mut buf = [0u8; STORAGE_SIZE];
+    // Read entire storage region (word-aligned, sector-sized)
+    let mut buf = [0u8; READ_SIZE];
     storage
         .read(MAGIC_OFFSET as u32, &mut buf)
         .map_err(|_| StorageError::ReadFailed)?;
@@ -234,42 +239,33 @@ pub fn load_onboarding<S: ReadNorFlash>(
 pub fn load_provisioning<S: ReadNorFlash>(
     storage: &mut S,
 ) -> Result<ProvisioningState, StorageError> {
-    let mut magic = [0u8; 4];
+    // Read the entire storage region in one word-aligned read.
+    // ESP32 NOR flash requires 4-byte-aligned reads when the `bytewise-read`
+    // feature is not enabled, so we can't do small unaligned reads.
+    let mut buf = [0u8; READ_SIZE];
     storage
-        .read(MAGIC_OFFSET as u32, &mut magic)
+        .read(MAGIC_OFFSET as u32, &mut buf)
         .map_err(|_| StorageError::ReadFailed)?;
-    if magic != MAGIC {
+
+    if buf[MAGIC_OFFSET..MAGIC_OFFSET + 4] != MAGIC {
         return Err(StorageError::InvalidMagic);
     }
 
-    let mut version = [0u8; 1];
-    storage
-        .read(VERSION_OFFSET as u32, &mut version)
-        .map_err(|_| StorageError::ReadFailed)?;
+    let version = buf[VERSION_OFFSET];
 
-    if version[0] == STORAGE_VERSION_V1 {
+    if version == STORAGE_VERSION_V1 {
         return Ok(ProvisioningState::default());
     }
-    if version[0] == STORAGE_VERSION {
-        let mut buf = [0u8; STORAGE_SIZE];
-        storage
-            .read(MAGIC_OFFSET as u32, &mut buf)
-            .map_err(|_| StorageError::ReadFailed)?;
-
+    if version == STORAGE_VERSION {
         let membership = read_membership(&buf, COMMITTED_MEMBERSHIP_OFFSET)?;
         return Ok(ProvisioningState {
             committed: membership,
             staged: StagedEnrollment::default(),
         });
     }
-    if version[0] != STORAGE_VERSION_V3 {
+    if version != STORAGE_VERSION_V3 {
         return Err(StorageError::InvalidVersion);
     }
-
-    let mut buf = [0u8; STORAGE_SIZE];
-    storage
-        .read(MAGIC_OFFSET as u32, &mut buf)
-        .map_err(|_| StorageError::ReadFailed)?;
 
     let flags = buf[FLAGS_OFFSET];
     let committed = if flags & FLAG_COMMITTED_PRESENT != 0 {
@@ -364,7 +360,7 @@ pub fn clear_identity<S: NorFlash>(storage: &mut S) -> Result<(), StorageError> 
 }
 
 fn read_membership(
-    buf: &[u8; STORAGE_SIZE],
+    buf: &[u8],
     offset: usize,
 ) -> Result<Option<StoredMembership>, StorageError> {
     let pubkey = read_pubkey(buf, offset)?;
@@ -378,18 +374,18 @@ fn read_membership(
     }))
 }
 
-fn read_pubkey(buf: &[u8; STORAGE_SIZE], offset: usize) -> Result<PubKey, StorageError> {
+fn read_pubkey(buf: &[u8], offset: usize) -> Result<PubKey, StorageError> {
     let mut pubkey = [0u8; MEMBERSHIP_PUBKEY_SIZE];
     pubkey.copy_from_slice(&buf[offset..offset + MEMBERSHIP_PUBKEY_SIZE]);
     Ok(pubkey)
 }
 
-fn read_capabilities(buf: &[u8; STORAGE_SIZE], offset: usize) -> Result<u16, StorageError> {
+fn read_capabilities(buf: &[u8], offset: usize) -> Result<u16, StorageError> {
     let start = offset + MEMBERSHIP_PUBKEY_SIZE;
     Ok(u16::from_le_bytes([buf[start], buf[start + 1]]))
 }
 
-fn read_signature(buf: &[u8; STORAGE_SIZE], offset: usize) -> Result<Signature, StorageError> {
+fn read_signature(buf: &[u8], offset: usize) -> Result<Signature, StorageError> {
     let start = offset + MEMBERSHIP_PUBKEY_SIZE + MEMBERSHIP_CAPABILITIES_SIZE;
     let mut signature = [0u8; MEMBERSHIP_SIGNATURE_SIZE];
     signature.copy_from_slice(&buf[start..start + MEMBERSHIP_SIGNATURE_SIZE]);
@@ -423,13 +419,13 @@ mod tests {
 
     // Mock storage for testing
     struct MockStorage {
-        data: [u8; FLASH_SECTOR_SIZE],
+        data: [u8; READ_SIZE],
     }
 
     impl MockStorage {
         fn new() -> Self {
             Self {
-                data: [0xFF; FLASH_SECTOR_SIZE], // Flash default: all bits set
+                data: [0xFF; READ_SIZE], // Flash default: all bits set
             }
         }
     }
@@ -448,7 +444,7 @@ mod tests {
         }
 
         fn capacity(&self) -> usize {
-            FLASH_SECTOR_SIZE
+            READ_SIZE
         }
     }
 
