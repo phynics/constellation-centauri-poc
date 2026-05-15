@@ -10,6 +10,7 @@ use embassy_time::{Duration, Timer};
 use heapless::Vec;
 use rand::{Rng as _, SeedableRng as _};
 
+use routing_core::crypto::identity::ONBOARDING_READY_NETWORK_ADDR;
 use routing_core::network::{
     DiscoveryEvent, H2hInitiator, H2hResponder, InboundH2h, NetworkError, MAX_SCAN_RESULTS,
 };
@@ -211,6 +212,7 @@ impl H2hInitiator for SimInitiator {
                 let _ = results.push(DiscoveryEvent {
                     short_addr: node.short_addr,
                     capabilities: config.capabilities[idx],
+                    network_addr: ONBOARDING_READY_NETWORK_ADDR,
                     transport_addr: TransportAddr::ble(node.mac),
                 });
             }
@@ -229,6 +231,7 @@ impl H2hInitiator for SimInitiator {
             let _ = results.push(DiscoveryEvent {
                 short_addr: node.short_addr,
                 capabilities: config.capabilities[idx],
+                network_addr: ONBOARDING_READY_NETWORK_ADDR,
                 transport_addr: TransportAddr::ble(node.mac),
             });
         }
@@ -457,6 +460,21 @@ mod tests {
         assert!(results
             .iter()
             .all(|event| event.transport_addr.as_ble_mac() != Some(nodes[0].mac)));
+    }
+
+    #[test]
+    fn scan_returns_onboarding_ready_network_addr() {
+        let medium = test_medium();
+        let nodes = test_nodes();
+        let config = test_config(3);
+        let mut initiator = SimInitiator::new(0, medium, nodes, config);
+
+        let results = block_on(initiator.scan(0));
+
+        // Sim nodes don't model enrollment, so all advertise OnboardingReady
+        assert!(results
+            .iter()
+            .all(|event| event.network_addr == ONBOARDING_READY_NETWORK_ADDR));
     }
 
     #[test]

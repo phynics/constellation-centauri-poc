@@ -16,13 +16,12 @@ use embassy_sync::mutex::Mutex as AsyncMutex;
 use rand::RngCore as _;
 use routing_core::behavior::{build_h2h_payload, run_initiator_h2h_once};
 use routing_core::crypto::identity::NodeIdentity;
-use routing_core::facade::{
-    DeliveredInfra, MeshFacade, RoutedReceiveOutcome,
-};
+use routing_core::facade::{DeliveredInfra, MeshFacade, RoutedReceiveOutcome};
 use routing_core::network::H2hResponder;
 use routing_core::network::{H2hInitiator, SESSION_KIND_H2H, SESSION_KIND_ROUTED};
 use routing_core::onboarding::{
-    is_constellation_protocol_signature, parse_network_marker, NetworkMarker, NodeCertificate,
+    is_constellation_protocol_signature, parse_discovery_from_manufacturer_data,
+    parse_network_marker, NetworkMarker, NodeCertificate, ONBOARDING_READY_NETWORK_ADDR,
 };
 use routing_core::protocol::app::NONCE_LEN;
 use routing_core::protocol::h2h::H2hFrame;
@@ -295,6 +294,7 @@ pub async fn run(
                         has_constellation_signature: false,
                         onboarding_ready: false,
                         network_pubkey_hex: None,
+                        network_addr: None,
                         node_pubkey_hex: None,
                         capabilities: None,
                         last_error: None,
@@ -363,18 +363,28 @@ pub async fn run(
                                 .unwrap()
                                 .insert(transport_addr, device.id.clone());
                             let id = device.id.to_string();
+
+                            // Parse manufacturer data for short_addr, capabilities, network_addr
+                            let (short_addr, capabilities, network_addr, onboarding_ready) =
+                                device.manufacturer_data.as_ref().and_then(|data| {
+                                    parse_discovery_from_manufacturer_data(data).map(|info| {
+                                        (Some(info.short_addr), Some(info.capabilities), Some(info.network_addr), info.network_addr == ONBOARDING_READY_NETWORK_ADDR)
+                                    })
+                                }).unwrap_or((None, None, None, false));
+
                             shared.lock().unwrap().upsert_peer(DiscoveredPeer {
                                 id: id.clone(),
-                                short_addr: None,
+                                short_addr,
                                 name: device.name.clone(),
                                 rssi: device.rssi,
                                 last_seen_unix_secs: now_secs(),
                                 has_onboarding_service: true,
                                 has_constellation_signature: false,
-                                onboarding_ready: false,
-                                network_pubkey_hex: None,
+                                onboarding_ready,
+                                network_pubkey_hex: None, // still need GATT read for full pubkey
+                                network_addr,
                                 node_pubkey_hex: None,
-                                capabilities: None,
+                                capabilities,
                                 last_error: None,
                             });
                             if !inspected.contains(&id) && queued_for_inspection.insert(id.clone()) {
@@ -955,4 +965,62 @@ fn trim_trailing_nuls(bytes: &[u8]) -> &[u8] {
         .map(|idx| idx + 1)
         .unwrap_or(0);
     &bytes[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use routing_core::onboarding::{
+        parse_discovery_from_manufacturer_data, CONSTELLATION_COMPANY_ID,
+        DISCOVERY_PAYLOAD_SIZE, ONBOARDING_READY_NETWORK_ADDR, serialize_discovery,
+    };
+
+    #[test]
+    fn parse_manufacturer_data_valid() {
+        let short_addr = [0x42u8; 8];
+        let capabilities = 0x1234;
+        let network_addr = [0xABu8; 8];
+
+        let mut data = [0u8; 20];
+        data[0] = (CONSTELLATION_COMPANY_ID & 0xFF) as u8;
+        data[1] = ((CONSTELLATION_COMPANY_ID >> 8) & 0xFF) as u8;
+        let mut payload = [0u8; DISCOVERY_PAYLOAD_SIZE];
+        serialize_discovery(&short_addr, capabilities, &network_addr, &mut payload).unwrap();
+        data[2..].copy_from_slice(&payload);
+
+        let info = parse_discovery_from_manufacturer_data(&data).unwrap();
+        assert_eq!(info.short_addr, short_addr);
+        assert_eq!(info.capabilities, capabilities);
+        assert_eq!(info.network_addr, network_addr);
+    }
+
+    #[test]
+    fn parse_manufacturer_data_wrong_company_id() {
+        let mut data = [0u8; 20];
+        data[0] = 0xFF; // wrong CID
+        data[1] = 0xFF;
+
+        assert!(parse_discovery_from_manufacturer_data(&data).is_none());
+    }
+
+    #[test]
+    fn parse_manufacturer_data_too_short() {
+        assert!(parse_discovery_from_manufacturer_data(&[]).is_none());
+        assert!(parse_discovery_from_manufacturer_data(&[0u8; 10]).is_none());
+        assert!(parse_discovery_from_manufacturer_data(&[0u8; 19]).is_none());
+    }
+
+    #[test]
+    fn parse_manufacturer_data_onboarding_ready() {
+        let short_addr = [0x11u8; 8];
+        let mut data = [0u8; 20];
+        data[0] = (CONSTELLATION_COMPANY_ID & 0xFF) as u8;
+        data[1] = ((CONSTELLATION_COMPANY_ID >> 8) & 0xFF) as u8;
+        let mut payload = [0u8; DISCOVERY_PAYLOAD_SIZE];
+        serialize_discovery(&short_addr, 0, &ONBOARDING_READY_NETWORK_ADDR, &mut payload).unwrap();
+        data[2..].copy_from_slice(&payload);
+
+        let info = parse_discovery_from_manufacturer_data(&data).unwrap();
+        assert_eq!(info.network_addr, ONBOARDING_READY_NETWORK_ADDR);
+        assert_eq!(info.network_addr, [0xFFu8; 8]);
+    }
 }

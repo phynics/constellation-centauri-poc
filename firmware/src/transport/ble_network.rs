@@ -25,24 +25,28 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::with_timeout;
 
 use routing_core::config::{H2H_CONNECTION_TIMEOUT_SECS, H2H_MTU, H2H_PSM};
-use routing_core::crypto::identity::{NodeIdentity, ShortAddr};
+use routing_core::crypto::identity::{network_addr_of, NodeIdentity, NetworkAddr, ShortAddr};
 use routing_core::network::{
     DiscoveryEvent, H2hInitiator, H2hResponder, InboundH2h, NetworkError, MAX_SCAN_RESULTS,
     SESSION_KIND_H2H, SESSION_KIND_ROUTED,
 };
-use routing_core::onboarding::{CONSTELLATION_PROTOCOL_SIGNATURE, ONBOARDING_READY_MARKER};
+use routing_core::onboarding::{
+    network_addr_of_marker, CONSTELLATION_PROTOCOL_SIGNATURE, ONBOARDING_READY_NETWORK_ADDR,
+    NodeCertificate, CONSTELLATION_COMPANY_ID, DISCOVERY_PAYLOAD_SIZE, DiscoveryInfo,
+    serialize_discovery, deserialize_discovery, parse_discovery_from_adv,
+};
 use routing_core::protocol::h2h::{H2hFrame, H2hPayload};
 use routing_core::transport::TransportAddr;
 
 use crate::node::storage::{self, ProvisioningState};
 use crate::reboot_after_enrollment_commit;
-use crate::CONSTELLATION_COMPANY_ID;
 use esp_storage::FlashStorage;
 
 // ── Discovery payload ─────────────────────────────────────────────────────────
 
-pub const DISCOVERY_PAYLOAD_SIZE: usize = 10;
 const PROTOCOL_SIGNATURE_LEN: usize = 32;
+const NETWORK_MARKER_LEN: usize = 33;
+const CERT_DATA_LEN: usize = NodeCertificate::CERT_DATA_SIZE;
 const NETWORK_MARKER_LEN: usize = 33;
 const EMPTY_CAPABILITIES: [u8; 2] = [0u8; 2];
 const EMPTY_PUBKEY: [u8; 32] = [0xFFu8; 32];
@@ -85,6 +89,8 @@ pub struct OnboardingService {
     cert_signature: [u8; 64],
     #[characteristic(uuid = "43d7aa10-5f4b-4c84-a100-00000000000b", write, value = [0u8; 1])]
     commit_enrollment: [u8; 1],
+    #[characteristic(uuid = "43d7aa10-5f4b-4c84-a100-00000000000c", read, value = [0xFFu8; CERT_DATA_LEN])]
+    cert_data: [u8; CERT_DATA_LEN],
 }
 
 fn init_onboarding_server(
@@ -114,35 +120,42 @@ fn apply_provisioning_to_server(
     capabilities: u16,
 ) {
     let mut network_marker = [0u8; NETWORK_MARKER_LEN];
-    let (authority_pubkey, cert_capabilities, cert_signature) = if let Some(committed) =
-        provisioning.committed
-    {
-        network_marker[..32].copy_from_slice(&committed.network_pubkey);
-        (
-            committed.network_pubkey,
-            committed.cert_capabilities.to_le_bytes(),
-            committed.cert_signature,
-        )
-    } else {
-        network_marker[..ONBOARDING_READY_MARKER.len()].copy_from_slice(ONBOARDING_READY_MARKER);
-        (
-            provisioning.staged.authority_pubkey.unwrap_or(EMPTY_PUBKEY),
-            provisioning
-                .staged
-                .cert_capabilities
-                .map(|caps| caps.to_le_bytes())
-                .unwrap_or(EMPTY_CAPABILITIES),
-            provisioning
-                .staged
-                .cert_signature
-                .unwrap_or(EMPTY_SIGNATURE),
-        )
-    };
+    let (authority_pubkey, cert_capabilities, cert_signature, cert_data) =
+        if let Some(committed) = provisioning.committed {
+            network_marker[..32].copy_from_slice(&committed.network_pubkey);
+            let cert = NodeCertificate {
+                pubkey: identity.pubkey(),
+                capabilities: committed.cert_capabilities,
+                network_signature: committed.cert_signature,
+            };
+            (
+                committed.network_pubkey,
+                committed.cert_capabilities.to_le_bytes(),
+                committed.cert_signature,
+                cert.to_cert_bytes(&committed.network_pubkey),
+            )
+        } else {
+            network_marker[..ONBOARDING_READY_MARKER.len()].copy_from_slice(ONBOARDING_READY_MARKER);
+            (
+                provisioning.staged.authority_pubkey.unwrap_or(EMPTY_PUBKEY),
+                provisioning
+                    .staged
+                    .cert_capabilities
+                    .map(|caps| caps.to_le_bytes())
+                    .unwrap_or(EMPTY_CAPABILITIES),
+                provisioning
+                    .staged
+                    .cert_signature
+                    .unwrap_or(EMPTY_SIGNATURE),
+                [0xFFu8; CERT_DATA_LEN],
+            )
+        };
 
     let _ = server.set(&server.onboarding.network_marker, &network_marker);
     let _ = server.set(&server.onboarding.authority_pubkey, &authority_pubkey);
     let _ = server.set(&server.onboarding.cert_capabilities, &cert_capabilities);
     let _ = server.set(&server.onboarding.cert_signature, &cert_signature);
+    let _ = server.set(&server.onboarding.cert_data, &cert_data);
     let _ = server.set(&server.onboarding.node_pubkey, &identity.pubkey());
     let _ = server.set(&server.onboarding.capabilities, &capabilities.to_le_bytes());
     let _ = server.set(&server.onboarding.short_addr, identity.short_addr());
@@ -252,61 +265,6 @@ fn apply_onboarding_write(
     Err(AttErrorCode::WRITE_NOT_PERMITTED)
 }
 
-/// Lightweight advertisement payload: [short_addr: 8][capabilities: 2]
-pub struct DiscoveryInfo {
-    pub short_addr: ShortAddr,
-    pub capabilities: u16,
-}
-
-pub fn serialize_discovery(
-    short_addr: &ShortAddr,
-    capabilities: u16,
-    buf: &mut [u8],
-) -> Option<usize> {
-    if buf.len() < DISCOVERY_PAYLOAD_SIZE {
-        return None;
-    }
-    buf[0..8].copy_from_slice(short_addr);
-    buf[8..10].copy_from_slice(&capabilities.to_le_bytes());
-    Some(DISCOVERY_PAYLOAD_SIZE)
-}
-
-pub fn deserialize_discovery(data: &[u8]) -> Option<DiscoveryInfo> {
-    if data.len() < DISCOVERY_PAYLOAD_SIZE {
-        return None;
-    }
-    let mut short_addr = [0u8; 8];
-    short_addr.copy_from_slice(&data[0..8]);
-    let capabilities = u16::from_le_bytes([data[8], data[9]]);
-    Some(DiscoveryInfo {
-        short_addr,
-        capabilities,
-    })
-}
-
-pub fn parse_discovery_from_adv(data: &[u8]) -> Option<DiscoveryInfo> {
-    let mut i = 0;
-    while i + 1 < data.len() {
-        let len = data[i] as usize;
-        if len == 0 || i + 1 + len > data.len() {
-            break;
-        }
-        let ad_type = data[i + 1];
-        if ad_type == 0xFF && len >= 3 {
-            let company_id = u16::from_le_bytes([data[i + 2], data[i + 3]]);
-            if company_id == CONSTELLATION_COMPANY_ID {
-                let payload_start = i + 4;
-                let payload_end = i + 1 + len;
-                if payload_start < payload_end {
-                    return deserialize_discovery(&data[payload_start..payload_end]);
-                }
-            }
-        }
-        i += 1 + len;
-    }
-    None
-}
-
 // ── BleResponder ──────────────────────────────────────────────────────────────
 
 /// Manages the peripheral / advertising side of H2H exchanges.
@@ -364,8 +322,24 @@ impl<'stack, C: Controller> BleResponder<'stack, C> {
 
     pub async fn receive_session(&mut self) -> Result<InboundBleSession, NetworkError> {
         'advertise: loop {
+            // Compute network_addr from provisioning state
+            let network_addr = {
+                let provisioning = self.provisioning_state.lock().await;
+                if let Some(committed) = provisioning.committed {
+                    network_addr_of(&committed.network_pubkey)
+                } else {
+                    ONBOARDING_READY_NETWORK_ADDR
+                }
+            };
+
             let mut disc_buf = [0u8; DISCOVERY_PAYLOAD_SIZE];
-            if serialize_discovery(&self.identity_short, self.capabilities, &mut disc_buf).is_none()
+            if serialize_discovery(
+                &self.identity_short,
+                self.capabilities,
+                &network_addr,
+                &mut disc_buf,
+            )
+            .is_none()
             {
                 Timer::after(Duration::from_secs(1)).await;
                 continue;
@@ -720,6 +694,7 @@ where
                             let _ = results.push(DiscoveryEvent {
                                 short_addr: info.short_addr,
                                 capabilities: info.capabilities,
+                                network_addr: info.network_addr,
                                 transport_addr: TransportAddr::ble(mac),
                             });
                         }

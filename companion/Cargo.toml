@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 routing-core = { path = "../routing-core" }
 
-blew = "0.3.0"
+blew = { path = "../../blew/crates/blew" }
 tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
 tokio-stream = "0.1"
 embassy-sync = { version = "0.8.0", default-features = false }

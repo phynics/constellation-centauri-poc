@@ -1,4 +1,4 @@
-use routing_core::crypto::identity::{PubKey, ShortAddr};
+use routing_core::crypto::identity::{NetworkAddr, PubKey, ShortAddr};
 use routing_core::node::roles::Capabilities;
 
 use crate::node::storage::LocalNodeRecord;
@@ -26,6 +26,7 @@ pub struct DiscoveredPeer {
     pub has_constellation_signature: bool,
     pub onboarding_ready: bool,
     pub network_pubkey_hex: Option<String>,
+    pub network_addr: Option<NetworkAddr>,
     pub node_pubkey_hex: Option<String>,
     pub capabilities: Option<u16>,
     pub last_error: Option<String>,
@@ -92,6 +93,18 @@ impl SharedState {
                 existing.rssi = peer.rssi;
                 existing.last_seen_unix_secs = peer.last_seen_unix_secs;
                 existing.has_onboarding_service = peer.has_onboarding_service;
+                if peer.short_addr.is_some() {
+                    existing.short_addr = peer.short_addr;
+                }
+                if peer.capabilities.is_some() {
+                    existing.capabilities = peer.capabilities;
+                }
+                if peer.network_addr.is_some() {
+                    existing.network_addr = peer.network_addr;
+                }
+                if peer.onboarding_ready {
+                    existing.onboarding_ready = true;
+                }
             }
             None => self.peers.push(peer),
         }

@@ -3,7 +3,7 @@
 //! These traits decouple the routing algorithm from the physical transport
 //! (BLE on firmware, in-memory channels on the simulator).
 
-use crate::crypto::identity::ShortAddr;
+use crate::crypto::identity::{NetworkAddr, ShortAddr};
 use crate::protocol::h2h::{H2hFrame, H2hPayload};
 use crate::transport::TransportAddr;
 use heapless::Vec;
@@ -18,6 +18,7 @@ pub const MAX_SCAN_RESULTS: usize = 16;
 pub struct DiscoveryEvent {
     pub short_addr: ShortAddr,
     pub capabilities: u16,
+    pub network_addr: NetworkAddr,
     pub transport_addr: TransportAddr,
 }
 
