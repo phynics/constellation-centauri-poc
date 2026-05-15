@@ -15,7 +15,7 @@ use sha2::Digest as _;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::mpsc;
 
-use super::constants::{L2CAP_PSM_CHAR_UUID, ONBOARDING_SERVICE_UUID};
+use super::constants::{CONSTELLATION_COMPANY_ID, L2CAP_PSM_CHAR_UUID, ONBOARDING_SERVICE_UUID};
 
 const CORE_BLUETOOTH_ADDR_LEN: u8 = 16;
 const L2CAP_FRAME_BUF_SIZE: usize = 512;
@@ -120,10 +120,14 @@ impl H2hInitiator for MacInitiator {
     async fn scan(&mut self, duration_ms: u64) -> heapless::Vec<DiscoveryEvent, MAX_SCAN_RESULTS> {
         let out = heapless::Vec::new();
 
+        // Scan without service filter. CoreBluetooth's
+        // scanForPeripheralsWithServices: is unreliable for 128-bit UUIDs
+        // that appear in scan response data. We filter manually after
+        // collecting results.
         if self
             .central
             .start_scan(blew::central::ScanFilter {
-                services: vec![ONBOARDING_SERVICE_UUID],
+                services: vec![],
                 ..Default::default()
             })
             .await
@@ -141,13 +145,19 @@ impl H2hInitiator for MacInitiator {
             }
         };
         let _ = self.central.stop_scan().await;
+        log::info!("BLE scan found {} raw devices", devices.len());
 
-        for device in devices.into_iter() {
-            if !device
+        for device in devices.iter() {
+            let has_service = device
                 .services
                 .iter()
-                .any(|uuid| *uuid == ONBOARDING_SERVICE_UUID)
-            {
+                .any(|uuid| *uuid == ONBOARDING_SERVICE_UUID);
+            let has_constellation_mfr = device
+                .manufacturer_data
+                .as_ref()
+                .map(|d| d.len() >= 2 && u16::from_le_bytes([d[0], d[1]]) == CONSTELLATION_COMPANY_ID)
+                .unwrap_or(false);
+            if !has_service && !has_constellation_mfr {
                 continue;
             }
 

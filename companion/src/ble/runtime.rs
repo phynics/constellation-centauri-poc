@@ -34,9 +34,9 @@ use tokio_stream::StreamExt as _;
 
 use super::constants::{
     AUTHORITY_PUBKEY_CHAR_UUID, CAPABILITIES_CHAR_UUID, CERT_CAPABILITIES_CHAR_UUID,
-    CERT_SIGNATURE_CHAR_UUID, COMMIT_ENROLLMENT_CHAR_UUID, L2CAP_PSM_CHAR_UUID,
-    NETWORK_MARKER_CHAR_UUID, NODE_PUBKEY_CHAR_UUID, ONBOARDING_SERVICE_UUID,
-    PROTOCOL_SIGNATURE_CHAR_UUID, SHORT_ADDR_CHAR_UUID,
+    CERT_SIGNATURE_CHAR_UUID, COMMIT_ENROLLMENT_CHAR_UUID, CONSTELLATION_COMPANY_ID,
+    L2CAP_PSM_CHAR_UUID, NETWORK_MARKER_CHAR_UUID, NODE_PUBKEY_CHAR_UUID,
+    ONBOARDING_SERVICE_UUID, PROTOCOL_SIGNATURE_CHAR_UUID, SHORT_ADDR_CHAR_UUID,
 };
 use super::network::{transport_addr_for_device_id, AcceptedSession, MacInitiator, MacResponder};
 use crate::diagnostics::state::{DiscoveredPeer, SharedState};
@@ -364,14 +364,21 @@ pub async fn run(
                     CentralEvent::DeviceDiscovered(device) => {
                         let has_service = device.services.iter().any(|uuid| *uuid == ONBOARDING_SERVICE_UUID);
                         let has_mfr = device.manufacturer_data.is_some();
+                        let mfr_constellation = device.manufacturer_data.as_ref()
+                            .map(|d| d.len() >= 2 && u16::from_le_bytes([d[0], d[1]]) == CONSTELLATION_COMPANY_ID)
+                            .unwrap_or(false);
                         shared.lock().unwrap().push_event(format!(
-                            "discovered {} (services={} ours={} mfr={})",
+                            "discovered {} (svc={} ours={} mfr={} constellation={})",
                             device.id,
                             device.services.len(),
                             has_service,
                             has_mfr,
+                            mfr_constellation,
                         ));
-                        if has_service {
+                        // Accept device if it has our service UUID OR our
+                        // manufacturer data — either is sufficient evidence
+                        // that it's a Constellation node.
+                        if has_service || mfr_constellation {
                             let transport_addr = transport_addr_for_device_id(&device.id);
                             known_devices
                                 .lock()
@@ -393,7 +400,7 @@ pub async fn run(
                                 name: device.name.clone(),
                                 rssi: device.rssi,
                                 last_seen_unix_secs: now_secs(),
-                                has_onboarding_service: true,
+                                has_onboarding_service: has_service,
                                 has_constellation_signature: false,
                                 onboarding_ready,
                                 network_pubkey_hex: None, // still need GATT read for full pubkey
