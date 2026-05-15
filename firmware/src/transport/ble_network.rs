@@ -8,6 +8,7 @@
 //! the given duration, then hands `Central` back via `into_inner()`.
 
 use embassy_time::{Duration, Instant, Timer};
+use esp_println::println;
 use heapless::Vec;
 
 use bt_hci::cmd::le::{
@@ -33,7 +34,7 @@ use routing_core::network::{
 use routing_core::onboarding::{
     CONSTELLATION_COMPANY_ID, CONSTELLATION_PROTOCOL_SIGNATURE, DISCOVERY_PAYLOAD_SIZE,
     ONBOARDING_READY_MARKER, ONBOARDING_READY_NETWORK_ADDR, NodeCertificate,
-    deserialize_discovery, serialize_discovery,
+    serialize_discovery,
 };
 
 pub use routing_core::onboarding::{DiscoveryInfo, parse_discovery_from_adv};

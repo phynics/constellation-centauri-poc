@@ -3,7 +3,7 @@
 //! Used to address the `constellation` data partition without changing the
 //! storage API (which expects partition-relative offsets).
 
-use embedded_storage::nor_flash::{NorFlash, NorFlashError, ReadNorFlash};
+use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 
 /// NOR flash wrapper that translates partition-relative offsets to absolute
 /// flash offsets by adding a fixed base.
