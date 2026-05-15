@@ -25,16 +25,18 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::with_timeout;
 
 use routing_core::config::{H2H_CONNECTION_TIMEOUT_SECS, H2H_MTU, H2H_PSM};
-use routing_core::crypto::identity::{network_addr_of, NodeIdentity, NetworkAddr, ShortAddr};
+use routing_core::crypto::identity::{network_addr_of, NodeIdentity, ShortAddr};
 use routing_core::network::{
     DiscoveryEvent, H2hInitiator, H2hResponder, InboundH2h, NetworkError, MAX_SCAN_RESULTS,
     SESSION_KIND_H2H, SESSION_KIND_ROUTED,
 };
 use routing_core::onboarding::{
-    network_addr_of_marker, CONSTELLATION_PROTOCOL_SIGNATURE, ONBOARDING_READY_NETWORK_ADDR,
-    NodeCertificate, CONSTELLATION_COMPANY_ID, DISCOVERY_PAYLOAD_SIZE, DiscoveryInfo,
-    serialize_discovery, deserialize_discovery, parse_discovery_from_adv,
+    CONSTELLATION_COMPANY_ID, CONSTELLATION_PROTOCOL_SIGNATURE, DISCOVERY_PAYLOAD_SIZE,
+    ONBOARDING_READY_MARKER, ONBOARDING_READY_NETWORK_ADDR, NodeCertificate,
+    deserialize_discovery, parse_discovery_from_adv, serialize_discovery,
 };
+
+pub use routing_core::onboarding::{DiscoveryInfo, parse_discovery_from_adv};
 use routing_core::protocol::h2h::{H2hFrame, H2hPayload};
 use routing_core::transport::TransportAddr;
 
@@ -47,7 +49,6 @@ use esp_storage::FlashStorage;
 const PROTOCOL_SIGNATURE_LEN: usize = 32;
 const NETWORK_MARKER_LEN: usize = 33;
 const CERT_DATA_LEN: usize = NodeCertificate::CERT_DATA_SIZE;
-const NETWORK_MARKER_LEN: usize = 33;
 const EMPTY_CAPABILITIES: [u8; 2] = [0u8; 2];
 const EMPTY_PUBKEY: [u8; 32] = [0xFFu8; 32];
 const EMPTY_SIGNATURE: [u8; 64] = [0xFFu8; 64];
