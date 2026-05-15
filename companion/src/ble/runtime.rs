@@ -549,9 +549,12 @@ async fn enroll_device(
     let authority_identity = NodeIdentity::from_bytes(&local_node.authority_secret);
     let device_id = blew::types::DeviceId::from(device_id.to_owned());
 
+    shared.lock().unwrap().push_event(format!("connecting to {device_id}..."));
     central.connect(&device_id).await?;
+    shared.lock().unwrap().push_event(format!("discovering services for {device_id}..."));
     central.discover_services(&device_id).await?;
 
+    shared.lock().unwrap().push_event(format!("reading node identity from {device_id}..."));
     let node_pubkey = central
         .read_characteristic(&device_id, NODE_PUBKEY_CHAR_UUID)
         .await?;
@@ -569,6 +572,7 @@ async fn enroll_device(
     let certificate =
         NodeCertificate::issue(&authority_identity, node_pubkey_arr, node_capabilities);
 
+    shared.lock().unwrap().push_event(format!("writing authority pubkey to {device_id}..."));
     central
         .write_characteristic(
             &device_id,
@@ -577,6 +581,7 @@ async fn enroll_device(
             blew::central::WriteType::WithResponse,
         )
         .await?;
+    shared.lock().unwrap().push_event(format!("writing cert capabilities to {device_id}..."));
     central
         .write_characteristic(
             &device_id,
@@ -585,6 +590,7 @@ async fn enroll_device(
             blew::central::WriteType::WithResponse,
         )
         .await?;
+    shared.lock().unwrap().push_event(format!("writing cert signature to {device_id}..."));
     central
         .write_characteristic(
             &device_id,
@@ -593,6 +599,7 @@ async fn enroll_device(
             blew::central::WriteType::WithResponse,
         )
         .await?;
+    shared.lock().unwrap().push_event(format!("committing enrollment for {device_id}..."));
     central
         .write_characteristic(
             &device_id,
@@ -616,6 +623,7 @@ async fn inspect_device(
     device_id: &str,
 ) -> Result<(), Box<dyn Error>> {
     let device_id = blew::types::DeviceId::from(device_id);
+    shared.lock().unwrap().push_event(format!("inspecting {device_id}..."));
     central.connect(&device_id).await?;
     let _ = central.discover_services(&device_id).await?;
 
