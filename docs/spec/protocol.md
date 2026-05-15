@@ -1145,12 +1145,26 @@ Lightweight BLE advertisements for peer discovery. **No connection required.**
 
 ### 2.1 Advertisement Structure
 
+The firmware uses `ConnectableScannableUndirected` advertising so that
+companions can both scan for service UUIDs and request scan response data.
+
 ```
-AD Structure 1: Flags (LE General Discoverable, BR/EDR Not Supported)
-AD Structure 2: Manufacturer Specific Data
-  Company ID:  0x1234 (2 bytes, little-endian)
-  Payload:     Discovery payload (18 bytes)
+Primary Advertising Data (22 bytes):
+  AD Structure 1: Flags (3 bytes)
+    LE General Discoverable, BR/EDR Not Supported
+  AD Structure 2: Complete 128-bit Service UUIDs (18 bytes)
+    UUID: 43d7aa10-5f4b-4c84-a100-000000000001 (onboarding service)
+
+Scan Response Data (22 bytes):
+  AD Structure: Manufacturer Specific Data
+    Company ID:  0x1234 (2 bytes, little-endian)
+    Payload:     Discovery payload (18 bytes)
 ```
+
+The service UUID is placed in the primary advertising data so that
+CoreBluetooth's `scanForPeripheralsWithServices:options:` can match it
+directly. The manufacturer-specific discovery payload is in the scan
+response where it fits comfortably.
 
 ### 2.2 Discovery Payload (18 bytes)
 
@@ -1170,8 +1184,9 @@ This allows companions to identify network membership from advertisement
 data alone, without a GATT connection. Enrolled nodes advertise their
 real `NetworkAddr`; unenrolled nodes advertise the onboarding-ready sentinel.
 
-Fits within the 31-byte BLE advertising data limit (3 bytes flags + 22
-bytes manufacturer-specific AD structure = 25 bytes).
+Primary advertising fits within the 31-byte limit (4 bytes flags + 18 bytes
+service UUID = 22 bytes). Scan response fits within the 31-byte limit
+(22 bytes manufacturer-specific AD structure).
 
 This BLE discovery payload provides observed-peer hints:
 
@@ -1186,7 +1201,25 @@ from advertisement parsing alone. However, the `network_addr` field enables
 fast filtering: companions can ignore advertisements from other networks and
 prioritize onboarding-ready devices without GATT connections.
 
-### 2.3 BLE Address Derivation
+### 2.3 Companion Discovery
+
+The companion scans for Constellation devices using CoreBluetooth.
+Due to platform-specific behavior where `scanForPeripheralsWithServices:`
+may not reliably match 128-bit service UUIDs in scan response data, the
+companion performs an **unfiltered scan** (no OS-level service filter) and
+identifies Constellation nodes by either:
+
+1. **Service UUID match**: the onboarding service UUID appears in
+   `CBAdvertisementDataServiceUUIDsKey`
+2. **Manufacturer data match**: the Constellation company ID (`0x1234`)
+   appears as the first two bytes of `CBAdvertisementDataManufacturerDataKey`
+
+Either condition is sufficient to identify a device as a Constellation node.
+The companion merges data from both the primary advertising packet and the
+scan response (CoreBluetooth delivers both in the `advertisementData`
+dictionary).
+
+### 2.4 BLE Address Derivation
 
 Each node derives its random static BLE address from its `ShortAddr`:
 

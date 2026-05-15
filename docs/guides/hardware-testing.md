@@ -53,12 +53,18 @@ The **build fingerprint** is a hash of key source files computed at compile time
 
 ### Discovery
 
-Nodes discover each other via BLE advertising + scanning. The manufacturer data
-includes `short_addr`, `capabilities`, and `network_addr` (18 bytes):
+### Discovery
 
-```
-[central] New peer <short_addr> (1 total)
-```
+Nodes discover each other via BLE advertising + scanning. The advertising
+layout distributes data across primary and scan response:
+
+- **Primary adv data**: Flags + onboarding service UUID (128-bit)
+- **Scan response**: Manufacturer data (company ID `0x1234` + 18-byte payload:
+  `short_addr` + `capabilities` + `network_addr`)
+
+The companion scans without an OS-level service filter and matches
+Constellation nodes by either service UUID or company ID in manufacturer
+data. Each scan cycle logs diagnostics to the Events view.
 
 Unenrolled nodes advertise `ONBOARDING_READY_NETWORK_ADDR = [0xFF; 8]` as their
 network_addr. Enrolled nodes advertise their real network fingerprint.
@@ -218,6 +224,16 @@ reflash with `--partition-table partitions.csv` explicitly.
 - Check both boards are running the same firmware (build fingerprint)
 - Ensure both are within BLE range
 - Verify neither node has disabled H2H behaviors
+
+**Companion can't discover firmware node:**
+- Switch to Events view (press `n`/Tab) to see scan diagnostics:
+  - `"scan done: N discovery events, M known devices"` — if N=0, CoreBluetooth isn't finding any BLE devices; if N>0 but M=0, no device matched the Constellation filter
+  - `"discovered {id} (svc=N ours=X mfr=Y constellation=Z)"` — for each raw device the central reports
+- Run with `RUST_LOG=info cargo run -p companion` to see raw device count on stderr
+- Verify the firmware serial console shows `"Ready — advertising for discovery + H2H exchange"`
+- The firmware puts the onboarding service UUID in the primary advertising data and the manufacturer data in the scan response — both should be visible to CoreBluetooth
+- If no devices appear at all, try resetting the macOS Bluetooth daemon: turn Bluetooth off and back on in System Settings
+- The companion matches devices by either service UUID or Constellation company ID (`0x1234`) in manufacturer data
 
 **Onboarding fails on companion:**
 - Switch to Events view (press `n`/Tab) to see step-by-step progress

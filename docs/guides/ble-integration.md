@@ -56,23 +56,27 @@ All tasks run cooperatively via Embassy `join4` on a single-threaded executor.
 
 ## Discovery Advertisements
 
-### Primary Advertising Data (25 bytes)
+### Primary Advertising Data (22 bytes)
 
 ```
 AD Structure 1: Flags (3 bytes)
   LE General Discoverable, BR/EDR Not Supported
 
-AD Structure 2: Manufacturer Specific Data (22 bytes)
+AD Structure 2: Complete 128-bit Service UUIDs (18 bytes)
+  UUID: 43d7aa10-5f4b-4c84-a100-000000000001 (onboarding service)
+```
+
+The service UUID is placed in the primary advertising data so that
+CoreBluetooth's `scanForPeripheralsWithServices:options:` can match it
+directly, without needing to wait for scan response data.
+
+### Scan Response Data (22 bytes)
+
+```
+AD Structure: Manufacturer Specific Data
   Length: 22, Type: 0xFF
   Company ID: 0x1234 (2 bytes, little-endian)
   Payload: [short_addr:8][capabilities:2][network_addr:8]
-```
-
-### Scan Response Data (20 bytes)
-
-```
-AD Structure: Complete 128-bit Service UUIDs
-  UUID: 43d7aa10-5f4b-4c84-a100-000000000001 (onboarding service)
 ```
 
 ### NetworkAddr
@@ -83,6 +87,34 @@ network membership from advertisement data alone.
 
 - **Enrolled nodes**: advertise `network_addr_of(authority_pubkey)`
 - **Unenrolled nodes**: advertise `ONBOARDING_READY_NETWORK_ADDR = [0xFF; 8]`
+
+### Companion Scan Strategy
+
+The companion does NOT use CoreBluetooth's `scanForPeripheralsWithServices:`
+service filter. Instead, it performs an unfiltered scan and identifies
+Constellation nodes by either:
+
+1. **Service UUID in advertisement data** — the onboarding service UUID
+   appears in the `CBAdvertisementDataServiceUUIDsKey`
+2. **Constellation company ID in manufacturer data** — `0x1234` appears as
+   the first two bytes of `CBAdvertisementDataManufacturerDataKey`
+
+This dual-match strategy avoids a platform-specific issue where
+CoreBluetooth's service filter may not match 128-bit service UUIDs that
+appear only in scan response data. Since the firmware now places the service
+UUID in the primary advertising data, the service filter would work in
+theory, but the unfiltered approach is more robust across macOS versions.
+
+The companion scans for 750ms every 2 seconds, then processes discovered
+devices. Each scan cycle logs:
+- Number of raw devices from CoreBluetooth
+- Number of known Constellation devices
+- Per-device details (service match, manufacturer data presence)
+
+To see raw scan diagnostics on stderr:
+```bash
+RUST_LOG=info cargo run -p companion
+```
 
 ## Onboarding GATT Service
 
