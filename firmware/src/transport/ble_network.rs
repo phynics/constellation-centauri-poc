@@ -172,7 +172,10 @@ async fn handle_onboarding_gatt_event(
     flash: &Mutex<NoopRawMutex, PartitionedFlash<FlashStorage<'static>>>,
 ) -> Result<bool, NetworkError> {
     match conn.next().await {
-        GattConnectionEvent::Disconnected { .. } => Ok(false),
+        GattConnectionEvent::Disconnected { .. } => {
+            println!("GATT disconnected");
+            Ok(false)
+        }
         GattConnectionEvent::Gatt {
             event: GattEvent::Write(event),
         } => {
@@ -180,9 +183,20 @@ async fn handle_onboarding_gatt_event(
             let data = event.data();
             let mut provisioning = provisioning_state.lock().await;
 
+            if handle == server.onboarding.authority_pubkey.handle {
+                println!("GATT write: authority_pubkey ({} bytes)", data.len());
+            } else if handle == server.onboarding.cert_capabilities.handle {
+                println!("GATT write: cert_capabilities ({} bytes)", data.len());
+            } else if handle == server.onboarding.cert_signature.handle {
+                println!("GATT write: cert_signature ({} bytes)", data.len());
+            } else if handle == server.onboarding.commit_enrollment.handle {
+                println!("GATT write: commit_enrollment");
+            }
+
             if let Err(err) =
                 apply_onboarding_write(server, handle, data, identity, &mut provisioning)
             {
+                println!("GATT write rejected: {:?}", err);
                 drop(provisioning);
                 event
                     .reject(err)
@@ -194,8 +208,13 @@ async fn handle_onboarding_gatt_event(
 
             if handle == server.onboarding.commit_enrollment.handle {
                 let mut flash = flash.lock().await;
-                storage::save_provisioning(&mut *flash, identity, &provisioning)
-                    .map_err(|_| NetworkError::ProtocolError)?;
+                match storage::save_provisioning(&mut *flash, identity, &provisioning) {
+                    Ok(()) => println!("Enrollment committed to flash"),
+                    Err(e) => {
+                        println!("Enrollment flash save failed: {:?}", e);
+                        return Err(NetworkError::ProtocolError);
+                    }
+                }
             }
 
             let advertised_capabilities = if let Some(membership) = provisioning.committed {
@@ -214,6 +233,7 @@ async fn handle_onboarding_gatt_event(
                 .send()
                 .await;
             if handle == server.onboarding.commit_enrollment.handle {
+                println!("Rebooting in 100ms...");
                 Timer::after(Duration::from_millis(100)).await;
                 reboot_after_enrollment_commit();
             }
@@ -259,9 +279,19 @@ fn apply_onboarding_write(
     }
 
     if handle == server.onboarding.commit_enrollment.handle {
-        return storage::commit_staged_enrollment(identity, provisioning)
-            .map(|_| ())
-            .map_err(|_| AttErrorCode::VALUE_NOT_ALLOWED);
+        match storage::commit_staged_enrollment(identity, provisioning) {
+            Ok(committed) => {
+                println!(
+                    "Certificate verified, committed to network {:02x?}..",
+                    &committed.network_pubkey[..4]
+                );
+            }
+            Err(e) => {
+                println!("commit_staged_enrollment failed: {:?}", e);
+                return Err(AttErrorCode::VALUE_NOT_ALLOWED);
+            }
+        }
+        return Ok(());
     }
 
     Err(AttErrorCode::WRITE_NOT_PERMITTED)
@@ -395,12 +425,18 @@ impl<'stack, C: Controller> BleResponder<'stack, C> {
             };
 
             let conn = match advertiser.accept().await {
-                Ok(c) => c,
+                Ok(c) => {
+                    println!("BLE central connected");
+                    c
+                }
                 Err(_) => continue,
             };
             let gatt_conn = match conn.with_attribute_server(&self.server) {
                 Ok(c) => c,
-                Err(_) => continue,
+                Err(_) => {
+                    println!("GATT server bind failed");
+                    continue;
+                }
             };
 
             let l2cap_config = L2capChannelConfig {
