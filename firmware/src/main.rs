@@ -138,6 +138,21 @@ async fn main(_spawner: Spawner) {
         software_interrupt.software_interrupt0,
     );
 
+    // Set up logger that forwards to esp_println
+    struct EspLogger;
+    impl log::Log for EspLogger {
+        fn enabled(&self, _metadata: &log::Metadata) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record) {
+            println!("[{}][{}] {}", record.target(), record.level(), record.args());
+        }
+        fn flush(&self) {}
+    }
+    static LOGGER: EspLogger = EspLogger;
+    let _ = log::set_logger(&LOGGER);
+    log::set_max_level(log::LevelFilter::Info);
+
     println!("Initializing RNG (non-cryptographic - PoC only)...");
     let mut rng = Rng::new();
     let mut raw_flash = FlashStorage::new(peripherals.FLASH);
