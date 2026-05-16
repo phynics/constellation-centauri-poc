@@ -31,14 +31,13 @@ struct SimMaintenanceObserver {
 }
 
 impl SimMaintenanceObserver {
-    fn node_index_for(&self, addr: ShortAddr) -> usize {
+    fn node_index_for(&self, addr: ShortAddr) -> Option<usize> {
         self.tui_state
             .lock()
             .unwrap()
             .node_short_addrs
             .iter()
             .position(|candidate| *candidate == addr)
-            .unwrap_or(0)
     }
 }
 
@@ -49,8 +48,12 @@ impl StoreForwardObserver for SimMaintenanceObserver {
         holder_addr: ShortAddr,
         destination_addr: ShortAddr,
     ) {
-        let holder_idx = self.node_index_for(holder_addr);
-        let destination_idx = self.node_index_for(destination_addr);
+        let Some(holder_idx) = self.node_index_for(holder_addr) else {
+            return;
+        };
+        let Some(destination_idx) = self.node_index_for(destination_addr) else {
+            return;
+        };
         let mut tui = self.tui_state.lock().unwrap();
         tui.push_trace_event(
             trace_id,

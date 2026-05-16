@@ -808,49 +808,35 @@ where
     loop {
         match responder.receive_h2h().await {
             Ok(inbound) => {
-                let Some(partner_short) =
-                    resolve_inbound_partner_short_addr(&inbound, routing_table).await
-                else {
-                    log::warn!(
-                        "[periph] cannot resolve partner identity for transport {:?}; skipping session",
-                        inbound.peer_transport_addr
-                    );
-                    let _ = responder.finish_h2h_session().await;
-                    continue;
-                };
-
-                log::debug!(
-                    "[periph] H2H from {:02x?}, partner={:02x?}",
-                    &inbound.peer_transport_addr.addr[..inbound.peer_transport_addr.len as usize],
-                    &partner_short[..4]
-                );
-
-                // Build response before updating routing table so the payload
-                // reflects pre-exchange state (avoids echoing their own peers
-                // back to them in the same exchange).
-                let response = build_h2h_payload(
+                match respond_to_inbound_h2h_sync(
+                    responder,
+                    &inbound,
                     identity,
                     capabilities,
                     uptime,
                     routing_table,
-                    &partner_short,
                 )
-                .await;
-
-                // Update routing table with peer's payload.
+                .await
                 {
-                    let mut table = routing_table.lock().await;
-                    table.update_peer_from_h2h(
-                        &inbound.peer_payload,
-                        partner_short,
-                        inbound.peer_transport_addr,
-                        Instant::now().as_ticks(),
-                    );
-                    log::info!("[periph] H2H done, peers={}", table.peers.len());
-                }
-
-                if let Err(e) = responder.send_h2h_response(&response).await {
-                    log::warn!("[periph] send_h2h_response error: {:?}", e);
+                    Ok(sync) => {
+                        log::debug!(
+                            "[periph] H2H from {:02x?}, partner={:02x?}",
+                            &inbound.peer_transport_addr.addr
+                                [..inbound.peer_transport_addr.len as usize],
+                            &sync.partner_short[..4]
+                        );
+                        let table = routing_table.lock().await;
+                        log::info!("[periph] H2H done, peers={}", table.peers.len());
+                    }
+                    Err(InboundH2hSyncError::UnresolvedPartner) => {
+                        log::warn!(
+                            "[periph] cannot resolve partner identity for transport {:?}; skipping session",
+                            inbound.peer_transport_addr
+                        );
+                    }
+                    Err(InboundH2hSyncError::SendResponse(e)) => {
+                        log::warn!("[periph] send_h2h_response error: {:?}", e);
+                    }
                 }
 
                 let _ = responder.finish_h2h_session().await;

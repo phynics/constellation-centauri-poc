@@ -67,7 +67,9 @@ use routing_core::behavior::{
 use routing_core::config::H2H_PSM;
 use routing_core::crypto::encryption::CryptoError;
 use routing_core::crypto::identity::NodeIdentity;
-use routing_core::facade::{DeliveredInfra, MeshFacade, RoutedReceiveOutcome};
+use routing_core::facade::{
+    observe_routed_receive_outcome, DeliveredInfra, MeshFacade, RoutedReceiveObserver, RoutedTxPlan,
+};
 use routing_core::network::{H2hInitiator, H2hResponder};
 use routing_core::node::roles::Capabilities;
 use routing_core::protocol::h2h::H2hFrame;
@@ -451,26 +453,31 @@ async fn handle_routed_packet(
     packet: &[u8],
     routed_forward_queue: &Channel<NoopRawMutex, RoutedForward, 8>,
 ) {
-    match {
-        let mut table = routing_table.lock().await;
-        let mut mesh = MeshFacade::new(&mut table, identity, capabilities);
-        mesh.receive(peer_transport_addr, packet)
-    } {
-        RoutedReceiveOutcome::InvalidPacket => log::warn!("[routed] invalid packet header"),
-        RoutedReceiveOutcome::SignatureFailed { source } => {
+    struct FirmwareRoutedObserver<'a> {
+        routed_forward_queue: &'a Channel<NoopRawMutex, RoutedForward, 8>,
+    }
+
+    impl RoutedReceiveObserver for FirmwareRoutedObserver<'_> {
+        fn on_invalid_packet(&mut self) {
+            log::warn!("[routed] invalid packet header");
+        }
+
+        fn on_signature_failed(&mut self, source: [u8; 8]) {
             log::warn!(
                 "[routed] signature verify failed from {:02x?}",
                 &source[..4]
             );
         }
-        RoutedReceiveOutcome::Forward {
-            source,
-            destination,
-            ttl,
-            hop_count,
-            plan,
-        } => {
-            let _ = routed_forward_queue.try_send(RoutedForward {
+
+        fn on_forward(
+            &mut self,
+            source: [u8; 8],
+            destination: [u8; 8],
+            ttl: u8,
+            hop_count: u8,
+            plan: RoutedTxPlan,
+        ) {
+            let _ = self.routed_forward_queue.try_send(RoutedForward {
                 peer_transport_addr: plan.next_hop_transport,
                 len: plan.len,
                 packet: plan.packet,
@@ -483,54 +490,68 @@ async fn handle_routed_packet(
                 hop_count
             );
         }
-        RoutedReceiveOutcome::TtlExpired { destination } => {
+
+        fn on_ttl_expired(&mut self, destination: [u8; 8]) {
             log::warn!("[routed] ttl expired for {:02x?}", &destination[..4]);
         }
-        RoutedReceiveOutcome::Duplicate { message_id } => {
+
+        fn on_duplicate(&mut self, message_id: [u8; 8]) {
             log::info!("[routed] duplicate msg_id={:02x?}", message_id);
         }
-        RoutedReceiveOutcome::NoRoute { destination, .. } => {
+
+        fn on_no_route(
+            &mut self,
+            destination: [u8; 8],
+            _observe_broadcast: bool,
+            _should_retain_for_lpn: bool,
+        ) {
             log::warn!("[routed] no route to {:02x?}", &destination[..4]);
         }
-        RoutedReceiveOutcome::DeliveredInfra(DeliveredInfra::Ping {
-            source,
-            payload,
-            pong,
-        }) => {
-            log::info!(
-                "[infra] ping from {:02x?} req={:02x?}",
-                &source[..4],
-                payload.request_id
-            );
-            if let Some(pong) = pong {
-                let _ = routed_forward_queue.try_send(RoutedForward {
-                    peer_transport_addr: pong.next_hop_transport,
-                    len: pong.len,
-                    packet: pong.packet,
-                });
+
+        fn on_delivered_infra(&mut self, infra: DeliveredInfra) {
+            match infra {
+                DeliveredInfra::Ping {
+                    source,
+                    payload,
+                    pong,
+                } => {
+                    log::info!(
+                        "[infra] ping from {:02x?} req={:02x?}",
+                        &source[..4],
+                        payload.request_id
+                    );
+                    if let Some(pong) = pong {
+                        let _ = self.routed_forward_queue.try_send(RoutedForward {
+                            peer_transport_addr: pong.next_hop_transport,
+                            len: pong.len,
+                            packet: pong.packet,
+                        });
+                    }
+                }
+                DeliveredInfra::Other {
+                    source,
+                    kind,
+                    payload_len,
+                } => {
+                    log::info!(
+                        "[infra] from {:02x?} kind={:?} bytes={}",
+                        &source[..4],
+                        kind,
+                        payload_len
+                    );
+                }
+                DeliveredInfra::Pong { source, payload } => {
+                    log::info!(
+                        "[infra] pong from {:02x?} req={:02x?} recv_ttl={}",
+                        &source[..4],
+                        payload.request_id,
+                        payload.received_ttl
+                    );
+                }
             }
         }
-        RoutedReceiveOutcome::DeliveredInfra(DeliveredInfra::Other {
-            source,
-            kind,
-            payload_len,
-        }) => {
-            log::info!(
-                "[infra] from {:02x?} kind={:?} bytes={}",
-                &source[..4],
-                kind,
-                payload_len
-            );
-        }
-        RoutedReceiveOutcome::DeliveredInfra(DeliveredInfra::Pong { source, payload }) => {
-            log::info!(
-                "[infra] pong from {:02x?} req={:02x?} recv_ttl={}",
-                &source[..4],
-                payload.request_id,
-                payload.received_ttl
-            );
-        }
-        RoutedReceiveOutcome::DeliveredAppUtf8(app) => {
+
+        fn on_delivered_app_utf8(&mut self, app: routing_core::facade::DeliveredUtf8App) {
             let text = core::str::from_utf8(&app.plaintext[..app.len]).unwrap_or("<non-utf8>");
             println!(
                 "[app] from {:02x?} msg_id={:02x?} body={}",
@@ -539,11 +560,8 @@ async fn handle_routed_packet(
                 text
             );
         }
-        RoutedReceiveOutcome::UnsupportedLocalApp {
-            source,
-            content_type,
-            len,
-        } => {
+
+        fn on_unsupported_local_app(&mut self, source: [u8; 8], content_type: u8, len: usize) {
             log::info!(
                 "[app] from {:02x?} content_type={} bytes={}",
                 &source[..4],
@@ -551,22 +569,40 @@ async fn handle_routed_packet(
                 len
             );
         }
-        RoutedReceiveOutcome::DecryptFailed { error, .. } => {
+
+        fn on_decrypt_failed(
+            &mut self,
+            _source: [u8; 8],
+            error: routing_core::protocol::app::AppError,
+        ) {
             log::warn!("[app] decrypt failed: {:?}", map_crypto_error(error));
         }
-        RoutedReceiveOutcome::MissingSenderPubkey { source } => {
+
+        fn on_missing_sender_pubkey(&mut self, source: [u8; 8]) {
             log::warn!("[app] missing sender pubkey for {:02x?}", &source[..4]);
         }
-        RoutedReceiveOutcome::UnsupportedLocalPacket { packet_type, .. } => {
+
+        fn on_unsupported_local_packet(&mut self, _source: [u8; 8], packet_type: u8) {
             log::info!("[routed] unsupported packet_type={}", packet_type);
         }
-        RoutedReceiveOutcome::InvalidLocalPayload { packet_type, .. } => {
+
+        fn on_invalid_local_payload(&mut self, _source: [u8; 8], packet_type: u8) {
             log::warn!(
                 "[routed] failed to decode local payload for packet_type={}",
                 packet_type
             );
         }
     }
+
+    let outcome = {
+        let mut table = routing_table.lock().await;
+        let mut mesh = MeshFacade::new(&mut table, identity, capabilities);
+        mesh.receive(peer_transport_addr, packet)
+    };
+    let mut observer = FirmwareRoutedObserver {
+        routed_forward_queue,
+    };
+    observe_routed_receive_outcome(outcome, &mut observer);
 }
 
 fn map_crypto_error(err: routing_core::protocol::app::AppError) -> CryptoError {
