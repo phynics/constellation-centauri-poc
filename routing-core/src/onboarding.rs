@@ -1,7 +1,13 @@
-//! Shared onboarding markers and certificate primitives.
+//! Shared onboarding markers, discovery payloads, and certificate primitives.
 //!
-//! These types are transport-neutral and can be used by firmware, host tools,
-//! and future simulator/onboarding harnesses.
+//! Purpose: keep onboarding-related wire data and verification helpers in the
+//! transport-neutral core so every host interprets enrollment state the same way.
+//!
+//! Design decisions:
+//! - Keep discovery and onboarding serialization in shared core rather than in
+//!   firmware or companion-specific BLE code.
+//! - Model certificate verification as protocol logic that can be reused by
+//!   firmware, companion, and test harnesses.
 
 use crate::crypto::identity::{
     network_addr_of, short_addr_of, verify, NetworkAddr, NodeIdentity, PubKey, ShortAddr, Signature,

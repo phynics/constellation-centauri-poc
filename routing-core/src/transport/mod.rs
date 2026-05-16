@@ -1,10 +1,15 @@
-/// Transport-layer address for a peer.
-///
+//! Transport-opaque peer address representation.
+//!
+//! Purpose: carry host-provided peer transport identifiers through shared-core
+//! routing code without teaching the protocol about specific platform APIs.
+//!
+//! Design decisions:
+//! - Keep the address payload transport-opaque so hosts without raw BLE MAC
+//!   access can still participate with stable local identifiers.
+//! - Let host crates own concrete transport semantics while the core only needs
+//!   equality, emptiness, and basic construction helpers.
+//!
 /// Currently only BLE is supported. WiFi and LoRa will be added post-PoC.
-///
-/// The payload is intentionally transport-opaque so host platforms that do not
-/// expose a raw BLE MAC (for example CoreBluetooth) can still participate by
-/// storing a stable, transport-specific identifier here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TransportAddr {
     pub addr_type: u8, // 0 = BLE, 1 = WiFi (future), 2 = LoRa (future)

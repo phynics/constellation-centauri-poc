@@ -1,7 +1,13 @@
-//! Abstract network traits for H2H (Heart2Heart) peer exchange.
+//! Transport-neutral networking traits for shared mesh behavior.
 //!
-//! These traits decouple the routing algorithm from the physical transport
-//! (BLE on firmware, in-memory channels on the simulator).
+//! Purpose: define the minimal discovery and H2H transport contracts that the
+//! shared protocol loops depend on.
+//!
+//! Design decisions:
+//! - Decouple protocol behavior from physical transports so BLE firmware and
+//!   host-side simulators can run the same shared logic.
+//! - Keep session-kind demux constants in shared core because routed traffic
+//!   and H2H maintenance are separate protocol lanes.
 
 use crate::crypto::identity::{NetworkAddr, ShortAddr};
 use crate::protocol::h2h::{H2hFrame, H2hPayload};

@@ -1,3 +1,11 @@
+//! Companion ratatui rendering.
+//!
+//! Purpose: render the companion diagnostics and operator UI from shared host
+//! state.
+//!
+//! Design decisions:
+//! - Keep rendering separate from event handling and BLE/runtime mutation so
+//!   the UI remains a thin presentation layer.
 use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},

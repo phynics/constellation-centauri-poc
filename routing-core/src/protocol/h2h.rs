@@ -1,7 +1,14 @@
-//! H2H (Heart2Heart) — direct peer heartbeat exchange protocol.
+//! H2H (Heart2Heart) maintenance protocol.
 //!
-//! Two nodes connect via BLE L2CAP and exchange heartbeat payloads that include
-//! their known peer lists. This replaces broadcast-only heartbeats.
+//! Purpose: define the direct peer-exchange wire format used for maintenance,
+//! peer sync, and delayed-delivery follow-up over point-to-point sessions.
+//!
+//! Design decisions:
+//! - H2H is a maintenance lane for peer sync and deferred delivery, not the
+//!   general carrier for application traffic.
+//! - Pair scheduling is deterministic from peer short addresses so both sides
+//!   derive initiator and slot timing without external coordination.
+//! - Frame sizes remain bounded to preserve the fixed-buffer `no_std` model.
 //!
 //! ## Pair scheduling
 //!

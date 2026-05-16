@@ -1,5 +1,11 @@
-//! TUI application state and keyboard event handling for the trace-centric UI.
-
+//! Simulator TUI application state.
+//!
+//! Purpose: hold interactive UI state and keyboard handling for the simulator's
+//! trace-centric interface.
+//!
+//! Design decisions:
+//! - Keep presentation state and keybinding flow in the TUI layer, separate
+//!   from simulator runtime and shared protocol logic.
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 

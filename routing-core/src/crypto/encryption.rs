@@ -1,4 +1,12 @@
-//! Message encryption helpers built on node identity keys.
+//! Shared payload-encryption helpers.
+//!
+//! Purpose: encrypt and decrypt routed application payloads using node
+//! identities and transport-neutral wire formats.
+//!
+//! Design decisions:
+//! - Keep payload protection in shared core so hosts do not drift on crypto
+//!   suite choice or ciphertext layout.
+//! - Expose fixed-format buffer-oriented helpers that fit embedded/no-std use.
 
 use crate::crypto::identity::{NodeIdentity, PubKey};
 use chacha20poly1305::{

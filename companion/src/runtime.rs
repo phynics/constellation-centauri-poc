@@ -1,3 +1,11 @@
+//! Companion runtime commands and shared assembly.
+//!
+//! Purpose: define process-level commands and runtime wiring shared across the
+//! companion's BLE loop and UI.
+//!
+//! Design decisions:
+//! - Keep host orchestration in the companion crate; shared protocol semantics
+//!   continue to live in `routing-core`.
 use std::error::Error;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};

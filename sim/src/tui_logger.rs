@@ -1,9 +1,11 @@
-//! In-process log collector for the TUI.
+//! TUI log collector.
 //!
-//! Replaces `env_logger` so that log output goes into a ring buffer that the
-//! TUI renders in the "Logs" tab, instead of being printed to stderr and
-//! corrupting the terminal UI.
-
+//! Purpose: capture process logs into a ring buffer that the simulator TUI can
+//! render without corrupting terminal state.
+//!
+//! Design decisions:
+//! - Keep terminal-safe log handling inside `sim` instead of relying on a
+//!   stderr logger that would fight the TUI.
 use std::collections::VecDeque;
 use std::sync::Mutex;
 

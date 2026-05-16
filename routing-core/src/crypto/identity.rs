@@ -1,4 +1,13 @@
-//! Node identity primitives: signing keys, short addresses, and signatures.
+//! Node identity primitives.
+//!
+//! Purpose: define signing keys, stable derived addresses, network fingerprints,
+//! and signature helpers used across the protocol surface.
+//!
+//! Design decisions:
+//! - Derive short addresses and network addresses from public keys in shared
+//!   core so every host computes the same stable identifiers.
+//! - Keep identity/signature helpers here instead of duplicating protocol
+//!   identity logic in onboarding, packet, or host crates.
 
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::{CryptoRngCore, RngCore};

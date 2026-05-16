@@ -1,7 +1,11 @@
-//! A thin `NorFlash` wrapper that adds a fixed base offset to all operations.
+//! Flash-partition offset adapter.
 //!
-//! Used to address the `constellation` data partition without changing the
-//! storage API (which expects partition-relative offsets).
+//! Purpose: expose a partition-relative `NorFlash` view over the ESP32 flash
+//! device so firmware storage code can ignore absolute flash offsets.
+//!
+//! Design decisions:
+//! - Keep partition translation in firmware glue instead of leaking flash-layout
+//!   knowledge into shared-core storage or onboarding code.
 
 use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 

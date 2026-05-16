@@ -1,7 +1,13 @@
-//! Shared no-std protocol crate for Constellation Mesh.
+//! Shared no-std routing and protocol core for Constellation Mesh.
 //!
-//! This crate owns transport-agnostic routing, packet formats, H2H behavior,
-//! crypto helpers, and node-role policy used by both firmware and simulator.
+//! Purpose: keep protocol, routing, crypto, onboarding, and transport-neutral
+//! behavior in one crate that both firmware and host harnesses can reuse.
+//!
+//! Design decisions:
+//! - Keep transport-agnostic mesh behavior here; host crates provide runtime,
+//!   BLE, storage, and UI glue.
+//! - Prefer fixed-capacity and `no_std`-friendly building blocks so the same
+//!   code can run on embedded targets and in host-side tests.
 
 #![no_std]
 

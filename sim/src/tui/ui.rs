@@ -1,5 +1,11 @@
-//! Trace-centric ratatui rendering.
-
+//! Simulator ratatui rendering.
+//!
+//! Purpose: render the trace-centric simulator interface from already-prepared
+//! UI and snapshot state.
+//!
+//! Design decisions:
+//! - Keep rendering separate from event handling and runtime mutation so the UI
+//!   remains a thin presentation layer.
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},

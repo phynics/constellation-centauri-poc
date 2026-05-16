@@ -1,4 +1,11 @@
-//! Heartbeat payload format used for periodic topology advertisements.
+//! Periodic heartbeat payload format.
+//!
+//! Purpose: define the compact topology-advertisement payload shared by nodes
+//! when they publish periodic routing state summaries.
+//!
+//! Design decisions:
+//! - Keep heartbeat serialization in shared core so topology advertisements are
+//!   encoded identically across hosts.
 
 use crate::config::BLOOM_FILTER_BYTES;
 use crate::crypto::identity::PubKey;

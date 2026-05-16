@@ -1,5 +1,11 @@
-//! Built-in simulator scenarios and helpers for applying them.
-
+//! Built-in simulator scenarios.
+//!
+//! Purpose: define reusable topology and behavior presets for simulator runs
+//! and tests.
+//!
+//! Design decisions:
+//! - Keep scenario presets host-side so experimentation does not bleed into
+//!   shared protocol code.
 use routing_core::node::roles::Capabilities;
 
 use crate::config_ops;

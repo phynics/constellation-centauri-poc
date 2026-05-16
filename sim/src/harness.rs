@@ -1,5 +1,11 @@
-//! Headless simulator harness helpers for deterministic tests and assertions.
-
+//! Headless simulator harness helpers.
+//!
+//! Purpose: provide deterministic test-time control and assertions around the
+//! simulator runtime.
+//!
+//! Design decisions:
+//! - Keep test orchestration in the harness while protocol behavior continues to
+//!   come from `routing-core` and simulator adapters.
 use std::time::{Duration, Instant};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;

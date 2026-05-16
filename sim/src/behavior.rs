@@ -1,9 +1,12 @@
-//! Simulator-specific behavior loops.
+//! Simulator-side behavior adapters.
 //!
-//! These wrap the shared routing-core behavior helpers but fetch node
-//! capabilities from `SimConfig` at runtime, so scenario switches can change
-//! advertised roles without restarting the simulator.
-
+//! Purpose: adapt shared routing-core behavior loops to simulator-owned runtime
+//! state such as mutable scenario configuration and node toggles.
+//!
+//! Design decisions:
+//! - Reuse shared behavior helpers instead of re-implementing protocol logic in
+//!   the simulator.
+//! - Let `SimConfig` drive host-only role toggles and experiment knobs.
 use std::sync::{Arc, Mutex};
 
 use embassy_sync::blocking_mutex::raw::RawMutex;

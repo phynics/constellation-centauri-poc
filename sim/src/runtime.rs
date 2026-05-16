@@ -1,5 +1,11 @@
-//! Simulator runtime assembly: static nodes, embassy tasks, and shared state.
-
+//! Simulator runtime assembly.
+//!
+//! Purpose: build static nodes, shared state, task wiring, and runtime handles
+//! for the desktop simulator.
+//!
+//! Design decisions:
+//! - Keep runtime composition here so harnesses and the TUI can share one
+//!   simulator assembly path.
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 

@@ -1,3 +1,11 @@
+//! Companion BLE integration.
+//!
+//! Purpose: group macOS/CoreBluetooth runtime, constants, and networking glue
+//! used by the companion process.
+//!
+//! Design decisions:
+//! - Keep platform BLE integration here while shared protocol behavior stays in
+//!   `routing-core`.
 pub mod constants;
 pub mod network;
 pub mod runtime;

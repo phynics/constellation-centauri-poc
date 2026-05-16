@@ -1,5 +1,11 @@
-//! Diagnostic export helpers for the desktop simulator.
-
+//! Simulator diagnostic export helpers.
+//!
+//! Purpose: serialize simulator state, traces, and scenario context into host
+//! files for offline inspection.
+//!
+//! Design decisions:
+//! - Keep export formatting and filesystem concerns in `sim`, not in shared
+//!   protocol crates.
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};

@@ -1,5 +1,11 @@
-//! TUI entry point — runs on the main thread using crossterm + ratatui.
-
+//! Simulator TUI entrypoint.
+//!
+//! Purpose: own terminal setup, event polling, and the main ratatui loop for
+//! the desktop simulator.
+//!
+//! Design decisions:
+//! - Keep terminal lifecycle management in the TUI layer so runtime modules stay
+//!   UI-agnostic.
 use std::io;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};

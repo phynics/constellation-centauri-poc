@@ -1,8 +1,10 @@
-//! TUI → embassy command dispatcher.
+//! Simulator command dispatcher.
 //!
-//! Polls the mpsc receiver for `SimCommand`s and dispatches them to the
-//! medium or modifies `SimConfig` directly.
-
+//! Purpose: bridge TUI-issued `SimCommand`s into embassy-side state and medium
+//! mutations.
+//!
+//! Design decisions:
+//! - Keep UI-to-runtime command handling separate from shared protocol logic.
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 

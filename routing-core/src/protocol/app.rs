@@ -1,4 +1,13 @@
-//! Routed application/infrastructure payload families carried by mesh packets.
+//! Routed application and infrastructure frame helpers.
+//!
+//! Purpose: define the payload families that ride inside routed mesh packets
+//! and provide shared serialization, parsing, and crypto framing helpers.
+//!
+//! Design decisions:
+//! - Keep infra/app frame semantics in shared core so routed message handling
+//!   is host-independent.
+//! - Separate infrastructure frames from application frames at the protocol
+//!   layer instead of inventing host-local control channels.
 
 use crate::crypto::encryption::{self, CryptoError};
 use crate::crypto::identity::{NodeIdentity, PubKey, ShortAddr};

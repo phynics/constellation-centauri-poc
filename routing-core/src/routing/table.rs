@@ -1,4 +1,13 @@
-//! Core routing-table state, peer trust, and forwarding-candidate selection.
+//! Core routing-table state and forwarding selection.
+//!
+//! Purpose: own peer state, trust levels, dedup state, and forwarding-candidate
+//! selection for routed mesh traffic.
+//!
+//! Design decisions:
+//! - Keep the authoritative peer/routing model in shared core so discovery,
+//!   H2H sync, and routed forwarding all converge on one table.
+//! - Encode trust and candidate selection here instead of splitting routing
+//!   behavior across host crates or UI-specific peer caches.
 
 use crate::config::{H2H_MAX_PEER_ENTRIES, MAX_PEERS, TICK_HZ};
 use crate::crypto::identity::{short_addr_of, PubKey, ShortAddr};

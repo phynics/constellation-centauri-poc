@@ -1,5 +1,11 @@
-//! Per-node routed message propagation and sensor emit loops.
-
+//! Simulator routed-message task loops.
+//!
+//! Purpose: drive per-node routed message injection and propagation on top of
+//! simulator runtime state.
+//!
+//! Design decisions:
+//! - Keep host-side message injection and scheduling here while routed delivery
+//!   decisions stay in shared-core helpers.
 use std::sync::{Arc, Mutex};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;

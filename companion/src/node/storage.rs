@@ -1,3 +1,11 @@
+//! Companion local-node storage.
+//!
+//! Purpose: persist and reload the companion's local node identity and host-side
+//! metadata from the filesystem.
+//!
+//! Design decisions:
+//! - Keep filesystem layout and local-record concerns in the companion crate;
+//!   shared-core should stay storage-neutral.
 use std::env;
 use std::error::Error;
 use std::fs;

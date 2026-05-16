@@ -1,14 +1,11 @@
-//! Simulated radio medium.
+//! In-memory simulation medium.
 //!
-//! Each node has:
-//! - An H2H **inbox** (`h2h_req[node_idx]`): receives H2H requests from initiators.
-//! - An H2H **response** channel (`h2h_resp[node_idx]`): the responder puts its
-//!   payload here for the initiator to collect.
-//! - A **data inbox** (`msg_inbox[node_idx]`): receives application data messages.
+//! Purpose: model node-to-node H2H and routed-message delivery channels for
+//! host-side experiments.
 //!
-//! The responder reads from its own inbox, processes the request, and puts the
-//! response into the *initiator's* response channel (`h2h_resp[sender_idx]`).
-
+//! Design decisions:
+//! - Keep medium semantics explicit and in-memory so tests can reason about
+//!   packet flow without re-implementing shared protocol behavior.
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 

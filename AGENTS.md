@@ -18,3 +18,13 @@
 
 - Keep BLE-binding specifics that are truly host-facing, like `Uuid`-typed GATT constants and stack wiring, in host crates unless there is a clear shared representation need.
 - Prefer fixing boundary drift by reusing an existing shared-core path before inventing a second host-specific flow.
+
+## Current agentic dev loop
+
+- Start in `routing-core/` first; treat it as the primary design and documentation surface before touching host crates unless the issue is clearly host-specific.
+- Improve `routing-core/` with extensive documentation as you work, including the design decisions that led to the current shape.
+- Each `routing-core` source file should begin with a concise comment header covering: purpose, key invariants or boundaries when relevant, and a compact log of design decisions.
+- File-local design decisions belong in that file's decision log.
+- Cross-file or broader-scope design decisions belong in `AGENTS.md`.
+- Whenever a feature, fix, or similar change introduces a real design decision, update the corresponding file decision log or `AGENTS.md` in the same change.
+- Keep these headers current, but keep them short enough to stay readable during implementation.

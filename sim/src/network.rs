@@ -1,9 +1,13 @@
-//! `SimResponder` and `SimInitiator` — in-process implementations of the
-//! `H2hResponder` / `H2hInitiator` traits using `SimMedium` channels.
+//! In-process networking adapters for the simulator.
 //!
-//! Topology and packet-drop behaviour are driven by `SimConfig` at runtime,
-//! so the TUI can toggle links and adjust drop probabilities on the fly.
-
+//! Purpose: implement shared discovery and H2H traits using `SimMedium` and
+//! simulator-owned topology controls.
+//!
+//! Design decisions:
+//! - Keep transport simulation in `sim` while reusing `routing-core` network
+//!   traits and protocol semantics.
+//! - Let runtime configuration drive link state and drop behavior so scenarios
+//!   can be changed without altering shared-core logic.
 use std::sync::{Arc, Mutex};
 
 use embassy_time::{Duration, Timer};

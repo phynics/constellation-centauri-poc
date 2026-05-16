@@ -1,4 +1,11 @@
-//! Compact bloom-filter summaries for indirect reachability hints.
+//! Compact reachability bloom summaries.
+//!
+//! Purpose: track indirect reachability hints in a fixed-size summary suitable
+//! for heartbeat and H2H exchange.
+//!
+//! Design decisions:
+//! - Keep bloom behavior simple and fixed-size so it fits embedded targets and
+//!   shared protocol payloads.
 
 use crate::config::BLOOM_FILTER_BYTES;
 use crate::crypto::identity::ShortAddr;

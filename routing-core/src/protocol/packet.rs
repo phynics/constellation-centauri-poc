@@ -1,4 +1,13 @@
-//! Packet header, signing, and builder helpers for routed mesh traffic.
+//! Routed mesh packet header and builder helpers.
+//!
+//! Purpose: define the signed outer packet header and the shared helpers that
+//! build and parse routed mesh packets.
+//!
+//! Design decisions:
+//! - Keep packet layout and signature handling in shared core so all hosts emit
+//!   and verify the same outer wire format.
+//! - Maintain explicit packet families for heartbeat, infra, app, announce, and
+//!   ack traffic instead of host-specific ad hoc tagging.
 
 use crate::config::{BROADCAST_ADDR, DEFAULT_TTL, HEADER_SIZE, PROTOCOL_VERSION};
 use crate::crypto::identity::{verify, NodeIdentity, ShortAddr, Signature};

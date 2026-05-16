@@ -1,5 +1,14 @@
-/// Shared protocol-facing node capabilities encoded as a bitfield.
-///
+//! Shared protocol-facing node capability flags.
+//!
+//! Purpose: define the capability bitfield and the derived predicates that the
+//! protocol uses for routing, retention, and low-power behavior.
+//!
+//! Design decisions:
+//! - Keep capability interpretation in shared core so higher-level behavior is
+//!   driven by one classification source.
+//! - Centralize derived predicates like low-power endpoint and store-router so
+//!   call sites do not open-code behavior-critical bit tests.
+//!
 /// A node may advertise multiple capabilities at once. For example, a bridge
 /// node is typically also a routing node, and a mobile application endpoint may
 /// combine `MOBILE | APPLICATION | LOW_ENERGY`.

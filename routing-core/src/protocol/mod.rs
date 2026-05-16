@@ -1,4 +1,11 @@
-//! Shared wire-level protocol modules for Constellation traffic.
+//! Shared wire-level protocol modules.
+//!
+//! Purpose: group packet, H2H, routed app, heartbeat, and dedup logic under
+//! one protocol-facing namespace.
+//!
+//! Design decisions:
+//! - Keep wire-format modules together in shared core so protocol evolution is
+//!   implemented once and consumed consistently by all hosts.
 
 pub mod app;
 pub mod dedup;

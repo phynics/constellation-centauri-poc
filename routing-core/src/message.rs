@@ -1,4 +1,12 @@
-//! Shared transport-neutral application-message routing decisions.
+//! Shared transport-neutral routed-message decisions.
+//!
+//! Purpose: decide whether a routed message is delivered, forwarded, retained,
+//! or dropped without depending on any host runtime or transport stack.
+//!
+//! Design decisions:
+//! - Keep forwarding and retention decisions in shared core so simulator and
+//!   firmware cannot drift on delivery behavior.
+//! - Return plans and decisions instead of performing transport actions here.
 
 use heapless::Vec;
 

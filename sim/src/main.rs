@@ -1,8 +1,10 @@
-//! Constellation mesh simulator with interactive TUI.
+//! Simulator binary entrypoint.
 //!
-//! Run with:
-//!   cargo run -p sim
-
+//! Purpose: launch the default desktop simulation runtime and interactive TUI.
+//!
+//! Design decisions:
+//! - Keep runtime assembly here while simulation behavior and state stay in
+//!   dedicated library modules.
 use sim::runtime::SimRuntime;
 use sim::{scenario, tui, tui_logger};
 

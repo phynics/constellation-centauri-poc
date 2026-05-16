@@ -1,3 +1,11 @@
+//! Companion TUI entrypoint.
+//!
+//! Purpose: own terminal setup, event polling, and the main ratatui loop for
+//! the macOS companion.
+//!
+//! Design decisions:
+//! - Keep terminal lifecycle management in the UI layer so runtime modules stay
+//!   presentation-agnostic.
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

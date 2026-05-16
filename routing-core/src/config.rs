@@ -1,4 +1,13 @@
-//! Shared protocol and behavior constants for the routing core.
+//! Shared routing-core constants.
+//!
+//! Purpose: centralize protocol and behavior constants that must stay aligned
+//! across firmware, host tools, and tests.
+//!
+//! Design decisions:
+//! - Keep wire-level and behavior-tuning constants in shared core so hosts do
+//!   not drift on protocol layout or scheduling assumptions.
+//! - Prefer explicit fixed capacities and sizes over dynamic configuration in
+//!   the core protocol path.
 
 pub const PROTOCOL_VERSION: u8 = 0x01;
 pub const HEARTBEAT_INTERVAL_SECS: u64 = 60;

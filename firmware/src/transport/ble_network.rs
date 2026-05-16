@@ -1,11 +1,13 @@
-//! BLE implementations of `H2hResponder` and `H2hInitiator`.
+//! ESP32 BLE bindings for shared networking traits.
 //!
-//! `BleResponder` wraps the trouble-host `Peripheral` and holds the open
-//! L2CAP channel between `receive_h2h` and `send_h2h_response`.
+//! Purpose: implement `routing_core::network` discovery and H2H contracts on
+//! top of trouble-host, BLE advertisements, and L2CAP sessions.
 //!
-//! `BleInitiator` wraps trouble-host `Central` + a scan handler channel.
-//! During `scan()` it creates a `Scanner`, drains the discovery channel for
-//! the given duration, then hands `Central` back via `into_inner()`.
+//! Design decisions:
+//! - Keep BLE stack integration and GATT/L2CAP wiring in firmware while shared
+//!   H2H and routing behavior remains in `routing-core`.
+//! - Reuse shared onboarding/discovery serialization so advertisements and host
+//!   parsing stay aligned across firmware and companion.
 
 use embassy_time::{Duration, Instant, Timer};
 use esp_println::println;

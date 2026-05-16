@@ -1,5 +1,11 @@
-//! Desktop simulator crate for exercising routing-core against an in-memory medium.
-
+//! Desktop simulator crate.
+//!
+//! Purpose: provide a host-side harness for exercising `routing-core` against
+//! an in-memory medium, test scenarios, and interactive diagnostics.
+//!
+//! Design decisions:
+//! - Treat `sim` as a harness for shared-core behavior, not as a separate
+//!   routing model with independent protocol semantics.
 pub mod behavior;
 pub mod command_task;
 pub mod config_ops;

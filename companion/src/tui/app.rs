@@ -1,3 +1,11 @@
+//! Companion TUI application state.
+//!
+//! Purpose: hold interactive UI state and key handling for the companion's
+//! terminal interface.
+//!
+//! Design decisions:
+//! - Keep presentation state and UI actions in the TUI layer, separate from BLE
+//!   runtime and shared protocol logic.
 use crossterm::event::{KeyCode, KeyEvent};
 
 pub enum UiAction {

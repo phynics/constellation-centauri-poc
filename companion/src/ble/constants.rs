@@ -1,5 +1,13 @@
 #![allow(dead_code)]
 
+//! macOS BLE constants.
+//!
+//! Purpose: hold CoreBluetooth-facing UUID constants used by the companion's
+//! onboarding and session plumbing.
+//!
+//! Design decisions:
+//! - Keep `Uuid`-typed BLE constants in the host crate; shared protocol bytes
+//!   and discovery serialization belong in `routing-core`.
 use uuid::Uuid;
 
 pub const ONBOARDING_SERVICE_UUID: Uuid = Uuid::from_u128(0x43d7aa10_5f4b_4c84_a100_000000000001);

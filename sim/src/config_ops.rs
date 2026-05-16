@@ -1,8 +1,11 @@
-//! Shared host-side configuration mutations for the simulator.
+//! Shared simulator configuration mutations.
 //!
-//! Both the interactive TUI and the headless test harness should mutate
-//! `SimConfig` through these helpers instead of open-coding field updates.
-
+//! Purpose: centralize host-side `SimConfig` updates used by the TUI, tests,
+//! and scenario helpers.
+//!
+//! Design decisions:
+//! - Keep simulator config mutations in one place so TUI and harness flows do
+//!   not drift on how scenarios and links are edited.
 use crate::sim_state::{NodeBehavior, NodeType, SimConfig, MAX_NODES};
 
 pub fn set_link_enabled(cfg: &mut SimConfig, from: usize, to: usize, enabled: bool) {

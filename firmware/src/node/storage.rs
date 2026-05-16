@@ -1,9 +1,13 @@
-//! Flash-backed persistence for firmware node identities.
+//! Flash-backed firmware identity and provisioning storage.
 //!
-//! All offsets are relative to the start of the flash region (i.e. the
-//! `constellation` partition). The caller must provide a `NorFlash` implementor
-//! whose read/write/erase methods address the partition — typically by wrapping
-//! `FlashStorage` with a base offset.
+//! Purpose: persist local node secrets and enrollment state inside the ESP32
+//! `constellation` partition using a firmware-owned layout.
+//!
+//! Design decisions:
+//! - Keep flash layout and alignment handling in firmware; shared-core identity
+//!   and certificate types stay transport- and storage-neutral.
+//! - Use partition-relative offsets so callers can swap in partition wrappers
+//!   without rewriting storage logic.
 
 use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use routing_core::crypto::identity::{NodeIdentity, PubKey, Signature};

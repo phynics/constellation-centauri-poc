@@ -1,5 +1,13 @@
-//! Lightweight routed-session facade that composes packet, app, crypto, and
-//! routing-table behavior for host crates.
+//! Lightweight routed-session facade for host crates.
+//!
+//! Purpose: compose packet, app-frame, crypto, and routing-table operations
+//! into a small stateful API that host crates can call without re-wiring core
+//! protocol pieces themselves.
+//!
+//! Design decisions:
+//! - Keep routed-packet build/receive/relay orchestration in shared core rather
+//!   than duplicating host-specific composition logic.
+//! - Expose compact transport-ready plans instead of owning host I/O directly.
 
 use heapless::Vec;
 

@@ -1,5 +1,15 @@
 #![allow(dead_code)]
 
+//! macOS BLE bindings for shared networking traits.
+//!
+//! Purpose: implement shared discovery and H2H networking contracts on top of
+//! CoreBluetooth/L2CAP abstractions exposed by `blew`.
+//!
+//! Design decisions:
+//! - Keep CoreBluetooth session handling and device-ID translation in the host
+//!   crate while shared H2H semantics remain in `routing-core`.
+//! - Feed discovery parsing through shared-core onboarding helpers instead of
+//!   inventing a companion-only discovery model.
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

@@ -1,3 +1,11 @@
+//! Companion diagnostics state.
+//!
+//! Purpose: define the host-side views rendered by the companion UI for peers,
+//! events, local identity, and network membership.
+//!
+//! Design decisions:
+//! - Keep diagnostics/UI projection state in the companion crate so it does not
+//!   become a second protocol model.
 use routing_core::crypto::identity::{NetworkAddr, PubKey, ShortAddr};
 use routing_core::node::roles::Capabilities;
 

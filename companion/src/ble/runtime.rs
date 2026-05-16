@@ -1,3 +1,11 @@
+//! Companion BLE runtime.
+//!
+//! Purpose: drive scanning, advertising, onboarding interactions, and routed
+//! session execution on macOS.
+//!
+//! Design decisions:
+//! - Keep CoreBluetooth event orchestration in the companion host layer while
+//!   shared protocol and routing logic stay reusable.
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::error::Error;

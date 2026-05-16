@@ -1,3 +1,13 @@
+//! Shared delayed-delivery retention interfaces and helpers.
+//!
+//! Purpose: define transport-neutral store-and-forward data structures, backend
+//! hooks, and helper routines used by low-power delivery flows.
+//!
+//! Design decisions:
+//! - Keep retention semantics in shared core so firmware and simulation agree
+//!   on when deferred delivery exists and how it is represented.
+//! - Leave storage policy and persistence mechanics to host backends.
+
 use alloc::vec::Vec;
 
 use heapless::Vec as HeaplessVec;

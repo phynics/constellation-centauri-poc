@@ -1,9 +1,15 @@
-//! Generic async behavior loops for mesh nodes.
+//! Shared async mesh behavior loops.
 //!
-//! These functions contain the protocol logic (routing table updates, H2H
-//! scheduling) but delegate all transport operations to the `H2hResponder`
-//! and `H2hInitiator` traits. This makes them runnable identically in the
-//! ESP32 firmware and in the `sim` crate.
+//! Purpose: run transport-neutral protocol behavior such as discovery intake,
+//! H2H maintenance, routing-table refresh, and store-and-forward handoff.
+//!
+//! Design decisions:
+//! - Keep protocol logic here, while `H2hResponder`/`H2hInitiator` abstract the
+//!   transport so firmware and `sim` execute the same behavior.
+//! - Treat H2H as maintenance/synchronization rather than the primary carrier
+//!   for application traffic.
+//! - Keep delayed-delivery and retention policy in shared core instead of
+//!   scattering those rules across host crates.
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;

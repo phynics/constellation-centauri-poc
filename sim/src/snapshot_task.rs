@@ -1,9 +1,11 @@
-//! Embassy → TUI state bridge.
+//! Runtime-to-TUI snapshot bridge.
 //!
-//! Runs every second, snapshots all routing tables and uptimes, then writes
-//! the result into `TuiState` using `try_lock` to avoid blocking the executor
-//! when the TUI briefly holds the lock.
-
+//! Purpose: periodically copy runtime routing and uptime state into the TUI's
+//! shared snapshot model.
+//!
+//! Design decisions:
+//! - Keep UI snapshot publication separate from protocol execution so executor
+//!   work is not coupled to presentation timing.
 use std::sync::{Arc, Mutex};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;

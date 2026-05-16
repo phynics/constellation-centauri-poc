@@ -1,4 +1,11 @@
-//! Fixed-capacity duplicate-message tracking for routed packets.
+//! Fixed-capacity duplicate tracking for routed messages.
+//!
+//! Purpose: provide a small no-std dedup structure for message IDs seen during
+//! routed packet handling.
+//!
+//! Design decisions:
+//! - Use a fixed-capacity ring so duplicate tracking stays deterministic and
+//!   embedded-friendly.
 
 use crate::config::SEEN_MESSAGES_CAPACITY;
 use heapless::Deque;

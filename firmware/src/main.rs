@@ -1,19 +1,13 @@
-// =============================================================================
-// Constellation Mesh Node — BLE Firmware for ESP32
-// =============================================================================
-//
-// ARCHITECTURE OVERVIEW
-// ---------------------
-// Four tasks run concurrently via `join4`:
-//
-//   1. ble_runner_task        — Pumps the HCI event loop + scan handler
-//   2. run_responder_loop     — Connectable advertising + accept H2H (generic)
-//   3. run_initiator_loop     — Discovery scan + initiate H2H (generic)
-//   4. run_heartbeat_loop     — Tick uptime counter every 5 seconds (generic)
-//
-// The protocol logic (routing table updates, H2H scheduling) lives in
-// `routing-core::behavior`. This file only contains ESP32/BLE plumbing.
-// =============================================================================
+//! ESP32 firmware entrypoint and runtime assembly.
+//!
+//! Purpose: wire the shared routing core into the ESP32 executor, BLE stack,
+//! flash-backed identity state, and device lifecycle tasks.
+//!
+//! Design decisions:
+//! - Keep protocol behavior in `routing-core`; this file owns only firmware
+//!   runtime, task assembly, and ESP32/BLE plumbing.
+//! - Run the main BLE runner, H2H responder, H2H initiator, and heartbeat loop
+//!   concurrently so shared-core behavior stays decoupled from platform setup.
 
 #![no_std]
 #![no_main]

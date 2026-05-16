@@ -1,3 +1,11 @@
+//! macOS companion binary entrypoint.
+//!
+//! Purpose: launch the companion runtime, BLE/event loop, and terminal UI for
+//! diagnostics, onboarding, and operator-driven message flows.
+//!
+//! Design decisions:
+//! - Keep process/thread assembly here while BLE, storage, diagnostics, and UI
+//!   live in focused companion modules.
 use std::error::Error;
 use std::sync::Arc;
 use std::thread;

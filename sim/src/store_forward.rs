@@ -1,8 +1,11 @@
-//! Simulator-side retained-delivery storage for low-power endpoints.
+//! Simulator store-and-forward backend.
 //!
-//! `routing-core` owns the protocol semantics; this module only provides the
-//! simulator's concrete in-memory backend implementation.
-
+//! Purpose: provide the simulator's in-memory backend for shared low-power
+//! retention and delayed-delivery flows.
+//!
+//! Design decisions:
+//! - `routing-core` owns retention semantics; this module only provides host
+//!   storage and trace integration.
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 

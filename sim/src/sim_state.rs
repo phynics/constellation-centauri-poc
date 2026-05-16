@@ -1,5 +1,11 @@
-//! Shared types between the embassy simulator thread and the TUI main thread.
-
+//! Shared simulator UI/runtime state.
+//!
+//! Purpose: define the state exchanged between the simulator runtime, traces,
+//! and TUI thread.
+//!
+//! Design decisions:
+//! - Keep host-only presentation and coordination state in `sim`, separate from
+//!   shared routing-core protocol state.
 use std::collections::VecDeque;
 
 use routing_core::node::roles::Capabilities;
