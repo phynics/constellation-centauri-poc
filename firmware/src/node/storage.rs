@@ -156,15 +156,32 @@ pub fn commit_staged_enrollment(
         return Err(EnrollmentError::AlreadyEnrolled);
     }
 
+    let staged = &provisioning.staged;
+    log::info!(
+        "Enrollment: staged authority={:02x?}, caps={:?}, sig={:02x?}",
+        staged.authority_pubkey.as_ref().map(|p| &p[..4]),
+        staged.cert_capabilities,
+        staged.cert_signature.as_ref().map(|s| &s[..4])
+    );
+
     let committed = provisioning
         .staged
         .into_membership()
         .ok_or(EnrollmentError::IncompleteStagedEnrollment)?;
 
+    let _cert = committed.certificate_for(identity);
+    log::info!(
+        "Enrollment: verifying cert for node {:02x?} against network {:02x?}",
+        identity.short_addr(),
+        &committed.network_pubkey[..4]
+    );
+
     if !committed.verifies_for(identity) {
+        log::warn!("Enrollment: certificate verification FAILED");
         return Err(EnrollmentError::InvalidCertificate);
     }
 
+    log::info!("Enrollment: certificate verification OK");
     provisioning.committed = Some(committed);
     provisioning.staged.clear();
     Ok(committed)

@@ -495,6 +495,12 @@ impl<'stack, C: Controller> BleResponder<'stack, C> {
                         Ok(p) => p,
                         Err(_) => continue,
                     };
+                    println!(
+                        "[periph] H2H from {:02x?} ({} peers, cap=0x{:04x})",
+                        peer_mac,
+                        peer_payload.peers.len(),
+                        peer_payload.capabilities
+                    );
                     let conn = gatt_conn.raw().clone();
                     drop(gatt_conn);
                     self.pending = Some((conn, channel));
@@ -504,6 +510,7 @@ impl<'stack, C: Controller> BleResponder<'stack, C> {
                     }));
                 }
                 SESSION_KIND_ROUTED => {
+                    println!("[periph] Routed packet from {:02x?} ({} bytes)", peer_mac, rx_len - 1);
                     let mut payload = Vec::new();
                     if payload.extend_from_slice(&rx_buf[1..rx_len]).is_err() {
                         continue;
@@ -737,6 +744,14 @@ where
                             }
                             let mut mac = [0u8; 6];
                             mac.copy_from_slice(bd_addr.raw());
+                            let onboarding_ready = info.network_addr == ONBOARDING_READY_NETWORK_ADDR;
+                            println!(
+                                "[central] Discovered {:02x?} cap=0x{:04x} net={:02x?}{}",
+                                info.short_addr,
+                                info.capabilities,
+                                &info.network_addr[..4],
+                                if onboarding_ready { " (onboarding-ready)" } else { "" }
+                            );
                             let _ = results.push(DiscoveryEvent {
                                 short_addr: info.short_addr,
                                 capabilities: info.capabilities,
@@ -784,6 +799,7 @@ where
             log::warn!("[central] Connect failed: {:?}", e);
             NetworkError::ConnectionFailed
         })?;
+        println!("[central] H2H connected to {:02x?}", peer_mac);
 
         let l2cap_config = L2capChannelConfig {
             mtu: Some(H2H_MTU),
@@ -796,6 +812,7 @@ where
                 log::warn!("[central] L2CAP create error: {:?}", e);
                 NetworkError::ConnectionFailed
             })?;
+        println!("[central] H2H L2CAP channel opened (PSM={})", H2H_PSM);
 
         // Initiator sends first
         let mut tx_buf = [0u8; 512];

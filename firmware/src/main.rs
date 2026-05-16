@@ -224,9 +224,30 @@ async fn main(_spawner: Spawner) {
         &mut provisioning_state,
         default_capabilities,
     );
-    if provisioning_state.committed.is_none() && effective_capabilities == default_capabilities {
-        println!("Using default capabilities");
+
+    // Log onboarding state summary
+    let network_addr = provisioning_state
+        .committed
+        .as_ref()
+        .map(|c| routing_core::crypto::identity::network_addr_of(&c.network_pubkey))
+        .unwrap_or(routing_core::onboarding::ONBOARDING_READY_NETWORK_ADDR);
+    if provisioning_state.committed.is_some() {
+        println!("Onboarding: ENROLLED (network_addr = {:02x?})", network_addr);
+    } else {
+        println!("Onboarding: READY (advertising for enrollment)");
     }
+    println!("Capabilities: 0x{:04x} ({})", effective_capabilities, {
+        let caps = Capabilities(effective_capabilities);
+        let mut parts = alloc::vec::Vec::new();
+        if caps.contains(Capabilities::ROUTE) { parts.push("ROUTE"); }
+        if caps.contains(Capabilities::STORE) { parts.push("STORE"); }
+        if caps.contains(Capabilities::APPLICATION) { parts.push("APP"); }
+        if caps.contains(Capabilities::BRIDGE) { parts.push("BRIDGE"); }
+        if caps.contains(Capabilities::LOW_ENERGY) { parts.push("LE"); }
+        if caps.contains(Capabilities::MOBILE) { parts.push("MOBILE"); }
+        alloc::format!("{}", parts.join(" | "))
+    });
+
     println!("Node identity: {:02x?}", identity.short_addr());
     println!("Public key:    {:02x?}", identity.pubkey());
 
