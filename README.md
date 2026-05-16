@@ -9,7 +9,7 @@ Constellation nodes communicate via asymmetric-key authenticated and encrypted m
 - `routing-core/` — Core protocol logic (no-std, transport-agnostic). Routing table, H2H exchange, bloom filters, forwarding, crypto, onboarding, facade, and behavior loops.
 - `firmware/` — ESP32-C6 firmware using Embassy, esp-hal, trouble-host BLE, and flash persistence with a dedicated partition table.
 - `sim/` — Desktop simulator with Embassy-on-thread + ratatui TUI. **Primary routing-core experiment harness.**
-- `companion/` — macOS BLE peer node with diagnostics TUI, onboarding operator, and mesh routing via `blew` (CoreBluetooth).
+- `companion/` — macOS BLE peer node with interactive TUI (discovery, enrollment, mesh routing, and event log) via `blew` (CoreBluetooth).
 - `docs/` — Project documentation.
 
 ## Quick Start

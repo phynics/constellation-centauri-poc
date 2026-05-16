@@ -2,7 +2,6 @@
 
 use uuid::Uuid;
 
-pub const CONSTELLATION_COMPANY_ID: u16 = 0x1234;
 pub const ONBOARDING_SERVICE_UUID: Uuid = Uuid::from_u128(0x43d7aa10_5f4b_4c84_a100_000000000001);
 pub const PROTOCOL_SIGNATURE_CHAR_UUID: Uuid =
     Uuid::from_u128(0x43d7aa10_5f4b_4c84_a100_000000000002);

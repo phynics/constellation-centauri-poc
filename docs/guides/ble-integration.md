@@ -200,7 +200,7 @@ Offset  Size      Field            Notes
 ?       2         capabilities     Sender's capability bitfield
 ?       4         uptime_secs      Sender's uptime
 ?       1         peer_count       Number of peer entries (0–8)
-?       N × 11    peers[]          Peer info entries
+?       N × 35    peers[]          Peer info entries (pubkey:32, capabilities:2, hop_count:1)
 ```
 
 ### Peer Selection

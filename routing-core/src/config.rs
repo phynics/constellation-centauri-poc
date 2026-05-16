@@ -22,6 +22,5 @@ pub const STORE_FORWARD_BACKUP_ROUTERS: usize = 2;
 pub const MAX_PEERS: usize = 32;
 /// Embassy on ESP32 defaults to 1 MHz tick rate.
 pub const TICK_HZ: u64 = 1_000_000;
-pub const HEAP_SIZE: usize = 72 * 1024;
 pub const HEADER_SIZE: usize = 92;
 pub const BROADCAST_ADDR: [u8; 8] = [0xFF; 8];

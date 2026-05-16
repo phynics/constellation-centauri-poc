@@ -73,7 +73,11 @@ async fn run_node(
     .await;
 }
 
-#[embassy_executor::task(pool_size = 8)]
+// Test suites create multiple SimRuntime instances in one process and each
+// runtime spawns a long-lived embassy thread. Give the task enough pooled
+// instances that the full headless sim suite can run without spuriously
+// exhausting the executor's task slot budget.
+#[embassy_executor::task(pool_size = 16)]
 async fn embassy_main(
     identities: &'static [NodeIdentity; MAX_NODES],
     node_infos: &'static [SimNodeInfo; MAX_NODES],

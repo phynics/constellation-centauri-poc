@@ -18,4 +18,5 @@ pub mod node;
 pub mod onboarding;
 pub mod protocol;
 pub mod routing;
+pub mod store_forward;
 pub mod transport;

@@ -356,7 +356,10 @@ pub fn save_provisioning<S: NorFlash>(
     // Erase before write: NOR flash requires erasing a full sector before
     // rewriting it, since write can only turn 1-bits into 0-bits.
     storage
-        .erase(MAGIC_OFFSET as u32, (MAGIC_OFFSET + FLASH_SECTOR_SIZE) as u32)
+        .erase(
+            MAGIC_OFFSET as u32,
+            (MAGIC_OFFSET + FLASH_SECTOR_SIZE) as u32,
+        )
         .map_err(|_| StorageError::EraseFailed)?;
     storage
         .write(MAGIC_OFFSET as u32, &buf)
@@ -370,16 +373,16 @@ pub fn save_provisioning<S: NorFlash>(
 /// Use with caution - this is irreversible!
 pub fn clear_identity<S: NorFlash>(storage: &mut S) -> Result<(), StorageError> {
     storage
-        .erase(MAGIC_OFFSET as u32, (MAGIC_OFFSET + FLASH_SECTOR_SIZE) as u32)
+        .erase(
+            MAGIC_OFFSET as u32,
+            (MAGIC_OFFSET + FLASH_SECTOR_SIZE) as u32,
+        )
         .map_err(|_| StorageError::EraseFailed)?;
 
     Ok(())
 }
 
-fn read_membership(
-    buf: &[u8],
-    offset: usize,
-) -> Result<Option<StoredMembership>, StorageError> {
+fn read_membership(buf: &[u8], offset: usize) -> Result<Option<StoredMembership>, StorageError> {
     let pubkey = read_pubkey(buf, offset)?;
     if pubkey.iter().all(|byte| *byte == 0xFF) {
         return Ok(None);

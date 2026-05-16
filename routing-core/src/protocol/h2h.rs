@@ -104,8 +104,8 @@ pub enum H2hFrame {
     DeliveryData {
         trace_id: u64,
         message_id: [u8; 8],
-        source_idx: u8,
-        destination_idx: u8,
+        source_addr: ShortAddr,
+        destination_addr: ShortAddr,
         body: Vec<u8, H2H_DELIVERY_BODY_MAX>,
     },
     DeliveryAck {
@@ -121,9 +121,9 @@ pub enum H2hFrame {
     RetentionReplica {
         trace_id: u64,
         message_id: [u8; 8],
-        source_idx: u8,
-        destination_idx: u8,
-        owner_router_idx: u8,
+        source_addr: ShortAddr,
+        destination_addr: ShortAddr,
+        owner_router_addr: ShortAddr,
         body: Vec<u8, H2H_DELIVERY_BODY_MAX>,
     },
     /// Delivery/replica acknowledgements share the same compact shape: a small
@@ -189,11 +189,11 @@ impl H2hFrame {
             H2hFrame::DeliveryData {
                 trace_id,
                 message_id,
-                source_idx,
-                destination_idx,
+                source_addr,
+                destination_addr,
                 body,
             } => {
-                let needed = 2 + 8 + 8 + 1 + 1 + 2 + body.len();
+                let needed = 2 + 8 + 8 + 8 + 8 + 2 + body.len();
                 if buf.len() < needed {
                     return Err(PacketError::BufferTooSmall);
                 }
@@ -202,10 +202,10 @@ impl H2hFrame {
                 off += 8;
                 buf[off..off + 8].copy_from_slice(message_id);
                 off += 8;
-                buf[off] = *source_idx;
-                off += 1;
-                buf[off] = *destination_idx;
-                off += 1;
+                buf[off..off + 8].copy_from_slice(source_addr);
+                off += 8;
+                buf[off..off + 8].copy_from_slice(destination_addr);
+                off += 8;
                 let body_len = body.len() as u16;
                 buf[off..off + 2].copy_from_slice(&body_len.to_le_bytes());
                 off += 2;
@@ -228,12 +228,12 @@ impl H2hFrame {
             H2hFrame::RetentionReplica {
                 trace_id,
                 message_id,
-                source_idx,
-                destination_idx,
-                owner_router_idx,
+                source_addr,
+                destination_addr,
+                owner_router_addr,
                 body,
             } => {
-                let needed = 2 + 8 + 8 + 1 + 1 + 1 + 2 + body.len();
+                let needed = 2 + 8 + 8 + 8 + 8 + 8 + 2 + body.len();
                 if buf.len() < needed {
                     return Err(PacketError::BufferTooSmall);
                 }
@@ -242,12 +242,12 @@ impl H2hFrame {
                 off += 8;
                 buf[off..off + 8].copy_from_slice(message_id);
                 off += 8;
-                buf[off] = *source_idx;
-                off += 1;
-                buf[off] = *destination_idx;
-                off += 1;
-                buf[off] = *owner_router_idx;
-                off += 1;
+                buf[off..off + 8].copy_from_slice(source_addr);
+                off += 8;
+                buf[off..off + 8].copy_from_slice(destination_addr);
+                off += 8;
+                buf[off..off + 8].copy_from_slice(owner_router_addr);
+                off += 8;
                 let body_len = body.len() as u16;
                 buf[off..off + 2].copy_from_slice(&body_len.to_le_bytes());
                 off += 2;
@@ -292,7 +292,7 @@ impl H2hFrame {
                 })
             }
             Self::TYPE_DELIVERY_DATA => {
-                if buf.len() < 22 {
+                if buf.len() < 36 {
                     return Err(PacketError::InvalidHeader);
                 }
                 let mut off = 2;
@@ -305,10 +305,12 @@ impl H2hFrame {
                 let mut message_id = [0u8; 8];
                 message_id.copy_from_slice(&buf[off..off + 8]);
                 off += 8;
-                let source_idx = buf[off];
-                off += 1;
-                let destination_idx = buf[off];
-                off += 1;
+                let mut source_addr = [0u8; 8];
+                source_addr.copy_from_slice(&buf[off..off + 8]);
+                off += 8;
+                let mut destination_addr = [0u8; 8];
+                destination_addr.copy_from_slice(&buf[off..off + 8]);
+                off += 8;
                 let body_len = u16::from_le_bytes([buf[off], buf[off + 1]]) as usize;
                 off += 2;
                 if off + body_len > buf.len() || body_len > H2H_DELIVERY_BODY_MAX {
@@ -321,8 +323,8 @@ impl H2hFrame {
                 Ok(Self::DeliveryData {
                     trace_id,
                     message_id,
-                    source_idx,
-                    destination_idx,
+                    source_addr,
+                    destination_addr,
                     body,
                 })
             }
@@ -351,7 +353,7 @@ impl H2hFrame {
                 Ok(Self::DeliveryAck { trace_ids })
             }
             Self::TYPE_RETENTION_REPLICA => {
-                if buf.len() < 23 {
+                if buf.len() < 44 {
                     return Err(PacketError::InvalidHeader);
                 }
                 let mut off = 2;
@@ -364,12 +366,15 @@ impl H2hFrame {
                 let mut message_id = [0u8; 8];
                 message_id.copy_from_slice(&buf[off..off + 8]);
                 off += 8;
-                let source_idx = buf[off];
-                off += 1;
-                let destination_idx = buf[off];
-                off += 1;
-                let owner_router_idx = buf[off];
-                off += 1;
+                let mut source_addr = [0u8; 8];
+                source_addr.copy_from_slice(&buf[off..off + 8]);
+                off += 8;
+                let mut destination_addr = [0u8; 8];
+                destination_addr.copy_from_slice(&buf[off..off + 8]);
+                off += 8;
+                let mut owner_router_addr = [0u8; 8];
+                owner_router_addr.copy_from_slice(&buf[off..off + 8]);
+                off += 8;
                 let body_len = u16::from_le_bytes([buf[off], buf[off + 1]]) as usize;
                 off += 2;
                 if off + body_len > buf.len() || body_len > H2H_DELIVERY_BODY_MAX {
@@ -382,9 +387,9 @@ impl H2hFrame {
                 Ok(Self::RetentionReplica {
                     trace_id,
                     message_id,
-                    source_idx,
-                    destination_idx,
-                    owner_router_idx,
+                    source_addr,
+                    destination_addr,
+                    owner_router_addr,
                     body,
                 })
             }

@@ -14,17 +14,22 @@ use blew::{Central, Peripheral};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex as AsyncMutex;
 use rand::RngCore as _;
-use routing_core::behavior::{build_h2h_payload, run_initiator_h2h_once};
+use routing_core::behavior::{
+    apply_discovery_events, drain_responder_h2h_frames_until_done, respond_to_inbound_h2h_sync,
+    run_initiator_h2h_once, InboundH2hSyncError,
+};
 use routing_core::crypto::identity::NodeIdentity;
-use routing_core::facade::{DeliveredInfra, MeshFacade, RoutedReceiveOutcome};
+use routing_core::facade::{
+    observe_routed_receive_outcome, DeliveredInfra, MeshFacade, RoutedReceiveObserver,
+};
 use routing_core::network::H2hResponder;
 use routing_core::network::{H2hInitiator, SESSION_KIND_H2H, SESSION_KIND_ROUTED};
 use routing_core::onboarding::{
     is_constellation_protocol_signature, parse_discovery_from_manufacturer_data,
-    parse_network_marker, NetworkMarker, NodeCertificate, ONBOARDING_READY_NETWORK_ADDR,
+    parse_network_marker, NetworkMarker, NodeCertificate, CONSTELLATION_COMPANY_ID,
+    ONBOARDING_READY_NETWORK_ADDR,
 };
 use routing_core::protocol::app::NONCE_LEN;
-use routing_core::protocol::h2h::H2hFrame;
 use routing_core::routing::table::RoutingTable;
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -34,9 +39,9 @@ use tokio_stream::StreamExt as _;
 
 use super::constants::{
     AUTHORITY_PUBKEY_CHAR_UUID, CAPABILITIES_CHAR_UUID, CERT_CAPABILITIES_CHAR_UUID,
-    CERT_SIGNATURE_CHAR_UUID, COMMIT_ENROLLMENT_CHAR_UUID, CONSTELLATION_COMPANY_ID,
-    L2CAP_PSM_CHAR_UUID, NETWORK_MARKER_CHAR_UUID, NODE_PUBKEY_CHAR_UUID,
-    ONBOARDING_SERVICE_UUID, PROTOCOL_SIGNATURE_CHAR_UUID, SHORT_ADDR_CHAR_UUID,
+    CERT_SIGNATURE_CHAR_UUID, COMMIT_ENROLLMENT_CHAR_UUID, L2CAP_PSM_CHAR_UUID,
+    NETWORK_MARKER_CHAR_UUID, NODE_PUBKEY_CHAR_UUID, ONBOARDING_SERVICE_UUID,
+    PROTOCOL_SIGNATURE_CHAR_UUID, SHORT_ADDR_CHAR_UUID,
 };
 use super::network::{transport_addr_for_device_id, AcceptedSession, MacInitiator, MacResponder};
 use crate::diagnostics::state::{DiscoveredPeer, SharedState};
@@ -337,6 +342,8 @@ pub async fn run(
 
         if Instant::now() >= next_mesh_maintenance {
             let identity = NodeIdentity::from_bytes(&local_node.secret);
+            let scan_events = initiator.scan(DISCOVERY_SCAN_WINDOW_MS).await;
+            apply_discovery_events(&routing_table, &scan_events).await;
             run_initiator_h2h_once(
                 &mut initiator,
                 &identity,
@@ -571,12 +578,21 @@ async fn enroll_device(
     let authority_identity = NodeIdentity::from_bytes(&local_node.authority_secret);
     let device_id = blew::types::DeviceId::from(device_id.to_owned());
 
-    shared.lock().unwrap().push_event(format!("connecting to {device_id}..."));
+    shared
+        .lock()
+        .unwrap()
+        .push_event(format!("connecting to {device_id}..."));
     central.connect(&device_id).await?;
-    shared.lock().unwrap().push_event(format!("discovering services for {device_id}..."));
+    shared
+        .lock()
+        .unwrap()
+        .push_event(format!("discovering services for {device_id}..."));
     central.discover_services(&device_id).await?;
 
-    shared.lock().unwrap().push_event(format!("reading node identity from {device_id}..."));
+    shared
+        .lock()
+        .unwrap()
+        .push_event(format!("reading node identity from {device_id}..."));
     let node_pubkey = central
         .read_characteristic(&device_id, NODE_PUBKEY_CHAR_UUID)
         .await?;
@@ -594,7 +610,10 @@ async fn enroll_device(
     let certificate =
         NodeCertificate::issue(&authority_identity, node_pubkey_arr, node_capabilities);
 
-    shared.lock().unwrap().push_event(format!("writing authority pubkey to {device_id}..."));
+    shared
+        .lock()
+        .unwrap()
+        .push_event(format!("writing authority pubkey to {device_id}..."));
     central
         .write_characteristic(
             &device_id,
@@ -603,7 +622,10 @@ async fn enroll_device(
             blew::central::WriteType::WithResponse,
         )
         .await?;
-    shared.lock().unwrap().push_event(format!("writing cert capabilities to {device_id}..."));
+    shared
+        .lock()
+        .unwrap()
+        .push_event(format!("writing cert capabilities to {device_id}..."));
     central
         .write_characteristic(
             &device_id,
@@ -612,7 +634,10 @@ async fn enroll_device(
             blew::central::WriteType::WithResponse,
         )
         .await?;
-    shared.lock().unwrap().push_event(format!("writing cert signature to {device_id}..."));
+    shared
+        .lock()
+        .unwrap()
+        .push_event(format!("writing cert signature to {device_id}..."));
     central
         .write_characteristic(
             &device_id,
@@ -621,7 +646,10 @@ async fn enroll_device(
             blew::central::WriteType::WithResponse,
         )
         .await?;
-    shared.lock().unwrap().push_event(format!("committing enrollment for {device_id}..."));
+    shared
+        .lock()
+        .unwrap()
+        .push_event(format!("committing enrollment for {device_id}..."));
     central
         .write_characteristic(
             &device_id,
@@ -645,7 +673,10 @@ async fn inspect_device(
     device_id: &str,
 ) -> Result<(), Box<dyn Error>> {
     let device_id = blew::types::DeviceId::from(device_id);
-    shared.lock().unwrap().push_event(format!("inspecting {device_id}..."));
+    shared
+        .lock()
+        .unwrap()
+        .push_event(format!("inspecting {device_id}..."));
     central.connect(&device_id).await?;
     let _ = central.discover_services(&device_id).await?;
 
@@ -718,52 +749,41 @@ async fn run_companion_responder(
     loop {
         match responder.receive_h2h().await {
             Ok(inbound) => {
-                let partner_short = match inbound.peer_payload.full_pubkey {
-                    Some(pk) => routing_core::crypto::identity::short_addr_of(&pk),
-                    None => {
-                        let table = routing_table.lock().await;
-                        table
-                            .peers
-                            .iter()
-                            .find(|p| p.transport_addr == inbound.peer_transport_addr)
-                            .map(|p| p.short_addr)
-                            .unwrap_or([0u8; 8])
-                    }
-                };
-
-                let response = build_h2h_payload(
+                let sync = match respond_to_inbound_h2h_sync(
+                    responder,
+                    &inbound,
                     identity,
                     capabilities,
                     &uptime,
                     &routing_table,
-                    &partner_short,
                 )
-                .await;
-
+                .await
                 {
-                    let mut table = routing_table.lock().await;
-                    table.update_peer_from_h2h(
-                        &inbound.peer_payload,
-                        partner_short,
-                        inbound.peer_transport_addr,
-                        embassy_time::Instant::now().as_ticks(),
-                    );
-                }
-
-                if responder.send_h2h_response(&response).await.is_ok() {
-                    shared
-                        .lock()
-                        .unwrap()
-                        .push_event(format!("mesh sync from {:02x?}", &partner_short[..4]));
-                }
-
-                loop {
-                    match responder.receive_h2h_frame().await {
-                        Ok(H2hFrame::SessionDone) => break,
-                        Ok(_) => {}
-                        Err(_) => break,
+                    Ok(sync) => sync,
+                    Err(InboundH2hSyncError::UnresolvedPartner) => {
+                        shared.lock().unwrap().push_event(format!(
+                            "mesh responder could not resolve partner for transport {:?}; skipping session",
+                            inbound.peer_transport_addr
+                        ));
+                        let _ = responder.finish_h2h_session().await;
+                        continue;
                     }
-                }
+                    Err(InboundH2hSyncError::SendResponse(err)) => {
+                        shared
+                            .lock()
+                            .unwrap()
+                            .push_event(format!("mesh responder send_h2h_response error: {err:?}"));
+                        let _ = responder.finish_h2h_session().await;
+                        continue;
+                    }
+                };
+
+                shared
+                    .lock()
+                    .unwrap()
+                    .push_event(format!("mesh sync from {:02x?}", &sync.partner_short[..4]));
+
+                drain_responder_h2h_frames_until_done(responder).await;
 
                 update_routing_snapshot(&shared, &routing_table, &uptime).await;
                 let _ = responder.finish_h2h_session().await;
@@ -883,93 +903,154 @@ async fn handle_companion_routed_packet(
     peer_transport_addr: routing_core::transport::TransportAddr,
     packet: &[u8],
 ) {
-    match {
+    struct CompanionRoutedObserver<'a> {
+        shared: &'a Arc<Mutex<SharedState>>,
+    }
+
+    impl RoutedReceiveObserver for CompanionRoutedObserver<'_> {
+        fn on_invalid_packet(&mut self) {
+            self.shared
+                .lock()
+                .unwrap()
+                .push_event("invalid routed packet header".to_string());
+        }
+
+        fn on_signature_failed(&mut self, source: [u8; 8]) {
+            self.shared.lock().unwrap().push_event(format!(
+                "routed signature verify failed from {:02x?}",
+                &source[..4]
+            ));
+        }
+
+        fn on_forward(
+            &mut self,
+            _source: [u8; 8],
+            destination: [u8; 8],
+            _ttl: u8,
+            _hop_count: u8,
+            _plan: routing_core::facade::RoutedTxPlan,
+        ) {
+            self.shared.lock().unwrap().push_event(format!(
+                "non-local routed packet for {:02x?} reached companion; forwarding not implemented here",
+                &destination[..4]
+            ));
+        }
+
+        fn on_duplicate(&mut self, _message_id: [u8; 8]) {
+            self.shared
+                .lock()
+                .unwrap()
+                .push_event("duplicate routed packet dropped".to_string());
+        }
+
+        fn on_no_route(
+            &mut self,
+            _destination: [u8; 8],
+            _observe_broadcast: bool,
+            _should_retain_for_lpn: bool,
+        ) {
+            self.shared
+                .lock()
+                .unwrap()
+                .push_event("no route for inbound non-local packet".to_string());
+        }
+
+        fn on_ttl_expired(&mut self, _destination: [u8; 8]) {
+            self.shared
+                .lock()
+                .unwrap()
+                .push_event("inbound non-local packet ttl expired".to_string());
+        }
+
+        fn on_delivered_infra(&mut self, infra: DeliveredInfra) {
+            match infra {
+                DeliveredInfra::Ping {
+                    source, payload, ..
+                } => {
+                    self.shared.lock().unwrap().push_event(format!(
+                        "ping from {:02x?} req={} sent_ms={}",
+                        &source[..4],
+                        hex(&payload.request_id),
+                        payload.origin_time_ms
+                    ));
+                }
+                DeliveredInfra::Pong { payload, .. } => {
+                    self.shared.lock().unwrap().push_event(format!(
+                        "pong from {:02x?} req={} recv_ttl={}",
+                        &payload.responder_addr[..4],
+                        hex(&payload.request_id),
+                        payload.received_ttl
+                    ));
+                }
+                DeliveredInfra::Other { source, kind, .. } => {
+                    self.shared.lock().unwrap().push_event(format!(
+                        "infra {:?} from {:02x?}",
+                        kind,
+                        &source[..4]
+                    ));
+                }
+            }
+        }
+
+        fn on_delivered_app_utf8(&mut self, app: routing_core::facade::DeliveredUtf8App) {
+            let text = String::from_utf8_lossy(&app.plaintext[..app.len]).into_owned();
+            self.shared.lock().unwrap().push_event(format!(
+                "app from {:02x?}: {}",
+                &app.source[..4],
+                text
+            ));
+        }
+
+        fn on_unsupported_local_app(&mut self, source: [u8; 8], content_type: u8, len: usize) {
+            self.shared.lock().unwrap().push_event(format!(
+                "app from {:02x?} content_type={} bytes={}",
+                &source[..4],
+                content_type,
+                len
+            ));
+        }
+
+        fn on_decrypt_failed(
+            &mut self,
+            _source: [u8; 8],
+            error: routing_core::protocol::app::AppError,
+        ) {
+            self.shared
+                .lock()
+                .unwrap()
+                .push_event(format!("app decrypt failed: {:?}", error));
+        }
+
+        fn on_missing_sender_pubkey(&mut self, _source: [u8; 8]) {
+            self.shared
+                .lock()
+                .unwrap()
+                .push_event("missing sender pubkey for app packet".to_string());
+        }
+
+        fn on_unsupported_local_packet(&mut self, _source: [u8; 8], packet_type: u8) {
+            self.shared
+                .lock()
+                .unwrap()
+                .push_event(format!("unsupported routed packet_type={}", packet_type));
+        }
+
+        fn on_invalid_local_payload(&mut self, _source: [u8; 8], packet_type: u8) {
+            self.shared.lock().unwrap().push_event(format!(
+                "failed to decode local payload for packet_type={}",
+                packet_type
+            ));
+        }
+    }
+
+    let outcome = {
         let mut table = routing_table.lock().await;
         let identity = NodeIdentity::from_bytes(&local_node.secret);
         let mut mesh = MeshFacade::new(&mut table, &identity, local_node.capabilities);
         mesh.receive(peer_transport_addr, packet)
-    } {
-        RoutedReceiveOutcome::InvalidPacket => shared
-            .lock()
-            .unwrap()
-            .push_event("invalid routed packet header".to_string()),
-        RoutedReceiveOutcome::SignatureFailed { source } => shared.lock().unwrap().push_event(
-            format!("routed signature verify failed from {:02x?}", &source[..4]),
-        ),
-        RoutedReceiveOutcome::Forward { destination, .. } => shared.lock().unwrap().push_event(
-            format!(
-                "non-local routed packet for {:02x?} reached companion; forwarding not implemented here",
-                &destination[..4]
-            ),
-        ),
-        RoutedReceiveOutcome::Duplicate { .. } => shared
-            .lock()
-            .unwrap()
-            .push_event("duplicate routed packet dropped".to_string()),
-        RoutedReceiveOutcome::NoRoute { .. } => shared
-            .lock()
-            .unwrap()
-            .push_event("no route for inbound non-local packet".to_string()),
-        RoutedReceiveOutcome::TtlExpired { .. } => shared
-            .lock()
-            .unwrap()
-            .push_event("inbound non-local packet ttl expired".to_string()),
-        RoutedReceiveOutcome::DeliveredInfra(DeliveredInfra::Ping { source, payload, .. }) => {
-            shared.lock().unwrap().push_event(format!(
-                "ping from {:02x?} req={} sent_ms={}",
-                &source[..4],
-                hex(&payload.request_id),
-                payload.origin_time_ms
-            ));
-        }
-        RoutedReceiveOutcome::DeliveredInfra(DeliveredInfra::Pong { payload, .. }) => {
-            shared.lock().unwrap().push_event(format!(
-                "pong from {:02x?} req={} recv_ttl={}",
-                &payload.responder_addr[..4],
-                hex(&payload.request_id),
-                payload.received_ttl
-            ));
-        }
-        RoutedReceiveOutcome::DeliveredInfra(DeliveredInfra::Other { source, kind, .. }) => {
-            shared
-                .lock()
-                .unwrap()
-                .push_event(format!("infra {:?} from {:02x?}", kind, &source[..4]));
-        }
-        RoutedReceiveOutcome::DeliveredAppUtf8(app) => {
-            let text = String::from_utf8_lossy(&app.plaintext[..app.len]).into_owned();
-            shared
-                .lock()
-                .unwrap()
-                .push_event(format!("app from {:02x?}: {}", &app.source[..4], text));
-        }
-        RoutedReceiveOutcome::UnsupportedLocalApp {
-            source,
-            content_type,
-            len,
-        } => shared.lock().unwrap().push_event(format!(
-            "app from {:02x?} content_type={} bytes={}",
-            &source[..4],
-            content_type,
-            len
-        )),
-        RoutedReceiveOutcome::DecryptFailed { error, .. } => shared
-            .lock()
-            .unwrap()
-            .push_event(format!("app decrypt failed: {:?}", error)),
-        RoutedReceiveOutcome::MissingSenderPubkey { .. } => shared
-            .lock()
-            .unwrap()
-            .push_event("missing sender pubkey for app packet".to_string()),
-        RoutedReceiveOutcome::UnsupportedLocalPacket { packet_type, .. } => shared
-            .lock()
-            .unwrap()
-            .push_event(format!("unsupported routed packet_type={}", packet_type)),
-        RoutedReceiveOutcome::InvalidLocalPayload { packet_type, .. } => shared
-            .lock()
-            .unwrap()
-            .push_event(format!("failed to decode local payload for packet_type={}", packet_type)),
-    }
+    };
+    let mut observer = CompanionRoutedObserver { shared };
+    observe_routed_receive_outcome(outcome, &mut observer);
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -1000,8 +1081,8 @@ fn trim_trailing_nuls(bytes: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use routing_core::onboarding::{
-        parse_discovery_from_manufacturer_data, CONSTELLATION_COMPANY_ID,
-        DISCOVERY_PAYLOAD_SIZE, ONBOARDING_READY_NETWORK_ADDR, serialize_discovery,
+        parse_discovery_from_manufacturer_data, serialize_discovery, CONSTELLATION_COMPANY_ID,
+        DISCOVERY_PAYLOAD_SIZE, ONBOARDING_READY_NETWORK_ADDR,
     };
 
     #[test]

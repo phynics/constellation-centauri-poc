@@ -8,17 +8,20 @@ use embassy_time::{Duration, Timer};
 use rand::Rng as _;
 
 use routing_core::config::DEFAULT_TTL;
-use routing_core::facade::{broadcast_destination, decide_routed_message, RoutedDecision, RoutedEnvelope};
+use routing_core::facade::{
+    broadcast_destination, decide_routed_message, RoutedDecision, RoutedEnvelope,
+};
 use routing_core::node::roles::Capabilities;
 use routing_core::protocol::packet::PACKET_TYPE_DATA;
 use routing_core::routing::table::RoutingTable;
+use routing_core::store_forward::retain_for_low_power_destination;
 
 use crate::medium::{SimDataMessage, SimMedium};
 use crate::network::SimNodeInfo;
 use crate::sim_state::{
     MessageKind, NodeType, SimConfig, TraceEventKind, TraceStatus, TuiState, MAX_NODES,
 };
-use crate::store_forward::{RetainedMessage, StoreForwardState};
+use crate::store_forward::StoreForwardState;
 
 /// Receives routed application messages, applies shared routing-core forwarding
 /// decisions, and records hop-by-hop trace events.
@@ -150,17 +153,17 @@ pub async fn run_message_loop(
                         .map(|trace| trace.body.clone())
                         .unwrap_or_default();
                     let now_secs = tui_state.lock().unwrap().elapsed_secs;
-                    let retained = store_forward_state.lock().unwrap().retain(RetainedMessage {
-                        trace_id: msg.trace_id,
-                        message_id: msg.message_id,
-                        from_idx: msg.from_idx,
-                        to_idx: msg.to_idx,
-                        holder_idx: node_idx,
-                        owner_router_idx: node_idx,
-                        body,
-                        enqueued_at_secs: now_secs,
-                        announced: false,
-                    });
+                    let retained = retain_for_low_power_destination(
+                        &mut *store_forward_state.lock().unwrap(),
+                        msg.trace_id,
+                        msg.message_id,
+                        all_nodes[msg.from_idx].short_addr,
+                        all_nodes[msg.to_idx].short_addr,
+                        all_nodes[node_idx].short_addr,
+                        all_nodes[node_idx].short_addr,
+                        body.as_bytes(),
+                        now_secs,
+                    );
 
                     if retained {
                         let mut state = tui_state.lock().unwrap();
@@ -285,18 +288,17 @@ pub async fn run_message_loop(
                             .map(|trace| trace.body.clone())
                             .unwrap_or_default();
                         let now_secs = tui_state.lock().unwrap().elapsed_secs;
-                        let retained =
-                            store_forward_state.lock().unwrap().retain(RetainedMessage {
-                                trace_id: msg.trace_id,
-                                message_id: msg.message_id,
-                                from_idx: msg.from_idx,
-                                to_idx: msg.to_idx,
-                                holder_idx: node_idx,
-                                owner_router_idx: node_idx,
-                                body,
-                                enqueued_at_secs: now_secs,
-                                announced: false,
-                            });
+                        let retained = retain_for_low_power_destination(
+                            &mut *store_forward_state.lock().unwrap(),
+                            msg.trace_id,
+                            msg.message_id,
+                            all_nodes[msg.from_idx].short_addr,
+                            all_nodes[msg.to_idx].short_addr,
+                            all_nodes[node_idx].short_addr,
+                            all_nodes[node_idx].short_addr,
+                            body.as_bytes(),
+                            now_secs,
+                        );
                         if retained {
                             let mut state = tui_state.lock().unwrap();
                             state.push_trace_event(

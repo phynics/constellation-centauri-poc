@@ -610,7 +610,13 @@ authenticated and freshness-protected:
 - retention tombstones
 - session termination
 
-Unauthenticated H2H control frames are non-conforming.
+> **Implementation status:** The authenticated H2H envelope described in this
+> section is **not yet implemented** in the current codebase. Current hosts
+> exchange raw `H2hPayload` / `H2hFrame` bytes without the `SignedH2hFrame`
+> wrapper described below. Treat this section as the target protocol design,
+> not present-day behavior.
+
+Unauthenticated H2H control frames are non-conforming for the target protocol design.
 
 #### 5.6.1 H2H Frame Authentication Format
 
@@ -1348,7 +1354,7 @@ Bit  Name          Description
 
 ### 3.6 Version Byte
 
-The `version` byte immediately follows `flags`. It identifies the H2H wire-format version used by the sender. In protocol version 1, the H2H wire-format version is also `0x01`.
+The `version` byte immediately follows `flags`. It identifies the H2H wire-format version used by the sender. In the current implementation for protocol version 1, the H2H wire-format version is `0x02`.
 
 A receiver **MUST** check the version byte. If it does not support the received version, it **MUST** reject the frame without applying any state mutation.
 

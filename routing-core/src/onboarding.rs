@@ -232,7 +232,10 @@ mod tests {
     #[test]
     fn network_addr_of_marker_returns_sentinel_for_onboarding_ready() {
         let marker = NetworkMarker::OnboardingReady;
-        assert_eq!(network_addr_of_marker(&marker), ONBOARDING_READY_NETWORK_ADDR);
+        assert_eq!(
+            network_addr_of_marker(&marker),
+            ONBOARDING_READY_NETWORK_ADDR
+        );
     }
 
     #[test]
@@ -363,7 +366,7 @@ mod tests {
         adv[0] = 0x02; // length: 2 bytes follow
         adv[1] = 0x01; // AD type: Flags
         adv[2] = 0x06; // LE General Discoverable + BR/EDR Not Supported
-        // ManufacturerSpecificData: len=1(type)+2(CID)+payload
+                       // ManufacturerSpecificData: len=1(type)+2(CID)+payload
         let mfr_ad_len = 1 + 2 + DISCOVERY_PAYLOAD_SIZE; // type + CID + payload
         adv[3] = mfr_ad_len as u8; // 21
         adv[4] = 0xFF; // AD type: ManufacturerSpecificData
@@ -382,7 +385,13 @@ mod tests {
     fn parse_discovery_from_adv_ignores_wrong_company_id() {
         let short_addr = [0x42u8; 8];
         let mut mfr_payload = [0u8; DISCOVERY_PAYLOAD_SIZE];
-        serialize_discovery(&short_addr, 0, &ONBOARDING_READY_NETWORK_ADDR, &mut mfr_payload).unwrap();
+        serialize_discovery(
+            &short_addr,
+            0,
+            &ONBOARDING_READY_NETWORK_ADDR,
+            &mut mfr_payload,
+        )
+        .unwrap();
 
         let mut adv = [0u8; 31];
         adv[0] = 0x02;

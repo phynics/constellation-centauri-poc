@@ -32,17 +32,17 @@ use routing_core::network::{
     SESSION_KIND_H2H, SESSION_KIND_ROUTED,
 };
 use routing_core::onboarding::{
-    CONSTELLATION_COMPANY_ID, CONSTELLATION_PROTOCOL_SIGNATURE, DISCOVERY_PAYLOAD_SIZE,
-    ONBOARDING_READY_MARKER, ONBOARDING_READY_NETWORK_ADDR, NodeCertificate,
-    serialize_discovery,
+    serialize_discovery, NodeCertificate, CONSTELLATION_COMPANY_ID,
+    CONSTELLATION_PROTOCOL_SIGNATURE, DISCOVERY_PAYLOAD_SIZE, ONBOARDING_READY_MARKER,
+    ONBOARDING_READY_NETWORK_ADDR,
 };
 
-pub use routing_core::onboarding::{DiscoveryInfo, parse_discovery_from_adv};
+pub use routing_core::onboarding::{parse_discovery_from_adv, DiscoveryInfo};
 use routing_core::protocol::h2h::{H2hFrame, H2hPayload};
 use routing_core::transport::TransportAddr;
 
-use crate::node::storage::{self, ProvisioningState};
 use crate::node::partitioned_flash::PartitionedFlash;
+use crate::node::storage::{self, ProvisioningState};
 use crate::reboot_after_enrollment_commit;
 use esp_storage::FlashStorage;
 
@@ -123,36 +123,37 @@ fn apply_provisioning_to_server(
     capabilities: u16,
 ) {
     let mut network_marker = [0u8; NETWORK_MARKER_LEN];
-    let (authority_pubkey, cert_capabilities, cert_signature, cert_data) =
-        if let Some(committed) = provisioning.committed {
-            network_marker[..32].copy_from_slice(&committed.network_pubkey);
-            let cert = NodeCertificate {
-                pubkey: identity.pubkey(),
-                capabilities: committed.cert_capabilities,
-                network_signature: committed.cert_signature,
-            };
-            (
-                committed.network_pubkey,
-                committed.cert_capabilities.to_le_bytes(),
-                committed.cert_signature,
-                cert.to_cert_bytes(&committed.network_pubkey),
-            )
-        } else {
-            network_marker[..ONBOARDING_READY_MARKER.len()].copy_from_slice(ONBOARDING_READY_MARKER);
-            (
-                provisioning.staged.authority_pubkey.unwrap_or(EMPTY_PUBKEY),
-                provisioning
-                    .staged
-                    .cert_capabilities
-                    .map(|caps| caps.to_le_bytes())
-                    .unwrap_or(EMPTY_CAPABILITIES),
-                provisioning
-                    .staged
-                    .cert_signature
-                    .unwrap_or(EMPTY_SIGNATURE),
-                [0xFFu8; CERT_DATA_LEN],
-            )
+    let (authority_pubkey, cert_capabilities, cert_signature, cert_data) = if let Some(committed) =
+        provisioning.committed
+    {
+        network_marker[..32].copy_from_slice(&committed.network_pubkey);
+        let cert = NodeCertificate {
+            pubkey: identity.pubkey(),
+            capabilities: committed.cert_capabilities,
+            network_signature: committed.cert_signature,
         };
+        (
+            committed.network_pubkey,
+            committed.cert_capabilities.to_le_bytes(),
+            committed.cert_signature,
+            cert.to_cert_bytes(&committed.network_pubkey),
+        )
+    } else {
+        network_marker[..ONBOARDING_READY_MARKER.len()].copy_from_slice(ONBOARDING_READY_MARKER);
+        (
+            provisioning.staged.authority_pubkey.unwrap_or(EMPTY_PUBKEY),
+            provisioning
+                .staged
+                .cert_capabilities
+                .map(|caps| caps.to_le_bytes())
+                .unwrap_or(EMPTY_CAPABILITIES),
+            provisioning
+                .staged
+                .cert_signature
+                .unwrap_or(EMPTY_SIGNATURE),
+            [0xFFu8; CERT_DATA_LEN],
+        )
+    };
 
     let _ = server.set(&server.onboarding.network_marker, &network_marker);
     let _ = server.set(&server.onboarding.authority_pubkey, &authority_pubkey);
@@ -385,9 +386,7 @@ impl<'stack, C: Controller> BleResponder<'stack, C> {
                     // Put 128-bit service UUID in primary advertising data so
                     // CoreBluetooth's scanForPeripheralsWithServices: can match
                     // it without relying on scan response data.
-                    AdStructure::CompleteServiceUuids128(&[
-                        ONBOARDING_SERVICE_UUID_BYTES,
-                    ]),
+                    AdStructure::CompleteServiceUuids128(&[ONBOARDING_SERVICE_UUID_BYTES]),
                 ],
                 &mut adv_data[..],
             ) {
@@ -510,7 +509,11 @@ impl<'stack, C: Controller> BleResponder<'stack, C> {
                     }));
                 }
                 SESSION_KIND_ROUTED => {
-                    println!("[periph] Routed packet from {:02x?} ({} bytes)", peer_mac, rx_len - 1);
+                    println!(
+                        "[periph] Routed packet from {:02x?} ({} bytes)",
+                        peer_mac,
+                        rx_len - 1
+                    );
                     let mut payload = Vec::new();
                     if payload.extend_from_slice(&rx_buf[1..rx_len]).is_err() {
                         continue;
@@ -744,13 +747,18 @@ where
                             }
                             let mut mac = [0u8; 6];
                             mac.copy_from_slice(bd_addr.raw());
-                            let onboarding_ready = info.network_addr == ONBOARDING_READY_NETWORK_ADDR;
+                            let onboarding_ready =
+                                info.network_addr == ONBOARDING_READY_NETWORK_ADDR;
                             println!(
                                 "[central] Discovered {:02x?} cap=0x{:04x} net={:02x?}{}",
                                 info.short_addr,
                                 info.capabilities,
                                 &info.network_addr[..4],
-                                if onboarding_ready { " (onboarding-ready)" } else { "" }
+                                if onboarding_ready {
+                                    " (onboarding-ready)"
+                                } else {
+                                    ""
+                                }
                             );
                             let _ = results.push(DiscoveryEvent {
                                 short_addr: info.short_addr,

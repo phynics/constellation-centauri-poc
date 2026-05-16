@@ -512,7 +512,8 @@ mod tests {
         config.lock().unwrap().drop_prob[0][1] = 100;
 
         let mut initiator = SimInitiator::new(0, medium, nodes, config);
-        let result = block_on(initiator.initiate_h2h(TransportAddr::ble(nodes[1].mac), &test_payload(0x21)));
+        let result =
+            block_on(initiator.initiate_h2h(TransportAddr::ble(nodes[1].mac), &test_payload(0x21)));
 
         assert!(matches!(result, Err(NetworkError::DropRejected)));
     }
@@ -558,7 +559,9 @@ mod tests {
         });
 
         let mut initiator = SimInitiator::new(0, medium, nodes, config);
-        let received = block_on(initiator.initiate_h2h(TransportAddr::ble(nodes[1].mac), &request_payload)).unwrap();
+        let received =
+            block_on(initiator.initiate_h2h(TransportAddr::ble(nodes[1].mac), &request_payload))
+                .unwrap();
 
         responder_thread.join().unwrap();
 
@@ -630,7 +633,10 @@ mod tests {
             let responder_thread = std::thread::spawn(move || {
                 block_on(async {
                     let inbound = responder.receive_h2h().await.unwrap();
-                    assert_eq!(inbound.peer_transport_addr.as_ble_mac(), Some(nodes[node_a].mac));
+                    assert_eq!(
+                        inbound.peer_transport_addr.as_ble_mac(),
+                        Some(nodes[node_a].mac)
+                    );
                     responder.send_h2h_response(&response).await.unwrap();
                 });
             });
@@ -725,7 +731,10 @@ mod tests {
             let responder_thread = std::thread::spawn(move || {
                 block_on(async {
                     let inbound = responder.receive_h2h().await.unwrap();
-                    assert_eq!(inbound.peer_transport_addr.as_ble_mac(), Some(nodes[node_a].mac));
+                    assert_eq!(
+                        inbound.peer_transport_addr.as_ble_mac(),
+                        Some(nodes[node_a].mac)
+                    );
                     responder.send_h2h_response(&response).await.unwrap();
                 });
             });
@@ -843,7 +852,10 @@ mod tests {
             let responder_thread = std::thread::spawn(move || {
                 block_on(async {
                     let inbound = responder.receive_h2h().await.unwrap();
-                    assert_eq!(inbound.peer_transport_addr.as_ble_mac(), Some(nodes[endpoint].mac));
+                    assert_eq!(
+                        inbound.peer_transport_addr.as_ble_mac(),
+                        Some(nodes[endpoint].mac)
+                    );
                     responder.send_h2h_response(&response).await.unwrap();
                 });
             });
@@ -862,7 +874,10 @@ mod tests {
             let table = routing_tables[endpoint].lock().await;
             let router_entry = table.find_peer(&nodes[router].short_addr).unwrap();
             assert_eq!(router_entry.trust, TRUST_DIRECT);
-            assert_eq!(router_entry.transport_addr.as_ble_mac(), Some(nodes[router].mac));
+            assert_eq!(
+                router_entry.transport_addr.as_ble_mac(),
+                Some(nodes[router].mac)
+            );
         });
     }
 
@@ -903,7 +918,8 @@ mod tests {
         config.lock().unwrap().node_behaviors[1].respond_h2h = false;
 
         let mut initiator = SimInitiator::new(0, medium, nodes, config);
-        let result = block_on(initiator.initiate_h2h(TransportAddr::ble(nodes[1].mac), &test_payload(0x21)));
+        let result =
+            block_on(initiator.initiate_h2h(TransportAddr::ble(nodes[1].mac), &test_payload(0x21)));
 
         assert!(matches!(result, Err(NetworkError::RespondDisabled)));
     }

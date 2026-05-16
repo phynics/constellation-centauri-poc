@@ -9,13 +9,14 @@ use routing_core::network::{
     DiscoveryEvent, H2hInitiator, H2hResponder, InboundH2h, NetworkError, MAX_SCAN_RESULTS,
     SESSION_KIND_H2H, SESSION_KIND_ROUTED,
 };
+use routing_core::onboarding::{parse_discovery_from_manufacturer_data, CONSTELLATION_COMPANY_ID};
 use routing_core::protocol::h2h::{H2hFrame, H2hPayload};
 use routing_core::transport::TransportAddr;
 use sha2::Digest as _;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::mpsc;
 
-use super::constants::{CONSTELLATION_COMPANY_ID, L2CAP_PSM_CHAR_UUID, ONBOARDING_SERVICE_UUID};
+use super::constants::{L2CAP_PSM_CHAR_UUID, ONBOARDING_SERVICE_UUID};
 
 const CORE_BLUETOOTH_ADDR_LEN: u8 = 16;
 const L2CAP_FRAME_BUF_SIZE: usize = 512;
@@ -118,7 +119,7 @@ impl MacInitiator {
 
 impl H2hInitiator for MacInitiator {
     async fn scan(&mut self, duration_ms: u64) -> heapless::Vec<DiscoveryEvent, MAX_SCAN_RESULTS> {
-        let out = heapless::Vec::new();
+        let mut out = heapless::Vec::new();
 
         // Scan without service filter. CoreBluetooth's
         // scanForPeripheralsWithServices: is unreliable for 128-bit UUIDs
@@ -155,7 +156,9 @@ impl H2hInitiator for MacInitiator {
             let has_constellation_mfr = device
                 .manufacturer_data
                 .as_ref()
-                .map(|d| d.len() >= 2 && u16::from_le_bytes([d[0], d[1]]) == CONSTELLATION_COMPANY_ID)
+                .map(|d| {
+                    d.len() >= 2 && u16::from_le_bytes([d[0], d[1]]) == CONSTELLATION_COMPANY_ID
+                })
                 .unwrap_or(false);
             if !has_service && !has_constellation_mfr {
                 continue;
@@ -167,13 +170,24 @@ impl H2hInitiator for MacInitiator {
                 .unwrap()
                 .insert(transport_addr, device.id.clone());
 
+            if let Some(info) = device
+                .manufacturer_data
+                .as_ref()
+                .and_then(|data| parse_discovery_from_manufacturer_data(data))
+            {
+                let _ = out.push(DiscoveryEvent {
+                    short_addr: info.short_addr,
+                    capabilities: info.capabilities,
+                    network_addr: info.network_addr,
+                    transport_addr,
+                });
+            }
         }
 
-        // Scan no longer emits DiscoveryEvents.  The real short_addr and
-        // capabilities come from GATT inspection (queued in the runtime
-        // loop) or from H2H exchanges, not from the scan itself.  This
-        // avoids serially connecting to every discovered device during scan,
-        // which was the main source of discovery latency.
+        // Discovery remains cheap because we parse manufacturer data directly
+        // from scan results rather than serially connecting to each device.
+        // GATT inspection still enriches diagnostics, but shared routing state
+        // should start from the shared discovery payload path.
         out
     }
 

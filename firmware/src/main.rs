@@ -41,13 +41,13 @@ use bt_hci::cmd::le::{
 };
 use bt_hci::controller::{ControllerCmdAsync, ControllerCmdSync};
 
+use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_hal::rng::Rng;
 use esp_hal::system::software_reset;
 use esp_println::println;
 use esp_radio::ble::controller::BleConnector;
-use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use esp_storage::FlashStorage;
 
 use static_cell::StaticCell;
@@ -60,11 +60,13 @@ pub mod node;
 pub mod transport;
 
 use routing_core::behavior::{
-    apply_discovery_events, build_h2h_payload, collect_h2h_peer_snapshots, run_heartbeat_loop,
+    apply_discovery_events, build_h2h_payload, collect_h2h_peer_snapshots,
+    drain_responder_h2h_frames_until_done, respond_to_inbound_h2h_sync, run_heartbeat_loop,
+    run_initiator_loop_with_observer, InboundH2hSyncError, InitiatorCycleObserver,
 };
 use routing_core::config::H2H_PSM;
 use routing_core::crypto::encryption::CryptoError;
-use routing_core::crypto::identity::{short_addr_of, NodeIdentity};
+use routing_core::crypto::identity::NodeIdentity;
 use routing_core::facade::{DeliveredInfra, MeshFacade, RoutedReceiveOutcome};
 use routing_core::network::{H2hInitiator, H2hResponder};
 use routing_core::node::roles::Capabilities;
@@ -85,15 +87,14 @@ const HEAP_SIZE: usize = 72 * 1024;
 const CONNECTIONS_MAX: usize = 2;
 const L2CAP_CHANNELS_MAX: usize = 4;
 
-pub const CONSTELLATION_COMPANY_ID: u16 = 0x1234;
-
 // =============================================================================
 // Shared static state
 // =============================================================================
 
 static ROUTING_TABLE: StaticCell<Mutex<NoopRawMutex, RoutingTable>> = StaticCell::new();
 static HEARTBEAT_UPTIME: StaticCell<Mutex<NoopRawMutex, u32>> = StaticCell::new();
-static FLASH_MUTEX: StaticCell<Mutex<NoopRawMutex, PartitionedFlash<FlashStorage<'static>>>> = StaticCell::new();
+static FLASH_MUTEX: StaticCell<Mutex<NoopRawMutex, PartitionedFlash<FlashStorage<'static>>>> =
+    StaticCell::new();
 static PROVISIONING_STATE: StaticCell<Mutex<NoopRawMutex, ProvisioningState>> = StaticCell::new();
 static ROUTED_FORWARD_QUEUE: StaticCell<Channel<NoopRawMutex, RoutedForward, 8>> =
     StaticCell::new();
@@ -145,7 +146,12 @@ async fn main(_spawner: Spawner) {
             true
         }
         fn log(&self, record: &log::Record) {
-            println!("[{}][{}] {}", record.target(), record.level(), record.args());
+            println!(
+                "[{}][{}] {}",
+                record.target(),
+                record.level(),
+                record.args()
+            );
         }
         fn flush(&self) {}
     }
@@ -181,7 +187,10 @@ async fn main(_spawner: Spawner) {
                 }
             }
             Err(e) => {
-                println!("Warning: failed to read partition table ({:?}), falling back to offset 0", e);
+                println!(
+                    "Warning: failed to read partition table ({:?}), falling back to offset 0",
+                    e
+                );
                 0
             }
         }
@@ -247,19 +256,34 @@ async fn main(_spawner: Spawner) {
         .map(|c| routing_core::crypto::identity::network_addr_of(&c.network_pubkey))
         .unwrap_or(routing_core::onboarding::ONBOARDING_READY_NETWORK_ADDR);
     if provisioning_state.committed.is_some() {
-        println!("Onboarding: ENROLLED (network_addr = {:02x?})", network_addr);
+        println!(
+            "Onboarding: ENROLLED (network_addr = {:02x?})",
+            network_addr
+        );
     } else {
         println!("Onboarding: READY (advertising for enrollment)");
     }
     println!("Capabilities: 0x{:04x} ({})", effective_capabilities, {
         let caps = Capabilities(effective_capabilities);
         let mut parts = alloc::vec::Vec::new();
-        if caps.contains(Capabilities::ROUTE) { parts.push("ROUTE"); }
-        if caps.contains(Capabilities::STORE) { parts.push("STORE"); }
-        if caps.contains(Capabilities::APPLICATION) { parts.push("APP"); }
-        if caps.contains(Capabilities::BRIDGE) { parts.push("BRIDGE"); }
-        if caps.contains(Capabilities::LOW_ENERGY) { parts.push("LE"); }
-        if caps.contains(Capabilities::MOBILE) { parts.push("MOBILE"); }
+        if caps.contains(Capabilities::ROUTE) {
+            parts.push("ROUTE");
+        }
+        if caps.contains(Capabilities::STORE) {
+            parts.push("STORE");
+        }
+        if caps.contains(Capabilities::APPLICATION) {
+            parts.push("APP");
+        }
+        if caps.contains(Capabilities::BRIDGE) {
+            parts.push("BRIDGE");
+        }
+        if caps.contains(Capabilities::LOW_ENERGY) {
+            parts.push("LE");
+        }
+        if caps.contains(Capabilities::MOBILE) {
+            parts.push("MOBILE");
+        }
         alloc::format!("{}", parts.join(" | "))
     });
 
@@ -365,55 +389,36 @@ where
     loop {
         match responder.receive_session().await {
             Ok(InboundBleSession::H2h(inbound)) => {
-                let partner_short = match inbound.peer_payload.full_pubkey {
-                    Some(pk) => short_addr_of(&pk),
-                    None => {
-                        let table = routing_table.lock().await;
-                        table
-                            .peers
-                            .iter()
-                            .find(|p| p.transport_addr == inbound.peer_transport_addr)
-                            .map(|p| p.short_addr)
-                            .unwrap_or([0u8; 8])
-                    }
-                };
-
-                let response = build_h2h_payload(
+                match respond_to_inbound_h2h_sync(
+                    responder,
+                    &inbound,
                     identity,
                     capabilities,
                     uptime,
                     routing_table,
-                    &partner_short,
                 )
-                .await;
-
+                .await
                 {
-                    let mut table = routing_table.lock().await;
-                    table.update_peer_from_h2h(
-                        &inbound.peer_payload,
-                        partner_short,
-                        inbound.peer_transport_addr,
-                        Instant::now().as_ticks(),
-                    );
-                    log::info!("[periph] H2H done, peers={}", table.peers.len());
-                }
-
-                if let Err(e) = responder.send_h2h_response(&response).await {
-                    log::warn!("[periph] send_h2h_response error: {:?}", e);
-                    let _ = responder.finish_h2h_session().await;
-                    continue;
-                }
-
-                loop {
-                    match responder.receive_h2h_frame().await {
-                        Ok(H2hFrame::SessionDone) => break,
-                        Ok(_) => {}
-                        Err(e) => {
-                            log::warn!("[periph] app frame rx error: {:?}", e);
-                            break;
-                        }
+                    Ok(_) => {
+                        let table = routing_table.lock().await;
+                        log::info!("[periph] H2H done, peers={}", table.peers.len());
+                    }
+                    Err(InboundH2hSyncError::UnresolvedPartner) => {
+                        log::warn!(
+                            "[periph] cannot resolve partner identity for transport {:?}; skipping session",
+                            inbound.peer_transport_addr
+                        );
+                        let _ = responder.finish_h2h_session().await;
+                        continue;
+                    }
+                    Err(InboundH2hSyncError::SendResponse(e)) => {
+                        log::warn!("[periph] send_h2h_response error: {:?}", e);
+                        let _ = responder.finish_h2h_session().await;
+                        continue;
                     }
                 }
+
+                drain_responder_h2h_frames_until_done(responder).await;
 
                 let _ = responder.finish_h2h_session().await;
             }
@@ -453,7 +458,10 @@ async fn handle_routed_packet(
     } {
         RoutedReceiveOutcome::InvalidPacket => log::warn!("[routed] invalid packet header"),
         RoutedReceiveOutcome::SignatureFailed { source } => {
-            log::warn!("[routed] signature verify failed from {:02x?}", &source[..4]);
+            log::warn!(
+                "[routed] signature verify failed from {:02x?}",
+                &source[..4]
+            );
         }
         RoutedReceiveOutcome::Forward {
             source,
@@ -484,7 +492,11 @@ async fn handle_routed_packet(
         RoutedReceiveOutcome::NoRoute { destination, .. } => {
             log::warn!("[routed] no route to {:02x?}", &destination[..4]);
         }
-        RoutedReceiveOutcome::DeliveredInfra(DeliveredInfra::Ping { source, payload, pong }) => {
+        RoutedReceiveOutcome::DeliveredInfra(DeliveredInfra::Ping {
+            source,
+            payload,
+            pong,
+        }) => {
             log::info!(
                 "[infra] ping from {:02x?} req={:02x?}",
                 &source[..4],
@@ -549,7 +561,10 @@ async fn handle_routed_packet(
             log::info!("[routed] unsupported packet_type={}", packet_type);
         }
         RoutedReceiveOutcome::InvalidLocalPayload { packet_type, .. } => {
-            log::warn!("[routed] failed to decode local payload for packet_type={}", packet_type);
+            log::warn!(
+                "[routed] failed to decode local payload for packet_type={}",
+                packet_type
+            );
         }
     }
 }
@@ -577,68 +592,48 @@ where
         + ControllerCmdSync<LeAddDeviceToFilterAcceptList>
         + ControllerCmdAsync<LeCreateConn>,
 {
-    Timer::after(Duration::from_secs(3)).await;
+    struct FirmwareInitiatorObserver<'a> {
+        routed_forward_queue: &'a Channel<NoopRawMutex, RoutedForward, 8>,
+    }
 
-    loop {
-        while let Ok(forward) = routed_forward_queue.try_receive() {
-            let _ = initiator
-                .send_routed_packet(forward.peer_transport_addr, &forward.packet[..forward.len])
-                .await;
-        }
-
-        let cycle_start = Instant::now();
-        let events = initiator.scan(7_000).await;
-        apply_discovery_events(routing_table, &events).await;
-
-        let our_addr = *identity.short_addr();
-        let peer_snapshots =
-            collect_h2h_peer_snapshots(identity, capabilities, routing_table).await;
-
-        for (peer_addr, peer_transport_addr) in peer_snapshots.iter() {
-            let offset = if Capabilities::is_low_power_endpoint_bits(capabilities) {
-                0
-            } else {
-                routing_core::protocol::h2h::slot_offset(&our_addr, peer_addr)
-            };
-            let target_time = cycle_start + Duration::from_secs(offset);
-            if Instant::now() < target_time {
-                Timer::at(target_time).await;
-            }
-
-            let payload =
-                build_h2h_payload(identity, capabilities, uptime, routing_table, peer_addr).await;
-            match initiator.initiate_h2h(*peer_transport_addr, &payload).await {
-                Ok(peer_payload) => {
-                    let mut table = routing_table.lock().await;
-                    table.update_peer_from_h2h(
-                        &peer_payload,
-                        *peer_addr,
-                        *peer_transport_addr,
-                        Instant::now().as_ticks(),
-                    );
-                    let _ = initiator.finish_h2h_session().await;
-                    if Capabilities::is_low_power_endpoint_bits(capabilities) {
-                        break;
-                    }
-                }
-                Err(_) => {
-                    let _ = initiator.finish_h2h_session().await;
-                }
-            }
-
-            while let Ok(forward) = routed_forward_queue.try_receive() {
+    impl<'a, C> InitiatorCycleObserver<BleInitiator<'a, C>> for FirmwareInitiatorObserver<'a>
+    where
+        C: Controller
+            + ControllerCmdSync<LeSetScanParams>
+            + ControllerCmdSync<LeSetScanEnable>
+            + ControllerCmdSync<LeClearFilterAcceptList>
+            + ControllerCmdSync<LeAddDeviceToFilterAcceptList>
+            + ControllerCmdAsync<LeCreateConn>,
+    {
+        async fn before_cycle(&mut self, initiator: &mut BleInitiator<'a, C>) {
+            while let Ok(forward) = self.routed_forward_queue.try_receive() {
                 let _ = initiator
                     .send_routed_packet(forward.peer_transport_addr, &forward.packet[..forward.len])
                     .await;
             }
         }
 
-        let elapsed = Instant::now() - cycle_start;
-        let cycle = Duration::from_secs(routing_core::config::H2H_CYCLE_SECS);
-        if elapsed < cycle {
-            Timer::after(cycle - elapsed).await;
+        async fn after_peer(&mut self, initiator: &mut BleInitiator<'a, C>) {
+            while let Ok(forward) = self.routed_forward_queue.try_receive() {
+                let _ = initiator
+                    .send_routed_packet(forward.peer_transport_addr, &forward.packet[..forward.len])
+                    .await;
+            }
         }
     }
+
+    let mut observer = FirmwareInitiatorObserver {
+        routed_forward_queue,
+    };
+    run_initiator_loop_with_observer(
+        initiator,
+        identity,
+        capabilities,
+        routing_table,
+        uptime,
+        &mut observer,
+    )
+    .await
 }
 
 // =============================================================================

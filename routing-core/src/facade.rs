@@ -92,9 +92,15 @@ pub enum DeliveredInfra {
 
 pub enum RoutedReceiveOutcome {
     InvalidPacket,
-    SignatureFailed { source: ShortAddr },
-    TtlExpired { destination: ShortAddr },
-    Duplicate { message_id: [u8; 8] },
+    SignatureFailed {
+        source: ShortAddr,
+    },
+    TtlExpired {
+        destination: ShortAddr,
+    },
+    Duplicate {
+        message_id: [u8; 8],
+    },
     NoRoute {
         destination: ShortAddr,
         observe_broadcast: bool,
@@ -107,7 +113,9 @@ pub enum RoutedReceiveOutcome {
         hop_count: u8,
         plan: RoutedTxPlan,
     },
-    MissingSenderPubkey { source: ShortAddr },
+    MissingSenderPubkey {
+        source: ShortAddr,
+    },
     DeliveredAppUtf8(DeliveredUtf8App),
     DeliveredInfra(DeliveredInfra),
     UnsupportedLocalApp {
@@ -129,6 +137,36 @@ pub enum RoutedReceiveOutcome {
     },
 }
 
+pub trait RoutedReceiveObserver {
+    fn on_invalid_packet(&mut self) {}
+    fn on_signature_failed(&mut self, _source: ShortAddr) {}
+    fn on_ttl_expired(&mut self, _destination: ShortAddr) {}
+    fn on_duplicate(&mut self, _message_id: [u8; 8]) {}
+    fn on_no_route(
+        &mut self,
+        _destination: ShortAddr,
+        _observe_broadcast: bool,
+        _should_retain_for_lpn: bool,
+    ) {
+    }
+    fn on_forward(
+        &mut self,
+        _source: ShortAddr,
+        _destination: ShortAddr,
+        _ttl: u8,
+        _hop_count: u8,
+        _plan: RoutedTxPlan,
+    ) {
+    }
+    fn on_missing_sender_pubkey(&mut self, _source: ShortAddr) {}
+    fn on_delivered_app_utf8(&mut self, _app: DeliveredUtf8App) {}
+    fn on_delivered_infra(&mut self, _infra: DeliveredInfra) {}
+    fn on_unsupported_local_app(&mut self, _source: ShortAddr, _content_type: u8, _len: usize) {}
+    fn on_decrypt_failed(&mut self, _source: ShortAddr, _error: AppError) {}
+    fn on_unsupported_local_packet(&mut self, _source: ShortAddr, _packet_type: u8) {}
+    fn on_invalid_local_payload(&mut self, _source: ShortAddr, _packet_type: u8) {}
+}
+
 pub enum RoutedDecision {
     TtlExpired,
     Duplicate,
@@ -145,6 +183,51 @@ pub enum RoutedDecision {
 
 pub fn broadcast_destination() -> ShortAddr {
     BROADCAST_ADDR
+}
+
+pub fn observe_routed_receive_outcome<O: RoutedReceiveObserver>(
+    outcome: RoutedReceiveOutcome,
+    observer: &mut O,
+) {
+    match outcome {
+        RoutedReceiveOutcome::InvalidPacket => observer.on_invalid_packet(),
+        RoutedReceiveOutcome::SignatureFailed { source } => observer.on_signature_failed(source),
+        RoutedReceiveOutcome::TtlExpired { destination } => observer.on_ttl_expired(destination),
+        RoutedReceiveOutcome::Duplicate { message_id } => observer.on_duplicate(message_id),
+        RoutedReceiveOutcome::NoRoute {
+            destination,
+            observe_broadcast,
+            should_retain_for_lpn,
+        } => observer.on_no_route(destination, observe_broadcast, should_retain_for_lpn),
+        RoutedReceiveOutcome::Forward {
+            source,
+            destination,
+            ttl,
+            hop_count,
+            plan,
+        } => observer.on_forward(source, destination, ttl, hop_count, plan),
+        RoutedReceiveOutcome::MissingSenderPubkey { source } => {
+            observer.on_missing_sender_pubkey(source)
+        }
+        RoutedReceiveOutcome::DeliveredAppUtf8(app) => observer.on_delivered_app_utf8(app),
+        RoutedReceiveOutcome::DeliveredInfra(infra) => observer.on_delivered_infra(infra),
+        RoutedReceiveOutcome::UnsupportedLocalApp {
+            source,
+            content_type,
+            len,
+        } => observer.on_unsupported_local_app(source, content_type, len),
+        RoutedReceiveOutcome::DecryptFailed { source, error } => {
+            observer.on_decrypt_failed(source, error)
+        }
+        RoutedReceiveOutcome::UnsupportedLocalPacket {
+            source,
+            packet_type,
+        } => observer.on_unsupported_local_packet(source, packet_type),
+        RoutedReceiveOutcome::InvalidLocalPayload {
+            source,
+            packet_type,
+        } => observer.on_invalid_local_payload(source, packet_type),
+    }
 }
 
 impl<'a> MeshFacade<'a> {
@@ -164,7 +247,9 @@ impl<'a> MeshFacade<'a> {
         let destination_is_low_power = self
             .table
             .find_peer(&msg.destination)
-            .map(|peer| crate::node::roles::Capabilities::is_low_power_endpoint_bits(peer.capabilities))
+            .map(|peer| {
+                crate::node::roles::Capabilities::is_low_power_endpoint_bits(peer.capabilities)
+            })
             .unwrap_or(false);
         decide_routed_message(
             self.table,
@@ -198,7 +283,13 @@ impl<'a> MeshFacade<'a> {
         request_id: [u8; 8],
         origin_time_ms: u64,
     ) -> Result<RoutedTxPlan, FacadeError> {
-        build_ping_tx(self.table, self.identity, destination, request_id, origin_time_ms)
+        build_ping_tx(
+            self.table,
+            self.identity,
+            destination,
+            request_id,
+            origin_time_ms,
+        )
     }
 
     pub fn receive(
@@ -419,7 +510,9 @@ pub fn handle_inbound_routed_packet(
                 return RoutedReceiveOutcome::InvalidPacket;
             }
             forwarded[..packet.len()].copy_from_slice(packet);
-            let Ok((mut fwd_header, fwd_payload)) = PacketHeader::deserialize(&forwarded[..packet.len()]) else {
+            let Ok((mut fwd_header, fwd_payload)) =
+                PacketHeader::deserialize(&forwarded[..packet.len()])
+            else {
                 return RoutedReceiveOutcome::InvalidPacket;
             };
             let len = HEADER_SIZE + fwd_payload.len();
@@ -494,15 +587,19 @@ pub fn handle_inbound_routed_packet(
                 match EncryptedAppFrame::deserialize(payload) {
                     Ok(frame) => {
                         let mut plaintext = [0u8; ROUTED_PLAINTEXT_MAX_LEN];
-                        match frame.decrypt_user_data(local_identity, &sender_pubkey, &mut plaintext) {
-                            Ok((APP_CONTENT_TYPE_UTF8, len)) => RoutedReceiveOutcome::DeliveredAppUtf8(
-                                DeliveredUtf8App {
+                        match frame.decrypt_user_data(
+                            local_identity,
+                            &sender_pubkey,
+                            &mut plaintext,
+                        ) {
+                            Ok((APP_CONTENT_TYPE_UTF8, len)) => {
+                                RoutedReceiveOutcome::DeliveredAppUtf8(DeliveredUtf8App {
                                     source: header.src,
                                     message_id: header.message_id,
                                     len,
                                     plaintext,
-                                },
-                            ),
+                                })
+                            }
                             Ok((content_type, len)) => RoutedReceiveOutcome::UnsupportedLocalApp {
                                 source: header.src,
                                 content_type,
@@ -677,12 +774,21 @@ mod tests {
             src_transport,
             &packet[..len],
         ) {
-            RoutedReceiveOutcome::Forward { plan, ttl, hop_count, .. } => {
+            RoutedReceiveOutcome::Forward {
+                plan,
+                ttl,
+                hop_count,
+                ..
+            } => {
                 assert_eq!(plan.next_hop_transport, dst_transport);
-                let (forwarded_header, _) = PacketHeader::deserialize(&plan.packet[..plan.len]).unwrap();
+                let (forwarded_header, _) =
+                    PacketHeader::deserialize(&plan.packet[..plan.len]).unwrap();
                 assert_eq!(ttl, forwarded_header.ttl);
                 assert_eq!(hop_count, forwarded_header.hop_count);
-                assert_eq!(forwarded_header.ttl, crate::config::DEFAULT_TTL.saturating_sub(1));
+                assert_eq!(
+                    forwarded_header.ttl,
+                    crate::config::DEFAULT_TTL.saturating_sub(1)
+                );
                 assert_eq!(forwarded_header.hop_count, 1);
             }
             _ => panic!("expected forward outcome"),

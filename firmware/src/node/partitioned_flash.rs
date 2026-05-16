@@ -146,10 +146,7 @@ mod tests {
         // Write directly at the absolute offset that PartitionedFlash should target
         inner.write(BASE, &[0x42]).unwrap();
 
-        let mut flash = PartitionedFlash {
-            inner,
-            base: BASE,
-        };
+        let mut flash = PartitionedFlash { inner, base: BASE };
         let mut byte = [0u8; 1];
         flash.read(0, &mut byte).unwrap();
         assert_eq!(byte[0], 0x42);
