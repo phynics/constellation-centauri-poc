@@ -19,7 +19,9 @@ use routing_core::network::{
     DiscoveryEvent, H2hInitiator, H2hResponder, InboundH2h, NetworkError, MAX_SCAN_RESULTS,
     SESSION_KIND_H2H, SESSION_KIND_ROUTED,
 };
-use routing_core::onboarding::{parse_discovery_from_manufacturer_data, CONSTELLATION_COMPANY_ID};
+use routing_core::onboarding::{
+    parse_discovery_from_manufacturer_data, DiscoveryInfo, CONSTELLATION_COMPANY_ID,
+};
 use routing_core::protocol::h2h::{H2hFrame, H2hPayload};
 use routing_core::transport::TransportAddr;
 use sha2::Digest as _;
@@ -186,9 +188,11 @@ impl H2hInitiator for MacInitiator {
                 .and_then(|data| parse_discovery_from_manufacturer_data(data))
             {
                 let _ = out.push(DiscoveryEvent {
-                    short_addr: info.short_addr,
-                    capabilities: info.capabilities,
-                    network_addr: info.network_addr,
+                    info: DiscoveryInfo {
+                        short_addr: info.short_addr,
+                        capabilities: info.capabilities,
+                        network_addr: info.network_addr,
+                    },
                     transport_addr,
                 });
             }

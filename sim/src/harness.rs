@@ -18,6 +18,7 @@ use routing_core::behavior::{
 };
 use routing_core::crypto::identity::ShortAddr;
 use routing_core::network::H2hInitiator;
+use routing_core::node::roles::Capabilities;
 use routing_core::protocol::h2h::{H2hFrame, H2hPayload, PeerInfo};
 use routing_core::routing::table::RoutingTable;
 use routing_core::store_forward::{
@@ -148,7 +149,7 @@ impl SimHarness {
         });
     }
 
-    pub fn schedule_capabilities(&self, after: Duration, node: usize, capabilities: u16) {
+    pub fn schedule_capabilities(&self, after: Duration, node: usize, capabilities: Capabilities) {
         self.schedule_action(after, move |cfg| {
             config_ops::set_capabilities(cfg, node, capabilities);
         });
@@ -217,7 +218,7 @@ impl SimHarness {
         let cfg = self.config();
         let source_caps = cfg.capabilities[from];
         let target_caps = if is_broadcast {
-            0
+            Capabilities::new(0)
         } else {
             cfg.capabilities[destination_idx]
         };

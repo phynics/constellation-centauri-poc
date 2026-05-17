@@ -11,6 +11,7 @@
 
 use crate::config::{H2H_MAX_PEER_ENTRIES, MAX_PEERS, TICK_HZ};
 use crate::crypto::identity::{short_addr_of, PubKey, ShortAddr};
+use crate::node::roles::Capabilities;
 use crate::protocol::dedup::SeenMessages;
 use crate::protocol::h2h::{H2hPayload, PeerInfo};
 use crate::routing::bloom::BloomFilter;
@@ -30,13 +31,120 @@ pub const TRUST_EXPIRED: u8 = 0;
 pub struct PeerEntry {
     pub pubkey: PubKey,
     pub short_addr: ShortAddr,
-    pub capabilities: u16,
+    pub capabilities: Capabilities,
     pub bloom: BloomFilter,
     pub transport_addr: TransportAddr,
     pub last_seen_ticks: u64,
     pub hop_count: u8,
     pub trust: u8,
     pub learned_from: ShortAddr,
+}
+
+impl PeerEntry {
+    pub fn direct_from_discovery(
+        short_addr: ShortAddr,
+        capabilities: Capabilities,
+        transport_addr: TransportAddr,
+        last_seen_ticks: u64,
+    ) -> Self {
+        Self {
+            pubkey: [0u8; 32],
+            short_addr,
+            capabilities,
+            bloom: BloomFilter::new(),
+            transport_addr,
+            last_seen_ticks,
+            hop_count: 0,
+            trust: TRUST_DIRECT,
+            learned_from: [0u8; 8],
+        }
+    }
+
+    pub fn direct_from_h2h(
+        pubkey: PubKey,
+        short_addr: ShortAddr,
+        capabilities: Capabilities,
+        transport_addr: TransportAddr,
+        last_seen_ticks: u64,
+    ) -> Self {
+        Self {
+            pubkey,
+            short_addr,
+            capabilities,
+            bloom: BloomFilter::new(),
+            transport_addr,
+            last_seen_ticks,
+            hop_count: 0,
+            trust: TRUST_DIRECT,
+            learned_from: [0u8; 8],
+        }
+    }
+
+    pub fn indirect_from_peer_info(
+        peer: &PeerInfo,
+        short_addr: ShortAddr,
+        learned_from: ShortAddr,
+        last_seen_ticks: u64,
+    ) -> Self {
+        Self {
+            pubkey: peer.pubkey,
+            short_addr,
+            capabilities: peer.capabilities,
+            bloom: BloomFilter::new(),
+            transport_addr: TransportAddr::empty(),
+            last_seen_ticks,
+            hop_count: peer.hop_count.saturating_add(1),
+            trust: TRUST_INDIRECT,
+            learned_from,
+        }
+    }
+
+    pub fn refresh_direct_from_discovery(
+        &mut self,
+        capabilities: Capabilities,
+        transport_addr: TransportAddr,
+        last_seen_ticks: u64,
+    ) {
+        self.capabilities = capabilities;
+        self.transport_addr = transport_addr;
+        self.last_seen_ticks = last_seen_ticks;
+        self.hop_count = 0;
+        self.trust = TRUST_DIRECT;
+        self.learned_from = [0u8; 8];
+    }
+
+    pub fn refresh_direct_from_h2h(
+        &mut self,
+        pubkey: PubKey,
+        capabilities: Capabilities,
+        transport_addr: TransportAddr,
+        last_seen_ticks: u64,
+    ) {
+        self.pubkey = pubkey;
+        self.refresh_direct_from_discovery(capabilities, transport_addr, last_seen_ticks);
+    }
+
+    pub fn refresh_indirect_from_peer_info(
+        &mut self,
+        peer: &PeerInfo,
+        learned_from: ShortAddr,
+        last_seen_ticks: u64,
+    ) {
+        self.pubkey = peer.pubkey;
+        self.capabilities = peer.capabilities;
+        self.hop_count = peer.hop_count.saturating_add(1);
+        self.last_seen_ticks = last_seen_ticks;
+        self.trust = TRUST_INDIRECT;
+        self.learned_from = learned_from;
+    }
+
+    pub fn as_peer_info(&self) -> PeerInfo {
+        PeerInfo {
+            pubkey: self.pubkey,
+            capabilities: self.capabilities,
+            hop_count: self.hop_count,
+        }
+    }
 }
 
 pub struct RoutingTable {
@@ -90,66 +198,41 @@ impl RoutingTable {
 
         // Update the direct peer
         if let Some(entry) = self.peers.iter_mut().find(|p| p.short_addr == short_addr) {
-            entry.pubkey = resolved_pubkey;
-            entry.capabilities = payload.capabilities;
-            entry.transport_addr = transport_addr;
-            entry.last_seen_ticks = now_ticks;
-            entry.hop_count = 0;
-            entry.trust = TRUST_DIRECT;
-            entry.learned_from = [0u8; 8];
+            entry.refresh_direct_from_h2h(resolved_pubkey, payload.capabilities, transport_addr, now_ticks);
         } else if !self.peers.is_full() {
-            let _ = self.peers.push(PeerEntry {
-                pubkey: resolved_pubkey,
+            let _ = self.peers.push(PeerEntry::direct_from_h2h(
+                resolved_pubkey,
                 short_addr,
-                capabilities: payload.capabilities,
-                bloom: BloomFilter::new(),
+                payload.capabilities,
                 transport_addr,
-                last_seen_ticks: now_ticks,
-                hop_count: 0,
-                trust: TRUST_DIRECT,
-                learned_from: [0u8; 8],
-            });
+                now_ticks,
+            ));
         }
 
         // Update indirect peers from the peer list
         for i in 0..payload.peer_count as usize {
-            if let Some(ref pi) = payload.peers[i] {
-                let pi_short_addr = short_addr_of(&pi.pubkey);
-                if pi_short_addr == self.self_addr {
-                    continue;
-                }
-                let hop = pi.hop_count.saturating_add(1);
+                if let Some(ref pi) = payload.peers[i] {
+                    let pi_short_addr = short_addr_of(&pi.pubkey);
+                    if pi_short_addr == self.self_addr {
+                        continue;
+                    }
 
-                if let Some(entry) = self
-                    .peers
+                    if let Some(entry) = self
+                        .peers
                     .iter_mut()
                     .find(|p| p.short_addr == pi_short_addr)
                 {
                     // Only update if our existing info is stale or lower trust
                     if entry.trust <= TRUST_INDIRECT {
-                        entry.pubkey = pi.pubkey;
-                        entry.capabilities = pi.capabilities;
-                        entry.hop_count = hop;
-                        entry.last_seen_ticks = now_ticks;
-                        entry.trust = TRUST_INDIRECT;
-                        entry.learned_from = short_addr;
+                        entry.refresh_indirect_from_peer_info(pi, short_addr, now_ticks);
                     }
                 } else if !self.peers.is_full() {
-                    let _ = self.peers.push(PeerEntry {
-                        pubkey: pi.pubkey,
-                        short_addr: pi_short_addr,
-                        capabilities: pi.capabilities,
-                        bloom: BloomFilter::new(),
-                        transport_addr: TransportAddr {
-                            addr_type: 0,
-                            len: 0,
-                            addr: [0u8; 16],
-                        },
-                        last_seen_ticks: now_ticks,
-                        hop_count: hop,
-                        trust: TRUST_INDIRECT,
-                        learned_from: short_addr,
-                    });
+                    let _ = self.peers.push(PeerEntry::indirect_from_peer_info(
+                        pi,
+                        pi_short_addr,
+                        short_addr,
+                        now_ticks,
+                    ));
                 }
             }
         }
@@ -162,7 +245,7 @@ impl RoutingTable {
     pub fn update_peer_compact(
         &mut self,
         short_addr: ShortAddr,
-        capabilities: u16,
+        capabilities: Capabilities,
         transport_addr: TransportAddr,
         now_ticks: u64,
     ) -> bool {
@@ -171,26 +254,16 @@ impl RoutingTable {
         }
 
         if let Some(entry) = self.peers.iter_mut().find(|p| p.short_addr == short_addr) {
-            entry.capabilities = capabilities;
-            entry.transport_addr = transport_addr;
-            entry.last_seen_ticks = now_ticks;
-            entry.hop_count = 0;
-            entry.trust = TRUST_DIRECT;
-            entry.learned_from = [0u8; 8];
+            entry.refresh_direct_from_discovery(capabilities, transport_addr, now_ticks);
             self.recompute_bloom();
             false
         } else if !self.peers.is_full() {
-            let _ = self.peers.push(PeerEntry {
-                pubkey: [0u8; 32],
+            let _ = self.peers.push(PeerEntry::direct_from_discovery(
                 short_addr,
                 capabilities,
-                bloom: BloomFilter::new(),
                 transport_addr,
-                last_seen_ticks: now_ticks,
-                hop_count: 0,
-                trust: TRUST_DIRECT,
-                learned_from: [0u8; 8],
-            });
+                now_ticks,
+            ));
             self.recompute_bloom();
             true
         } else {
@@ -303,11 +376,7 @@ impl RoutingTable {
             }
 
             let p = &self.peers[idx];
-            result[count] = Some(PeerInfo {
-                pubkey: p.pubkey,
-                capabilities: p.capabilities,
-                hop_count: p.hop_count,
-            });
+            result[count] = Some(p.as_peer_info());
             count += 1;
         }
 
@@ -422,14 +491,14 @@ mod tests {
     fn indirect_peer(seed: u8, hop_count: u8) -> PeerInfo {
         PeerInfo {
             pubkey: pubkey(seed),
-            capabilities: 0x2000 + seed as u16,
+            capabilities: Capabilities::new(0x2000 + seed as u16),
             hop_count,
         }
     }
 
     fn payload(
         full_pubkey: Option<PubKey>,
-        capabilities: u16,
+        capabilities: Capabilities,
         peer_infos: &[PeerInfo],
     ) -> H2hPayload {
         const NONE: Option<PeerInfo> = None;
@@ -455,7 +524,7 @@ mod tests {
         PeerEntry {
             short_addr: short_addr_of(&pubkey),
             pubkey,
-            capabilities: 0x4444,
+            capabilities: Capabilities::new(0x4444),
             bloom: BloomFilter::new(),
             transport_addr,
             last_seen_ticks,
@@ -476,13 +545,17 @@ mod tests {
 
         let mut table = RoutingTable::new(self_addr);
         let indirect = indirect_peer(0x03, 2);
-        let payload = payload(Some(partner_pubkey), 0x9001, &[indirect.clone()]);
+        let payload = payload(
+            Some(partner_pubkey),
+            Capabilities::new(0x9001),
+            &[indirect.clone()],
+        );
 
         table.update_peer_from_h2h(&payload, partner_addr, transport, now);
 
         let partner = table.find_peer(&partner_addr).unwrap();
         assert_eq!(partner.pubkey, partner_pubkey);
-        assert_eq!(partner.capabilities, 0x9001);
+        assert_eq!(partner.capabilities, Capabilities::new(0x9001));
         assert_eq!(partner.transport_addr, transport);
         assert_eq!(partner.last_seen_ticks, now);
         assert_eq!(partner.hop_count, 0);
@@ -509,10 +582,14 @@ mod tests {
         let mut table = RoutingTable::new(self_addr);
         let self_as_indirect = PeerInfo {
             pubkey: self_pubkey,
-            capabilities: 0x7777,
+            capabilities: Capabilities::new(0x7777),
             hop_count: 1,
         };
-        let payload = payload(Some(partner_pubkey), 0x1234, &[self_as_indirect]);
+        let payload = payload(
+            Some(partner_pubkey),
+            Capabilities::new(0x1234),
+            &[self_as_indirect],
+        );
 
         table.update_peer_from_h2h(&payload, partner_addr, transport, 50);
 
@@ -537,10 +614,10 @@ mod tests {
 
         let payload = payload(
             Some(partner_pubkey),
-            0xAAAA,
+            Capabilities::new(0xAAAA),
             &[PeerInfo {
                 pubkey: direct_pubkey,
-                capabilities: 0xBBBB,
+                capabilities: Capabilities::new(0xBBBB),
                 hop_count: 4,
             }],
         );
@@ -551,7 +628,7 @@ mod tests {
         assert_eq!(direct.trust, TRUST_DIRECT);
         assert_eq!(direct.hop_count, 0);
         assert_eq!(direct.transport_addr, original_transport);
-        assert_eq!(direct.capabilities, 0x4444);
+        assert_eq!(direct.capabilities, Capabilities::new(0x4444));
         assert_eq!(direct.last_seen_ticks, 10);
     }
 
@@ -569,7 +646,7 @@ mod tests {
         let _ = table.peers.push(PeerEntry {
             short_addr: partner_addr,
             pubkey: partner_pubkey,
-            capabilities: 0x1111,
+            capabilities: Capabilities::new(0x1111),
             bloom: BloomFilter::new(),
             transport_addr: TransportAddr::ble(mac(0xD1)),
             last_seen_ticks: 100,
@@ -580,7 +657,7 @@ mod tests {
         let _ = table.peers.push(PeerEntry {
             short_addr: direct_other_addr,
             pubkey: direct_other_pubkey,
-            capabilities: 0x2222,
+            capabilities: Capabilities::new(0x2222),
             bloom: BloomFilter::new(),
             transport_addr: TransportAddr::ble(mac(0xD2)),
             last_seen_ticks: 100,
@@ -591,7 +668,7 @@ mod tests {
         let _ = table.peers.push(PeerEntry {
             short_addr: indirect_from_partner_addr,
             pubkey: indirect_from_partner,
-            capabilities: 0x3333,
+            capabilities: Capabilities::new(0x3333),
             bloom: BloomFilter::new(),
             transport_addr: TransportAddr::ble([0u8; 6]),
             last_seen_ticks: 100,
@@ -657,7 +734,7 @@ mod tests {
         let _ = table.peers.push(PeerEntry {
             short_addr: peer_addr,
             pubkey: peer_pubkey,
-            capabilities: 0x1111,
+            capabilities: Capabilities::new(0x1111),
             bloom: BloomFilter::new(),
             transport_addr: TransportAddr::ble(mac(0xE3)),
             last_seen_ticks: 10,
@@ -670,13 +747,14 @@ mod tests {
         assert_eq!(table.find_peer(&peer_addr).unwrap().trust, TRUST_EXPIRED);
 
         let transport = TransportAddr::ble(mac(0xE4));
-        let inserted = table.update_peer_compact(peer_addr, 0x2222, transport, 250);
+        let inserted =
+            table.update_peer_compact(peer_addr, Capabilities::new(0x2222), transport, 250);
 
         assert!(!inserted);
         let peer = table.find_peer(&peer_addr).unwrap();
         assert_eq!(peer.trust, TRUST_DIRECT);
         assert_eq!(peer.hop_count, 0);
-        assert_eq!(peer.capabilities, 0x2222);
+        assert_eq!(peer.capabilities, Capabilities::new(0x2222));
         assert_eq!(peer.transport_addr, transport);
         assert_eq!(peer.last_seen_ticks, 250);
         assert_eq!(peer.learned_from, [0u8; 8]);
@@ -694,7 +772,7 @@ mod tests {
         let _ = table.peers.push(PeerEntry {
             short_addr: partner_addr,
             pubkey: partner_pubkey,
-            capabilities: 0x3333,
+            capabilities: Capabilities::new(0x3333),
             bloom: BloomFilter::new(),
             transport_addr: TransportAddr::ble(mac(0xE5)),
             last_seen_ticks: 10,
@@ -706,14 +784,18 @@ mod tests {
         table.decay(110, 100);
         assert_eq!(table.find_peer(&partner_addr).unwrap().trust, TRUST_EXPIRED);
 
-        let payload = payload(Some(partner_pubkey), 0x4444, &[indirect.clone()]);
+        let payload = payload(
+            Some(partner_pubkey),
+            Capabilities::new(0x4444),
+            &[indirect.clone()],
+        );
         let transport = TransportAddr::ble(mac(0xE6));
         table.update_peer_from_h2h(&payload, partner_addr, transport, 250);
 
         let partner = table.find_peer(&partner_addr).unwrap();
         assert_eq!(partner.trust, TRUST_DIRECT);
         assert_eq!(partner.hop_count, 0);
-        assert_eq!(partner.capabilities, 0x4444);
+        assert_eq!(partner.capabilities, Capabilities::new(0x4444));
         assert_eq!(partner.transport_addr, transport);
         assert_eq!(partner.last_seen_ticks, 250);
         assert_eq!(partner.learned_from, [0u8; 8]);
@@ -800,7 +882,7 @@ mod tests {
         let _ = table.peers.push(PeerEntry {
             short_addr: indirect_addr,
             pubkey: indirect_pubkey,
-            capabilities: 0x5555,
+            capabilities: Capabilities::new(0x5555),
             bloom: BloomFilter::new(),
             transport_addr: TransportAddr::empty(),
             last_seen_ticks: 20,
@@ -828,7 +910,7 @@ mod tests {
         let _ = table.peers.push(PeerEntry {
             short_addr: learned_from_addr,
             pubkey: learned_from_pubkey,
-            capabilities: 0x1111,
+            capabilities: Capabilities::new(0x1111),
             bloom: BloomFilter::new(),
             transport_addr: TransportAddr::empty(),
             last_seen_ticks: 10,
@@ -839,7 +921,7 @@ mod tests {
         let _ = table.peers.push(PeerEntry {
             short_addr: indirect_addr,
             pubkey: indirect_pubkey,
-            capabilities: 0x2222,
+            capabilities: Capabilities::new(0x2222),
             bloom: BloomFilter::new(),
             transport_addr: TransportAddr::empty(),
             last_seen_ticks: 20,
@@ -867,7 +949,7 @@ mod tests {
         let _ = table.peers.push(PeerEntry {
             short_addr: learned_from_addr,
             pubkey: learned_from_pubkey,
-            capabilities: 0x1111,
+            capabilities: Capabilities::new(0x1111),
             bloom: BloomFilter::new(),
             transport_addr: TransportAddr::empty(),
             last_seen_ticks: 10,
@@ -881,7 +963,7 @@ mod tests {
         let _ = table.peers.push(PeerEntry {
             short_addr: indirect_addr,
             pubkey: indirect_pubkey,
-            capabilities: 0x2222,
+            capabilities: Capabilities::new(0x2222),
             bloom: BloomFilter::new(),
             transport_addr: TransportAddr::empty(),
             last_seen_ticks: 20,
@@ -922,7 +1004,7 @@ mod tests {
         let _ = table.peers.push(PeerEntry {
             short_addr: indirect_a_addr,
             pubkey: indirect_a_pubkey,
-            capabilities: 0x3333,
+            capabilities: Capabilities::new(0x3333),
             bloom: BloomFilter::new(),
             transport_addr: TransportAddr::empty(),
             last_seen_ticks: 20,
@@ -933,7 +1015,7 @@ mod tests {
         let _ = table.peers.push(PeerEntry {
             short_addr: indirect_b_addr,
             pubkey: indirect_b_pubkey,
-            capabilities: 0x4444,
+            capabilities: Capabilities::new(0x4444),
             bloom: BloomFilter::new(),
             transport_addr: TransportAddr::empty(),
             last_seen_ticks: 20,
@@ -974,7 +1056,7 @@ mod tests {
         let _ = table.peers.push(PeerEntry {
             short_addr: c_addr,
             pubkey: c_pubkey,
-            capabilities: 0x7777,
+            capabilities: Capabilities::new(0x7777),
             bloom: BloomFilter::new(),
             transport_addr: TransportAddr::empty(),
             last_seen_ticks: 20,
@@ -1008,14 +1090,14 @@ mod tests {
         // H2H exchange: B tells A about C
         let payload = H2hPayload {
             full_pubkey: Some(b_pubkey),
-            capabilities: 0x8800,
+            capabilities: Capabilities::new(0x8800),
             uptime_secs: 100,
             peers: {
                 const NONE: Option<PeerInfo> = None;
                 let mut p = [NONE; H2H_MAX_PEER_ENTRIES];
                 p[0] = Some(PeerInfo {
                     pubkey: c_pubkey,
-                    capabilities: 0x9900,
+                    capabilities: Capabilities::new(0x9900),
                     hop_count: 0,
                 });
                 p
@@ -1062,7 +1144,7 @@ mod tests {
         let _ = table.peers.push(PeerEntry {
             short_addr: c_addr,
             pubkey: c_pubkey,
-            capabilities: 0xAA00,
+            capabilities: Capabilities::new(0xAA00),
             bloom: BloomFilter::new(),
             transport_addr: TransportAddr::empty(),
             last_seen_ticks: 20,
@@ -1075,7 +1157,7 @@ mod tests {
         let _ = table.peers.push(PeerEntry {
             short_addr: d_addr,
             pubkey: d_pubkey,
-            capabilities: 0xBB00,
+            capabilities: Capabilities::new(0xBB00),
             bloom: BloomFilter::new(),
             transport_addr: TransportAddr::empty(),
             last_seen_ticks: 20,
@@ -1114,7 +1196,7 @@ mod tests {
         // Bridge H2H with A
         let payload_a = H2hPayload {
             full_pubkey: Some(a_pubkey),
-            capabilities: 0xCC00,
+            capabilities: Capabilities::new(0xCC00),
             uptime_secs: 50,
             peers: {
                 const NONE: Option<PeerInfo> = None;
@@ -1127,7 +1209,7 @@ mod tests {
         // Bridge H2H with C
         let payload_c = H2hPayload {
             full_pubkey: Some(c_pubkey),
-            capabilities: 0xDD00,
+            capabilities: Capabilities::new(0xDD00),
             uptime_secs: 50,
             peers: {
                 const NONE: Option<PeerInfo> = None;
@@ -1170,7 +1252,7 @@ mod tests {
         let _ = table.peers.push(PeerEntry {
             short_addr: c_addr,
             pubkey: c_pubkey,
-            capabilities: 0xEE00,
+            capabilities: Capabilities::new(0xEE00),
             bloom: BloomFilter::new(),
             transport_addr: TransportAddr::empty(),
             last_seen_ticks: 20,

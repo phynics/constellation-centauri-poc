@@ -93,15 +93,15 @@ pub fn retained_body_from_bytes(bytes: &[u8]) -> RetainedBody {
 
 pub fn collect_known_store_routers(
     identity_short_addr: ShortAddr,
-    local_capabilities: u16,
+    local_capabilities: Capabilities,
     table: &RoutingTable,
 ) -> Vec<ShortAddr> {
     let mut routers = Vec::new();
-    if Capabilities::is_store_router_bits(local_capabilities) {
+    if local_capabilities.is_store_router() {
         routers.push(identity_short_addr);
     }
     for peer in table.peers.iter() {
-        if Capabilities::is_store_router_bits(peer.capabilities)
+        if peer.capabilities.is_store_router()
             && !routers.iter().any(|existing| *existing == peer.short_addr)
         {
             routers.push(peer.short_addr);

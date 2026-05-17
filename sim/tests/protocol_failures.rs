@@ -45,10 +45,10 @@ fn replayed_message_is_accepted_again_after_dedup_window_rollover() {
 fn retained_delivery_queue_overflow_drops_messages_for_sleeping_low_power_nodes() {
     let mut cfg = sim::sim_state::SimConfig::default();
     cfg.n_active = 2;
-    cfg.capabilities[0] = routing_core::node::roles::Capabilities::ROUTE
-        | routing_core::node::roles::Capabilities::STORE;
-    cfg.capabilities[1] = routing_core::node::roles::Capabilities::LOW_ENERGY
-        | routing_core::node::roles::Capabilities::APPLICATION;
+    cfg.capabilities[0] = routing_core::node::roles::Capabilities::new(routing_core::node::roles::Capabilities::ROUTE
+        | routing_core::node::roles::Capabilities::STORE);
+    cfg.capabilities[1] = routing_core::node::roles::Capabilities::new(routing_core::node::roles::Capabilities::LOW_ENERGY
+        | routing_core::node::roles::Capabilities::APPLICATION);
     cfg.link_enabled[0][1] = false;
     cfg.link_enabled[1][0] = false;
 
@@ -91,10 +91,10 @@ fn retained_delivery_queue_overflow_drops_messages_for_sleeping_low_power_nodes(
 fn missing_delivery_ack_causes_duplicate_redelivery_on_next_wake() {
     let mut cfg = sim::sim_state::SimConfig::default();
     cfg.n_active = 2;
-    cfg.capabilities[0] = routing_core::node::roles::Capabilities::ROUTE
-        | routing_core::node::roles::Capabilities::STORE;
-    cfg.capabilities[1] = routing_core::node::roles::Capabilities::LOW_ENERGY
-        | routing_core::node::roles::Capabilities::APPLICATION;
+    cfg.capabilities[0] = routing_core::node::roles::Capabilities::new(routing_core::node::roles::Capabilities::ROUTE
+        | routing_core::node::roles::Capabilities::STORE);
+    cfg.capabilities[1] = routing_core::node::roles::Capabilities::new(routing_core::node::roles::Capabilities::LOW_ENERGY
+        | routing_core::node::roles::Capabilities::APPLICATION);
     cfg.link_enabled[0][1] = true;
     cfg.link_enabled[1][0] = true;
     cfg.node_behaviors[1].scan = false;

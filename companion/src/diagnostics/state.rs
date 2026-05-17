@@ -8,6 +8,7 @@
 //!   become a second protocol model.
 use routing_core::crypto::identity::{NetworkAddr, PubKey, ShortAddr};
 use routing_core::node::roles::Capabilities;
+use routing_core::routing::table::PeerEntry;
 
 use crate::node::storage::LocalNodeRecord;
 use crate::onboarding::marker_summary;
@@ -17,7 +18,7 @@ pub struct LocalNodeView {
     pub short_addr: ShortAddr,
     pub pubkey: PubKey,
     pub authority_pubkey: PubKey,
-    pub capabilities: u16,
+    pub capabilities: Capabilities,
     pub protocol_signature: String,
     pub network_marker: String,
     pub storage_dir: String,
@@ -36,14 +37,14 @@ pub struct DiscoveredPeer {
     pub network_pubkey_hex: Option<String>,
     pub network_addr: Option<NetworkAddr>,
     pub node_pubkey_hex: Option<String>,
-    pub capabilities: Option<u16>,
+    pub capabilities: Option<Capabilities>,
     pub last_error: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct RoutingPeerView {
     pub short_addr: ShortAddr,
-    pub capabilities: u16,
+    pub capabilities: Capabilities,
     pub trust: u8,
     pub hop_count: u8,
     pub last_seen_ticks: u64,
@@ -60,19 +61,67 @@ pub struct SharedState {
     pub events: Vec<String>,
 }
 
+impl From<&LocalNodeRecord> for LocalNodeView {
+    fn from(local_node: &LocalNodeRecord) -> Self {
+        Self {
+            short_addr: local_node.short_addr,
+            pubkey: local_node.pubkey,
+            authority_pubkey: local_node.authority_pubkey,
+            capabilities: local_node.capabilities,
+            protocol_signature: String::from_utf8_lossy(&local_node.protocol_signature).into_owned(),
+            network_marker: marker_summary(&local_node.network_marker),
+            storage_dir: local_node.storage_dir.display().to_string(),
+        }
+    }
+}
+
+impl From<&PeerEntry> for RoutingPeerView {
+    fn from(peer: &PeerEntry) -> Self {
+        Self {
+            short_addr: peer.short_addr,
+            capabilities: peer.capabilities.into(),
+            trust: peer.trust,
+            hop_count: peer.hop_count,
+            last_seen_ticks: peer.last_seen_ticks,
+            transport_len: peer.transport_addr.len,
+        }
+    }
+}
+
+impl DiscoveredPeer {
+    pub fn from_scan_observation(
+        id: String,
+        name: Option<String>,
+        rssi: Option<i16>,
+        last_seen_unix_secs: u64,
+        has_onboarding_service: bool,
+        short_addr: Option<ShortAddr>,
+        capabilities: Option<Capabilities>,
+        network_addr: Option<NetworkAddr>,
+        onboarding_ready: bool,
+    ) -> Self {
+        Self {
+            id,
+            short_addr,
+            name,
+            rssi,
+            last_seen_unix_secs,
+            has_onboarding_service,
+            has_constellation_signature: false,
+            onboarding_ready,
+            network_pubkey_hex: None,
+            network_addr,
+            node_pubkey_hex: None,
+            capabilities,
+            last_error: None,
+        }
+    }
+}
+
 impl SharedState {
     pub fn new(local_node: &LocalNodeRecord) -> Self {
         Self {
-            local: LocalNodeView {
-                short_addr: local_node.short_addr,
-                pubkey: local_node.pubkey,
-                authority_pubkey: local_node.authority_pubkey,
-                capabilities: local_node.capabilities,
-                protocol_signature: String::from_utf8_lossy(&local_node.protocol_signature)
-                    .into_owned(),
-                network_marker: marker_summary(&local_node.network_marker),
-                storage_dir: local_node.storage_dir.display().to_string(),
-            },
+            local: LocalNodeView::from(local_node),
             scanning: false,
             advertising: false,
             peers: Vec::new(),
@@ -126,7 +175,7 @@ impl SharedState {
         has_constellation_signature: bool,
         onboarding_ready: bool,
         node_pubkey_hex: Option<String>,
-        capabilities: Option<u16>,
+        capabilities: Option<Capabilities>,
     ) {
         if let Some(peer) = self.peers.iter_mut().find(|peer| peer.id == id) {
             peer.short_addr = short_addr;
@@ -166,24 +215,24 @@ impl SharedState {
     }
 }
 
-pub fn capability_summary(bits: u16) -> String {
+pub fn capability_summary(bits: Capabilities) -> String {
     let mut parts = Vec::new();
-    if bits & Capabilities::ROUTE != 0 {
+    if bits.contains(Capabilities::ROUTE) {
         parts.push("ROUTE");
     }
-    if bits & Capabilities::STORE != 0 {
+    if bits.contains(Capabilities::STORE) {
         parts.push("STORE");
     }
-    if bits & Capabilities::BRIDGE != 0 {
+    if bits.contains(Capabilities::BRIDGE) {
         parts.push("BRIDGE");
     }
-    if bits & Capabilities::APPLICATION != 0 {
+    if bits.contains(Capabilities::APPLICATION) {
         parts.push("APP");
     }
-    if bits & Capabilities::LOW_ENERGY != 0 {
+    if bits.contains(Capabilities::LOW_ENERGY) {
         parts.push("LOW_ENERGY");
     }
-    if bits & Capabilities::MOBILE != 0 {
+    if bits.contains(Capabilities::MOBILE) {
         parts.push("MOBILE");
     }
     if parts.is_empty() {

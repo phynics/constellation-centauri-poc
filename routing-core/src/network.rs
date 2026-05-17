@@ -10,6 +10,8 @@
 //!   and H2H maintenance are separate protocol lanes.
 
 use crate::crypto::identity::{NetworkAddr, ShortAddr};
+use crate::node::roles::Capabilities;
+use crate::onboarding::DiscoveryInfo;
 use crate::protocol::h2h::{H2hFrame, H2hPayload};
 use crate::transport::TransportAddr;
 use heapless::Vec;
@@ -22,10 +24,29 @@ pub const MAX_SCAN_RESULTS: usize = 16;
 
 /// A neighbor discovered via advertisement / beacon.
 pub struct DiscoveryEvent {
-    pub short_addr: ShortAddr,
-    pub capabilities: u16,
-    pub network_addr: NetworkAddr,
+    pub info: DiscoveryInfo,
     pub transport_addr: TransportAddr,
+}
+
+impl DiscoveryEvent {
+    pub const fn new(info: DiscoveryInfo, transport_addr: TransportAddr) -> Self {
+        Self {
+            info,
+            transport_addr,
+        }
+    }
+
+    pub const fn short_addr(&self) -> ShortAddr {
+        self.info.short_addr
+    }
+
+    pub const fn capabilities(&self) -> Capabilities {
+        self.info.capabilities
+    }
+
+    pub const fn network_addr(&self) -> NetworkAddr {
+        self.info.network_addr
+    }
 }
 
 /// Data received from an inbound H2H connection (responder side).

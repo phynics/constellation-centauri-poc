@@ -33,6 +33,10 @@ impl Capabilities {
         Self(bits)
     }
 
+    pub const fn bits(self) -> u16 {
+        self.0
+    }
+
     pub const fn contains(&self, flag: u16) -> bool {
         self.0 & flag != 0
     }
@@ -74,5 +78,17 @@ impl Capabilities {
 
     pub fn from_bytes(bytes: [u8; 2]) -> Self {
         Self(u16::from_le_bytes(bytes))
+    }
+}
+
+impl From<u16> for Capabilities {
+    fn from(value: u16) -> Self {
+        Self(value)
+    }
+}
+
+impl From<Capabilities> for u16 {
+    fn from(value: Capabilities) -> Self {
+        value.0
     }
 }

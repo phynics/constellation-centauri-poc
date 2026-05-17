@@ -13,6 +13,7 @@ use embassy_sync::mutex::Mutex as AsyncMutex;
 use embassy_time::{Duration, Timer};
 
 use routing_core::crypto::identity::NodeIdentity;
+use routing_core::node::roles::Capabilities;
 use routing_core::routing::table::RoutingTable;
 
 use crate::sim_state::{NodeSnapshot, PeerSnapshot, SimConfig, TuiState, MAX_NODES};
@@ -33,7 +34,7 @@ pub async fn run_snapshot_loop(
             let cfg = sim_config.lock().unwrap();
             let types: [crate::sim_state::NodeType; MAX_NODES] =
                 core::array::from_fn(|i| cfg.node_types[i]);
-            let capabilities: [u16; MAX_NODES] = core::array::from_fn(|i| cfg.capabilities[i]);
+            let capabilities: [Capabilities; MAX_NODES] = core::array::from_fn(|i| cfg.capabilities[i]);
             (cfg.n_active, types, capabilities)
         };
 

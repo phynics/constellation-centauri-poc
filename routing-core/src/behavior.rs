@@ -27,9 +27,10 @@ use crate::store_forward::{
 };
 use crate::transport::TransportAddr;
 
-pub struct InboundH2hSync {
+pub struct ResolvedInboundH2hSession {
+    pub peer_transport_addr: TransportAddr,
     pub partner_short: ShortAddr,
-    pub partner_capabilities: u16,
+    pub partner_capabilities: Capabilities,
 }
 
 #[derive(Debug)]
@@ -87,7 +88,7 @@ const DISCOVERY_DURATION_MS: u64 = 7_000;
 ///   already knows.
 pub async fn build_h2h_payload<M: RawMutex>(
     identity: &NodeIdentity,
-    capabilities: u16,
+    capabilities: Capabilities,
     uptime: &Mutex<M, u32>,
     routing_table: &Mutex<M, RoutingTable>,
     partner_addr: &ShortAddr,
@@ -153,10 +154,10 @@ pub async fn respond_to_inbound_h2h_sync<M: RawMutex, R: H2hResponder>(
     responder: &mut R,
     inbound: &crate::network::InboundH2h,
     identity: &NodeIdentity,
-    capabilities: u16,
+    capabilities: Capabilities,
     uptime: &Mutex<M, u32>,
     routing_table: &Mutex<M, RoutingTable>,
-) -> Result<InboundH2hSync, InboundH2hSyncError> {
+) -> Result<ResolvedInboundH2hSession, InboundH2hSyncError> {
     let Some(partner_short) = resolve_inbound_partner_short_addr(inbound, routing_table).await
     else {
         return Err(InboundH2hSyncError::UnresolvedPartner);
@@ -186,7 +187,8 @@ pub async fn respond_to_inbound_h2h_sync<M: RawMutex, R: H2hResponder>(
         .await
         .map_err(InboundH2hSyncError::SendResponse)?;
 
-    Ok(InboundH2hSync {
+    Ok(ResolvedInboundH2hSession {
+        peer_transport_addr: inbound.peer_transport_addr,
         partner_short,
         partner_capabilities: inbound.peer_payload.capabilities,
     })
@@ -201,15 +203,15 @@ pub async fn apply_discovery_events<M: RawMutex>(
     let now = Instant::now().as_ticks();
     for event in events.iter() {
         let is_new = table.update_peer_compact(
-            event.short_addr,
-            event.capabilities,
+            event.info.short_addr,
+            event.info.capabilities,
             event.transport_addr,
             now,
         );
         if is_new {
             log::info!(
                 "[central] New peer {:02x?} ({} total)",
-                &event.short_addr[..4],
+                &event.info.short_addr[..4],
                 table.peers.len()
             );
         }
@@ -219,14 +221,14 @@ pub async fn apply_discovery_events<M: RawMutex>(
 /// Collect current H2H connection candidates for which this node is the initiator.
 pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
     identity: &NodeIdentity,
-    capabilities: u16,
+    capabilities: Capabilities,
     routing_table: &Mutex<M, RoutingTable>,
 ) -> heapless::Vec<(ShortAddr, TransportAddr), 32> {
     let our_addr = *identity.short_addr();
     let table = routing_table.lock().await;
     let mut v = heapless::Vec::new();
 
-    let is_low_power_endpoint = Capabilities::is_low_power_endpoint_bits(capabilities);
+    let is_low_power_endpoint = capabilities.is_low_power_endpoint();
 
     // Low-power endpoints use an explicit wake/uplink model instead of trying
     // to maintain eager pair ownership with every router they can hear.
@@ -242,7 +244,7 @@ pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
             heapless::Vec::new();
 
         for peer in table.peers.iter() {
-            if peer.transport_addr.is_empty() || (peer.capabilities & Capabilities::ROUTE == 0) {
+            if peer.transport_addr.is_empty() || !peer.capabilities.is_knot() {
                 continue;
             }
 
@@ -251,7 +253,7 @@ pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
                 peer.transport_addr,
                 peer.trust,
                 peer.last_seen_ticks,
-                Capabilities::is_store_router_bits(peer.capabilities),
+                peer.capabilities.is_store_router(),
             );
 
             let _ = routers.push(candidate);
@@ -305,8 +307,7 @@ pub async fn collect_h2h_peer_snapshots<M: RawMutex>(
         // Full routing participants should not proactively H2H into low-power
         // endpoint nodes. They can still learn those endpoints from discovery,
         // while the endpoint initiates uplink H2H when it needs richer state.
-        let peer_is_low_power_endpoint =
-            Capabilities::is_low_power_endpoint_bits(peer.capabilities);
+        let peer_is_low_power_endpoint = peer.capabilities.is_low_power_endpoint();
         if peer_is_low_power_endpoint {
             continue;
         }
@@ -343,7 +344,7 @@ pub fn is_backup_router_for_lpn(
 pub async fn run_initiator_h2h_once<M, I>(
     initiator: &mut I,
     identity: &NodeIdentity,
-    capabilities: u16,
+    capabilities: Capabilities,
     routing_table: &Mutex<M, RoutingTable>,
     uptime: &Mutex<M, u32>,
 ) where
@@ -383,7 +384,7 @@ pub async fn run_initiator_h2h_once<M, I>(
 pub async fn run_initiator_loop_with_observer<M, I, O>(
     initiator: &mut I,
     identity: &NodeIdentity,
-    capabilities: u16,
+    capabilities: Capabilities,
     routing_table: &Mutex<M, RoutingTable>,
     uptime: &Mutex<M, u32>,
     observer: &mut O,
@@ -416,7 +417,7 @@ where
         }
 
         for (peer_addr, peer_transport_addr) in peer_snapshots.iter() {
-            let offset = if Capabilities::is_low_power_endpoint_bits(capabilities) {
+            let offset = if capabilities.is_low_power_endpoint() {
                 0
             } else {
                 h2h::slot_offset(&our_addr, peer_addr)
@@ -453,7 +454,7 @@ where
                     let _ = initiator.finish_h2h_session().await;
                     observer.after_peer(initiator).await;
 
-                    if Capabilities::is_low_power_endpoint_bits(capabilities) {
+                    if capabilities.is_low_power_endpoint() {
                         break;
                     }
                 }
@@ -496,10 +497,10 @@ pub async fn drain_initiator_h2h_frames_until_done<I: H2hInitiator>(initiator: &
 pub async fn run_responder_store_forward_followups<M, R, S, O>(
     responder: &mut R,
     identity: &NodeIdentity,
-    local_capabilities: u16,
+    local_capabilities: Capabilities,
     routing_table: &Mutex<M, RoutingTable>,
     partner_short: ShortAddr,
-    partner_capabilities: u16,
+    partner_capabilities: Capabilities,
     backend: &mut S,
     observer: &mut O,
     now_secs: u32,
@@ -510,7 +511,7 @@ pub async fn run_responder_store_forward_followups<M, R, S, O>(
     O: StoreForwardObserver,
 {
     let local_addr = *identity.short_addr();
-    if Capabilities::is_low_power_endpoint_bits(partner_capabilities) {
+    if partner_capabilities.is_low_power_endpoint() {
         let pending = backend.pending_for_delivery(local_addr, partner_short);
         let summary = H2hFrame::DeliverySummary {
             pending_count: pending.len().min(u8::MAX as usize) as u8,
@@ -562,9 +563,7 @@ pub async fn run_responder_store_forward_followups<M, R, S, O>(
         return;
     }
 
-    if !(Capabilities::is_store_router_bits(local_capabilities)
-        && Capabilities::is_store_router_bits(partner_capabilities))
-    {
+    if !(local_capabilities.is_store_router() && partner_capabilities.is_store_router()) {
         return;
     }
 
@@ -659,7 +658,7 @@ pub async fn run_responder_store_forward_followups<M, R, S, O>(
 pub async fn run_initiator_store_forward_followups<M, I, S, O>(
     initiator: &mut I,
     identity: &NodeIdentity,
-    local_capabilities: u16,
+    local_capabilities: Capabilities,
     routing_table: &Mutex<M, RoutingTable>,
     peer_addr: ShortAddr,
     backend: &mut S,
@@ -672,7 +671,7 @@ pub async fn run_initiator_store_forward_followups<M, I, S, O>(
     O: StoreForwardObserver,
 {
     let local_addr = *identity.short_addr();
-    if Capabilities::is_low_power_endpoint_bits(local_capabilities) {
+    if local_capabilities.is_low_power_endpoint() {
         loop {
             match initiator.receive_h2h_frame().await {
                 Ok(H2hFrame::DeliverySummary { pending_count, .. }) => {
@@ -696,7 +695,7 @@ pub async fn run_initiator_store_forward_followups<M, I, S, O>(
         return;
     }
 
-    if !Capabilities::is_store_router_bits(local_capabilities) {
+    if !local_capabilities.is_store_router() {
         return;
     }
 
@@ -798,7 +797,7 @@ pub async fn run_initiator_store_forward_followups<M, I, S, O>(
 pub async fn run_responder_loop<M, R>(
     responder: &mut R,
     identity: &NodeIdentity,
-    capabilities: u16,
+    capabilities: Capabilities,
     routing_table: &Mutex<M, RoutingTable>,
     uptime: &Mutex<M, u32>,
 ) -> !
@@ -866,7 +865,7 @@ where
 pub async fn run_initiator_loop<M, I>(
     initiator: &mut I,
     identity: &NodeIdentity,
-    capabilities: u16,
+    capabilities: Capabilities,
     routing_table: &Mutex<M, RoutingTable>,
     uptime: &Mutex<M, u32>,
 ) -> !

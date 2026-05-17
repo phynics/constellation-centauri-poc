@@ -19,6 +19,7 @@ use routing_core::network::{
     DiscoveryEvent, H2hInitiator, H2hResponder, InboundH2h, NetworkError, MAX_SCAN_RESULTS,
 };
 use routing_core::node::roles::Capabilities;
+use routing_core::onboarding::DiscoveryInfo;
 use routing_core::protocol::h2h::{H2hFrame, H2hPayload};
 use routing_core::transport::TransportAddr;
 
@@ -193,7 +194,7 @@ impl H2hInitiator for SimInitiator {
             if !config.node_behaviors[i].advertise {
                 continue;
             }
-            if low_power_endpoint && config.capabilities[i] & Capabilities::ROUTE == 0 {
+            if low_power_endpoint && !config.capabilities[i].contains(Capabilities::ROUTE) {
                 continue;
             }
             if !config.link_enabled[self.node_idx][i] {
@@ -214,9 +215,11 @@ impl H2hInitiator for SimInitiator {
             for idx in candidate_indices {
                 let node = &self.all_nodes[idx];
                 let _ = results.push(DiscoveryEvent {
-                    short_addr: node.short_addr,
-                    capabilities: config.capabilities[idx],
-                    network_addr: ONBOARDING_READY_NETWORK_ADDR,
+                    info: DiscoveryInfo {
+                        short_addr: node.short_addr,
+                        capabilities: config.capabilities[idx],
+                        network_addr: ONBOARDING_READY_NETWORK_ADDR,
+                    },
                     transport_addr: TransportAddr::ble(node.mac),
                 });
             }
@@ -233,9 +236,11 @@ impl H2hInitiator for SimInitiator {
             let idx = candidate_indices.swap_remove(pick);
             let node = &self.all_nodes[idx];
             let _ = results.push(DiscoveryEvent {
-                short_addr: node.short_addr,
-                capabilities: config.capabilities[idx],
-                network_addr: ONBOARDING_READY_NETWORK_ADDR,
+                info: DiscoveryInfo {
+                    short_addr: node.short_addr,
+                    capabilities: config.capabilities[idx],
+                    network_addr: ONBOARDING_READY_NETWORK_ADDR,
+                },
                 transport_addr: TransportAddr::ble(node.mac),
             });
         }
@@ -262,7 +267,7 @@ impl H2hInitiator for SimInitiator {
             let self_caps = config.capabilities[self.node_idx];
             let peer_caps = config.capabilities[peer_idx];
             let allow_low_power_uplink =
-                is_low_power_endpoint(self_caps) && peer_caps & Capabilities::ROUTE != 0;
+                is_low_power_endpoint(self_caps) && peer_caps.contains(Capabilities::ROUTE);
 
             if self.node_idx >= config.n_active || peer_idx >= config.n_active {
                 return Err(NetworkError::PeerInactive);
@@ -327,8 +332,8 @@ impl H2hInitiator for SimInitiator {
     }
 }
 
-fn is_low_power_endpoint(capabilities: u16) -> bool {
-    Capabilities::is_low_power_endpoint_bits(capabilities)
+fn is_low_power_endpoint(capabilities: Capabilities) -> bool {
+    capabilities.is_low_power_endpoint()
 }
 
 #[cfg(test)]
@@ -412,13 +417,13 @@ mod tests {
         let mut peers = [NONE; routing_core::config::H2H_MAX_PEER_ENTRIES];
         peers[0] = Some(PeerInfo {
             pubkey: [seed.wrapping_add(1); 32],
-            capabilities: 0x2200 + seed as u16,
+            capabilities: Capabilities::new(0x2200 + seed as u16),
             hop_count: 1,
         });
 
         H2hPayload {
             full_pubkey: Some([seed; 32]),
-            capabilities: 0x1100 + seed as u16,
+            capabilities: Capabilities::new(0x1100 + seed as u16),
             uptime_secs: 77 + seed as u32,
             peers,
             peer_count: 1,
@@ -459,8 +464,8 @@ mod tests {
         let results = block_on(initiator.scan(0));
 
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].short_addr, nodes[1].short_addr);
-        assert_eq!(results[1].short_addr, nodes[2].short_addr);
+        assert_eq!(results[0].short_addr(), nodes[1].short_addr);
+        assert_eq!(results[1].short_addr(), nodes[2].short_addr);
         assert!(results
             .iter()
             .all(|event| event.transport_addr.as_ble_mac() != Some(nodes[0].mac)));
@@ -478,7 +483,7 @@ mod tests {
         // Sim nodes don't model enrollment, so all advertise OnboardingReady
         assert!(results
             .iter()
-            .all(|event| event.network_addr == ONBOARDING_READY_NETWORK_ADDR));
+            .all(|event| event.network_addr() == ONBOARDING_READY_NETWORK_ADDR));
     }
 
     #[test]
@@ -492,7 +497,7 @@ mod tests {
         let results = block_on(initiator.scan(0));
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].short_addr, nodes[2].short_addr);
+        assert_eq!(results[0].short_addr(), nodes[2].short_addr);
     }
 
     #[test]
@@ -813,8 +818,8 @@ mod tests {
             let (endpoint, router) = endpoint_router_pair(nodes, 0, 1);
             {
                 let mut cfg = config.lock().unwrap();
-                cfg.capabilities[endpoint] = Capabilities::LOW_ENERGY | Capabilities::APPLICATION;
-                cfg.capabilities[router] = Capabilities::ROUTE | Capabilities::STORE;
+                cfg.capabilities[endpoint] = Capabilities::new(Capabilities::LOW_ENERGY | Capabilities::APPLICATION);
+                cfg.capabilities[router] = Capabilities::new(Capabilities::ROUTE | Capabilities::STORE);
                 cfg.node_behaviors[endpoint].scan = false;
                 cfg.node_behaviors[endpoint].initiate_h2h = false;
                 cfg.node_behaviors[router].respond_h2h = true;
@@ -825,7 +830,7 @@ mod tests {
 
             let scan_results = initiator.scan(0).await;
             assert_eq!(scan_results.len(), 1);
-            assert_eq!(scan_results[0].short_addr, nodes[router].short_addr);
+            assert_eq!(scan_results[0].short_addr(), nodes[router].short_addr);
             apply_discovery_events(&routing_tables[endpoint], &scan_results).await;
 
             let endpoint_caps = {
@@ -897,7 +902,7 @@ mod tests {
                 let mut table = routing_tables[router].lock().await;
                 table.update_peer_compact(
                     nodes[endpoint].short_addr,
-                    Capabilities::LOW_ENERGY | Capabilities::APPLICATION,
+                    Capabilities::new(Capabilities::LOW_ENERGY | Capabilities::APPLICATION),
                     TransportAddr::ble(nodes[endpoint].mac),
                     1,
                 );
@@ -906,7 +911,7 @@ mod tests {
             let router_caps = Capabilities::ROUTE | Capabilities::STORE;
             let candidates = collect_h2h_peer_snapshots(
                 &identities[router],
-                router_caps,
+                Capabilities::new(router_caps),
                 &routing_tables[router],
             )
             .await;

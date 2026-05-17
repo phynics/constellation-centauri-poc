@@ -51,7 +51,7 @@ pub async fn run_command_loop(
                         (
                             cfg.capabilities[from],
                             if is_broadcast {
-                                0
+                                routing_core::node::roles::Capabilities::new(0)
                             } else {
                                 cfg.capabilities[to]
                             },

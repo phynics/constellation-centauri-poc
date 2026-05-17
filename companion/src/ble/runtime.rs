@@ -32,6 +32,7 @@ use routing_core::facade::{
 };
 use routing_core::network::H2hResponder;
 use routing_core::network::{H2hInitiator, SESSION_KIND_H2H, SESSION_KIND_ROUTED};
+use routing_core::node::roles::Capabilities;
 use routing_core::onboarding::{
     is_constellation_protocol_signature, parse_discovery_from_manufacturer_data,
     parse_network_marker, NetworkMarker, NodeCertificate, CONSTELLATION_COMPANY_ID,
@@ -405,25 +406,26 @@ pub async fn run(
                             let (short_addr, capabilities, network_addr, onboarding_ready) =
                                 device.manufacturer_data.as_ref().and_then(|data| {
                                     parse_discovery_from_manufacturer_data(data).map(|info| {
-                                        (Some(info.short_addr), Some(info.capabilities), Some(info.network_addr), info.network_addr == ONBOARDING_READY_NETWORK_ADDR)
+                                        (
+                                            Some(info.short_addr),
+                                            Some(info.capabilities.into()),
+                                            Some(info.network_addr),
+                                            info.network_addr == ONBOARDING_READY_NETWORK_ADDR,
+                                        )
                                     })
                                 }).unwrap_or((None, None, None, false));
 
-                            shared.lock().unwrap().upsert_peer(DiscoveredPeer {
-                                id: id.clone(),
+                            shared.lock().unwrap().upsert_peer(DiscoveredPeer::from_scan_observation(
+                                id.clone(),
+                                device.name.clone(),
+                                device.rssi,
+                                now_secs(),
+                                has_service,
                                 short_addr,
-                                name: device.name.clone(),
-                                rssi: device.rssi,
-                                last_seen_unix_secs: now_secs(),
-                                has_onboarding_service: has_service,
-                                has_constellation_signature: false,
-                                onboarding_ready,
-                                network_pubkey_hex: None, // still need GATT read for full pubkey
-                                network_addr,
-                                node_pubkey_hex: None,
                                 capabilities,
-                                last_error: None,
-                            });
+                                network_addr,
+                                onboarding_ready,
+                            ));
                             if !inspected.contains(&id) && queued_for_inspection.insert(id.clone()) {
                                 inspection_queue.push_back(id);
                             }
@@ -546,7 +548,7 @@ fn handle_peripheral_request(
             } else if char_uuid == NODE_PUBKEY_CHAR_UUID {
                 local_node.pubkey.to_vec()
             } else if char_uuid == CAPABILITIES_CHAR_UUID {
-                local_node.capabilities.to_le_bytes().to_vec()
+                local_node.capabilities.to_bytes().to_vec()
             } else if char_uuid == SHORT_ADDR_CHAR_UUID {
                 local_node.short_addr.to_vec()
             } else if char_uuid == L2CAP_PSM_CHAR_UUID {
@@ -615,8 +617,11 @@ async fn enroll_device(
     let mut node_pubkey_arr = [0u8; 32];
     node_pubkey_arr.copy_from_slice(&node_pubkey);
     let node_capabilities = u16::from_le_bytes([capabilities[0], capabilities[1]]);
-    let certificate =
-        NodeCertificate::issue(&authority_identity, node_pubkey_arr, node_capabilities);
+    let certificate = NodeCertificate::issue(
+        &authority_identity,
+        node_pubkey_arr,
+        Capabilities::new(node_capabilities),
+    );
 
     shared
         .lock()
@@ -638,7 +643,7 @@ async fn enroll_device(
         .write_characteristic(
             &device_id,
             CERT_CAPABILITIES_CHAR_UUID,
-            certificate.capabilities.to_le_bytes().to_vec(),
+            certificate.capabilities.to_bytes().to_vec(),
             blew::central::WriteType::WithResponse,
         )
         .await?;
@@ -731,7 +736,7 @@ async fn inspect_device(
             None
         },
         if capabilities.len() == 2 {
-            Some(u16::from_le_bytes([capabilities[0], capabilities[1]]))
+            Some(Capabilities::from(u16::from_le_bytes([capabilities[0], capabilities[1]])))
         } else {
             None
         },
@@ -750,7 +755,7 @@ async fn run_companion_responder(
     shared: Arc<Mutex<SharedState>>,
     responder: &mut MacResponder,
     identity: &NodeIdentity,
-    capabilities: u16,
+    capabilities: Capabilities,
     routing_table: Arc<AsyncMutex<NoopRawMutex, RoutingTable>>,
     uptime: Arc<AsyncMutex<NoopRawMutex, u32>>,
 ) -> ! {
@@ -816,14 +821,7 @@ async fn update_routing_snapshot(
         table
             .peers
             .iter()
-            .map(|peer| crate::diagnostics::state::RoutingPeerView {
-                short_addr: peer.short_addr,
-                capabilities: peer.capabilities,
-                trust: peer.trust,
-                hop_count: peer.hop_count,
-                last_seen_ticks: peer.last_seen_ticks,
-                transport_len: peer.transport_addr.len,
-            })
+            .map(crate::diagnostics::state::RoutingPeerView::from)
             .collect::<Vec<_>>()
     };
     let uptime_secs = *uptime.lock().await;
@@ -849,7 +847,11 @@ async fn send_message_to_peer(
         let table = routing_table.lock().await;
         let mut table = table;
         let identity = NodeIdentity::from_bytes(&local_node.secret);
-        let mut mesh = MeshFacade::new(&mut table, &identity, local_node.capabilities);
+        let mut mesh = MeshFacade::new(
+            &mut table,
+            &identity,
+            local_node.capabilities,
+        );
         mesh.plan_utf8_message(destination, message_id, nonce, body.as_bytes())
             .map_err(|err| format!("send plan error: {err:?}"))?
     };
@@ -888,7 +890,11 @@ async fn send_ping_to_peer(
         let table = routing_table.lock().await;
         let mut table = table;
         let identity = NodeIdentity::from_bytes(&local_node.secret);
-        let mut mesh = MeshFacade::new(&mut table, &identity, local_node.capabilities);
+        let mut mesh = MeshFacade::new(
+            &mut table,
+            &identity,
+            local_node.capabilities,
+        );
         mesh.plan_ping(destination, request_id, now_secs().saturating_mul(1000))
             .map_err(|err| format!("failed to build ping packet: {err:?}"))?
     };
@@ -1054,7 +1060,11 @@ async fn handle_companion_routed_packet(
     let outcome = {
         let mut table = routing_table.lock().await;
         let identity = NodeIdentity::from_bytes(&local_node.secret);
-        let mut mesh = MeshFacade::new(&mut table, &identity, local_node.capabilities);
+        let mut mesh = MeshFacade::new(
+            &mut table,
+            &identity,
+            local_node.capabilities,
+        );
         mesh.receive(peer_transport_addr, packet)
     };
     let mut observer = CompanionRoutedObserver { shared };

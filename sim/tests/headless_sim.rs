@@ -96,8 +96,8 @@ fn field_deployment_low_power_endpoints_converge_to_routers() {
     let mut chosen = None;
     'outer: for le in 0..cfg.n_active {
         let le_caps = cfg.capabilities[le];
-        let is_le = le_caps & routing_core::node::roles::Capabilities::LOW_ENERGY != 0
-            && le_caps & routing_core::node::roles::Capabilities::ROUTE == 0;
+        let is_le = le_caps.contains(routing_core::node::roles::Capabilities::LOW_ENERGY)
+            && !le_caps.contains(routing_core::node::roles::Capabilities::ROUTE);
         if !is_le {
             continue;
         }
@@ -106,7 +106,7 @@ fn field_deployment_low_power_endpoints_converge_to_routers() {
             if le == router || !cfg.link_enabled[le][router] {
                 continue;
             }
-            if cfg.capabilities[router] & routing_core::node::roles::Capabilities::ROUTE == 0 {
+            if !cfg.capabilities[router].contains(routing_core::node::roles::Capabilities::ROUTE) {
                 continue;
             }
             chosen = Some((le, router));
@@ -160,10 +160,10 @@ fn lossy_edge_mobile_link_toggle_recovers_delivery() {
 fn low_power_endpoint_collects_retained_delivery_on_wake_h2h() {
     let mut cfg = sim::sim_state::SimConfig::default();
     cfg.n_active = 2;
-    cfg.capabilities[0] = routing_core::node::roles::Capabilities::ROUTE
-        | routing_core::node::roles::Capabilities::STORE;
-    cfg.capabilities[1] = routing_core::node::roles::Capabilities::LOW_ENERGY
-        | routing_core::node::roles::Capabilities::APPLICATION;
+    cfg.capabilities[0] = routing_core::node::roles::Capabilities::new(routing_core::node::roles::Capabilities::ROUTE
+        | routing_core::node::roles::Capabilities::STORE);
+    cfg.capabilities[1] = routing_core::node::roles::Capabilities::new(routing_core::node::roles::Capabilities::LOW_ENERGY
+        | routing_core::node::roles::Capabilities::APPLICATION);
     cfg.node_behaviors[1].scan = false;
     cfg.node_behaviors[1].initiate_h2h = false;
     cfg.link_enabled[0][1] = false;
@@ -205,12 +205,12 @@ fn low_power_endpoint_collects_retained_delivery_on_wake_h2h() {
 fn retained_delivery_propagates_to_deterministic_backup_router() {
     let mut cfg = sim::sim_state::SimConfig::default();
     cfg.n_active = 3;
-    cfg.capabilities[0] = routing_core::node::roles::Capabilities::ROUTE
-        | routing_core::node::roles::Capabilities::STORE;
-    cfg.capabilities[1] = routing_core::node::roles::Capabilities::ROUTE
-        | routing_core::node::roles::Capabilities::STORE;
-    cfg.capabilities[2] = routing_core::node::roles::Capabilities::LOW_ENERGY
-        | routing_core::node::roles::Capabilities::APPLICATION;
+    cfg.capabilities[0] = routing_core::node::roles::Capabilities::new(routing_core::node::roles::Capabilities::ROUTE
+        | routing_core::node::roles::Capabilities::STORE);
+    cfg.capabilities[1] = routing_core::node::roles::Capabilities::new(routing_core::node::roles::Capabilities::ROUTE
+        | routing_core::node::roles::Capabilities::STORE);
+    cfg.capabilities[2] = routing_core::node::roles::Capabilities::new(routing_core::node::roles::Capabilities::LOW_ENERGY
+        | routing_core::node::roles::Capabilities::APPLICATION);
 
     // Keep the LPN offline while routers replicate among themselves so this
     // test proves automatic propagation rather than wake-driven delivery.
@@ -238,12 +238,12 @@ fn retained_delivery_propagates_to_deterministic_backup_router() {
 fn low_power_endpoint_falls_back_to_backup_router_when_primary_is_unreachable() {
     let mut cfg = sim::sim_state::SimConfig::default();
     cfg.n_active = 3;
-    cfg.capabilities[0] = routing_core::node::roles::Capabilities::ROUTE
-        | routing_core::node::roles::Capabilities::STORE;
-    cfg.capabilities[1] = routing_core::node::roles::Capabilities::ROUTE
-        | routing_core::node::roles::Capabilities::STORE;
-    cfg.capabilities[2] = routing_core::node::roles::Capabilities::LOW_ENERGY
-        | routing_core::node::roles::Capabilities::APPLICATION;
+    cfg.capabilities[0] = routing_core::node::roles::Capabilities::new(routing_core::node::roles::Capabilities::ROUTE
+        | routing_core::node::roles::Capabilities::STORE);
+    cfg.capabilities[1] = routing_core::node::roles::Capabilities::new(routing_core::node::roles::Capabilities::ROUTE
+        | routing_core::node::roles::Capabilities::STORE);
+    cfg.capabilities[2] = routing_core::node::roles::Capabilities::new(routing_core::node::roles::Capabilities::LOW_ENERGY
+        | routing_core::node::roles::Capabilities::APPLICATION);
 
     // The LPN starts offline so routers must first replicate automatically.
     cfg.link_enabled[2][0] = false;

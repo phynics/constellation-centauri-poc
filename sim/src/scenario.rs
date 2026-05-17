@@ -227,7 +227,7 @@ fn field_deployment() -> SimConfig {
 fn blank_config(n_active: usize) -> SimConfig {
     let mut cfg = SimConfig::default();
     cfg.n_active = n_active;
-    cfg.capabilities = [0; MAX_NODES];
+    cfg.capabilities = [Capabilities::new(0); MAX_NODES];
     cfg.node_types = core::array::from_fn(|_| NodeType::Sensor);
     cfg.node_behaviors = core::array::from_fn(|_| NodeBehavior::default());
     cfg
@@ -287,7 +287,7 @@ fn assign_mobile(cfg: &mut SimConfig, nodes: &[usize]) {
 }
 
 fn add_caps(cfg: &mut SimConfig, node: usize, flags: u16) {
-    cfg.capabilities[node] |= flags;
+    cfg.capabilities[node] = Capabilities::new(cfg.capabilities[node].bits() | flags);
 }
 
 fn enable_bidirectional_link(cfg: &mut SimConfig, a: usize, b: usize) {
@@ -301,7 +301,7 @@ mod tests {
     fn count_role(cfg: &SimConfig, flag: u16) -> usize {
         cfg.capabilities[..cfg.n_active]
             .iter()
-            .filter(|bits| (**bits & flag) != 0)
+            .filter(|bits| bits.contains(flag))
             .count()
     }
 
@@ -309,7 +309,7 @@ mod tests {
         cfg.capabilities[..cfg.n_active]
             .iter()
             .filter(|bits| {
-                (**bits & Capabilities::ROUTE) != 0 && (**bits & Capabilities::BRIDGE) == 0
+                bits.contains(Capabilities::ROUTE) && !bits.contains(Capabilities::BRIDGE)
             })
             .count()
     }

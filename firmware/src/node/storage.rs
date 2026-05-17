@@ -11,6 +11,7 @@
 
 use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use routing_core::crypto::identity::{NodeIdentity, PubKey, Signature};
+use routing_core::node::roles::Capabilities;
 use routing_core::onboarding::NodeCertificate;
 
 /// Magic bytes to identify a provisioned node.
@@ -86,7 +87,7 @@ impl StoredMembership {
     pub fn certificate_for(&self, identity: &NodeIdentity) -> NodeCertificate {
         NodeCertificate {
             pubkey: identity.pubkey(),
-            capabilities: self.cert_capabilities,
+            capabilities: Capabilities::new(self.cert_capabilities),
             network_signature: self.cert_signature,
         }
     }

@@ -27,7 +27,7 @@ use embassy_futures::join::join4;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Timer};
 
 use bt_hci::cmd::le::{
     LeAddDeviceToFilterAcceptList, LeClearFilterAcceptList, LeCreateConn, LeSetScanEnable,
@@ -54,7 +54,6 @@ pub mod node;
 pub mod transport;
 
 use routing_core::behavior::{
-    apply_discovery_events, build_h2h_payload, collect_h2h_peer_snapshots,
     drain_responder_h2h_frames_until_done, respond_to_inbound_h2h_sync, run_heartbeat_loop,
     run_initiator_loop_with_observer, InboundH2hSyncError, InitiatorCycleObserver,
 };
@@ -64,9 +63,8 @@ use routing_core::crypto::identity::NodeIdentity;
 use routing_core::facade::{
     observe_routed_receive_outcome, DeliveredInfra, MeshFacade, RoutedReceiveObserver, RoutedTxPlan,
 };
-use routing_core::network::{H2hInitiator, H2hResponder};
+use routing_core::network::H2hResponder;
 use routing_core::node::roles::Capabilities;
-use routing_core::protocol::h2h::H2hFrame;
 use routing_core::routing::table::RoutingTable;
 
 use node::partitioned_flash::PartitionedFlash;
@@ -389,7 +387,7 @@ where
                     responder,
                     &inbound,
                     identity,
-                    capabilities,
+                    Capabilities::new(capabilities),
                     uptime,
                     routing_table,
                 )
@@ -590,7 +588,7 @@ async fn handle_routed_packet(
 
     let outcome = {
         let mut table = routing_table.lock().await;
-        let mut mesh = MeshFacade::new(&mut table, identity, capabilities);
+        let mut mesh = MeshFacade::new(&mut table, identity, Capabilities::new(capabilities));
         mesh.receive(peer_transport_addr, packet)
     };
     let mut observer = FirmwareRoutedObserver {
@@ -606,13 +604,13 @@ fn map_crypto_error(err: routing_core::protocol::app::AppError) -> CryptoError {
     }
 }
 
-async fn run_initiator_loop_with_routed_forwarding<C>(
-    initiator: &mut BleInitiator<'_, C>,
+async fn run_initiator_loop_with_routed_forwarding<'a, C>(
+    initiator: &mut BleInitiator<'a, C>,
     identity: &NodeIdentity,
     capabilities: u16,
     routing_table: &Mutex<NoopRawMutex, RoutingTable>,
     uptime: &Mutex<NoopRawMutex, u32>,
-    routed_forward_queue: &Channel<NoopRawMutex, RoutedForward, 8>,
+    routed_forward_queue: &'a Channel<NoopRawMutex, RoutedForward, 8>,
 ) -> !
 where
     C: Controller
@@ -658,7 +656,7 @@ where
     run_initiator_loop_with_observer(
         initiator,
         identity,
-        capabilities,
+        Capabilities::new(capabilities),
         routing_table,
         uptime,
         &mut observer,

@@ -24,7 +24,7 @@ pub struct LocalNodeRecord {
     pub short_addr: ShortAddr,
     pub authority_secret: [u8; 32],
     pub authority_pubkey: PubKey,
-    pub capabilities: u16,
+    pub capabilities: Capabilities,
     pub protocol_signature: Vec<u8>,
     pub network_marker: Vec<u8>,
     pub storage_dir: PathBuf,
@@ -77,13 +77,13 @@ pub fn load_or_create_local_node() -> Result<LocalNodeRecord, Box<dyn Error>> {
     let authority_identity = NodeIdentity::from_bytes(&authority_secret);
     let network_marker = decode_hex(&persisted.network_marker_hex)?;
 
-    Ok(LocalNodeRecord {
+        Ok(LocalNodeRecord {
         secret,
         pubkey: identity.pubkey(),
         short_addr: *identity.short_addr(),
         authority_secret,
         authority_pubkey: authority_identity.pubkey(),
-        capabilities: persisted.capabilities,
+        capabilities: Capabilities::new(persisted.capabilities),
         protocol_signature: CONSTELLATION_PROTOCOL_SIGNATURE.to_vec(),
         network_marker,
         storage_dir,

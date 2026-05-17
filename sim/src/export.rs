@@ -290,7 +290,7 @@ impl SimConfigExport {
                 .map(|idx| ConfigNodeExport {
                     node_idx: idx,
                     active: idx < config.n_active,
-                    capabilities: config.capabilities[idx],
+                    capabilities: config.capabilities[idx].bits(),
                     node_type: node_type_name(config.node_types[idx]),
                     behavior: NodeBehaviorExport::from_behavior(config.node_behaviors[idx]),
                 })
@@ -377,7 +377,7 @@ impl NodeSnapshotExport {
             active: node.active,
             short_addr: node.short_addr,
             uptime_secs: node.uptime_secs,
-            capabilities: node.capabilities,
+            capabilities: node.capabilities.bits(),
             node_type: node_type_name(node.node_type),
             peers: node
                 .peers
@@ -432,8 +432,8 @@ impl TraceExport {
             to_idx: trace.to_idx,
             kind: trace.kind.as_str(),
             body: trace.body.clone(),
-            source_caps: trace.source_caps,
-            target_caps: trace.target_caps,
+            source_caps: trace.source_caps.into(),
+            target_caps: trace.target_caps.into(),
             packet_type: trace.packet_type,
             packet_flags: trace.packet_flags,
             dst_addr: trace.dst_addr,
@@ -491,6 +491,7 @@ mod tests {
     use super::{render_export_json, ExportContext};
     use crate::scenario::{build_config, preset, ScenarioId};
     use crate::sim_state::{MessageKind, TraceEventKind, TraceFilter, TuiState, MAX_NODES};
+    use routing_core::node::roles::Capabilities;
 
     #[test]
     fn export_contains_all_config_traces_and_logs() {
@@ -508,8 +509,8 @@ mod tests {
             2,
             MessageKind::Manual,
             "hello mesh".to_string(),
-            0x0003,
-            0x0004,
+            Capabilities::new(0x0003),
+            Capabilities::new(0x0004),
             0x42,
             0b0000_0011,
             [0x11; 8],
@@ -542,8 +543,8 @@ mod tests {
             MAX_NODES,
             MessageKind::Manual,
             "broadcast".to_string(),
-            0,
-            0,
+            Capabilities::new(0),
+            Capabilities::new(0),
             0x01,
             0,
             [0; 8],

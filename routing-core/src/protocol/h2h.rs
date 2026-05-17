@@ -28,6 +28,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{H2H_CYCLE_SECS, H2H_MAX_PEER_ENTRIES};
 use crate::crypto::identity::{PubKey, ShortAddr};
+use crate::node::roles::Capabilities;
 use crate::protocol::packet::PacketError;
 
 /// Current H2H protocol version. Bumped on breaking wire-format changes.
@@ -75,7 +76,7 @@ pub fn slot_offset(our_addr: &ShortAddr, peer_addr: &ShortAddr) -> u64 {
 #[derive(Clone)]
 pub struct PeerInfo {
     pub pubkey: PubKey,
-    pub capabilities: u16,
+    pub capabilities: Capabilities,
     pub hop_count: u8,
 }
 
@@ -86,7 +87,7 @@ pub struct H2hPayload {
     /// If `Some`, the sender's full 32-byte public key. Omitted when the
     /// partner already has it (saves 32 bytes per exchange).
     pub full_pubkey: Option<PubKey>,
-    pub capabilities: u16,
+    pub capabilities: Capabilities,
     pub uptime_secs: u32,
     pub peers: [Option<PeerInfo>; H2H_MAX_PEER_ENTRIES],
     pub peer_count: u8,
@@ -473,7 +474,7 @@ impl H2hPayload {
             off += 32;
         }
 
-        buf[off..off + 2].copy_from_slice(&self.capabilities.to_le_bytes());
+        buf[off..off + 2].copy_from_slice(&self.capabilities.bits().to_le_bytes());
         off += 2;
 
         buf[off..off + 4].copy_from_slice(&self.uptime_secs.to_le_bytes());
@@ -486,7 +487,7 @@ impl H2hPayload {
             if let Some(ref pi) = self.peers[i] {
                 buf[off..off + 32].copy_from_slice(&pi.pubkey);
                 off += 32;
-                buf[off..off + 2].copy_from_slice(&pi.capabilities.to_le_bytes());
+                buf[off..off + 2].copy_from_slice(&pi.capabilities.bits().to_le_bytes());
                 off += 2;
                 buf[off] = pi.hop_count;
                 off += 1;
@@ -529,7 +530,7 @@ impl H2hPayload {
             None
         };
 
-        let capabilities = u16::from_le_bytes([buf[off], buf[off + 1]]);
+        let capabilities = Capabilities::from(u16::from_le_bytes([buf[off], buf[off + 1]]));
         off += 2;
 
         let uptime_secs = u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
@@ -551,7 +552,7 @@ impl H2hPayload {
             pubkey.copy_from_slice(&buf[off..off + 32]);
             off += 32;
 
-            let caps = u16::from_le_bytes([buf[off], buf[off + 1]]);
+            let caps = Capabilities::from(u16::from_le_bytes([buf[off], buf[off + 1]]));
             off += 2;
 
             let hop_count = buf[off];
@@ -594,14 +595,14 @@ mod tests {
         for i in 0..peer_count.min(H2H_MAX_PEER_ENTRIES) {
             peers[i] = Some(PeerInfo {
                 pubkey: pubkey((i + 1) as u8),
-                capabilities: 0x1000 + i as u16,
+                capabilities: Capabilities::new(0x1000 + i as u16),
                 hop_count: i as u8,
             });
         }
 
         H2hPayload {
             full_pubkey: include_pubkey.then(|| pubkey(0xAA)),
-            capabilities: 0xBEEF,
+            capabilities: Capabilities::new(0xBEEF),
             uptime_secs: 42,
             peers,
             peer_count: peer_count as u8,

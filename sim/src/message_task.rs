@@ -14,10 +14,8 @@ use embassy_time::{Duration, Timer};
 use rand::Rng as _;
 
 use routing_core::config::DEFAULT_TTL;
-use routing_core::facade::{
-    broadcast_destination, decide_routed_message, RoutedDecision, RoutedEnvelope,
-};
-use routing_core::node::roles::Capabilities;
+use routing_core::facade::decide_routed_message;
+use routing_core::message::{broadcast_destination, RoutedDecision, RoutedEnvelope};
 use routing_core::protocol::packet::PACKET_TYPE_DATA;
 use routing_core::routing::table::RoutingTable;
 use routing_core::store_forward::retain_for_low_power_destination;
@@ -67,7 +65,7 @@ pub async fn run_message_loop(
         };
         let destination_is_low_power = !msg.is_broadcast && {
             let cfg = sim_config.lock().unwrap();
-            Capabilities::is_low_power_endpoint_bits(cfg.capabilities[msg.to_idx])
+            cfg.capabilities[msg.to_idx].is_low_power_endpoint()
         };
         let holder_caps = {
             let cfg = sim_config.lock().unwrap();
@@ -207,10 +205,9 @@ pub async fn run_message_loop(
                 );
                 continue;
             }
-            RoutedDecision::Forward {
-                candidates,
-                should_retain_for_lpn,
-            } => {
+            RoutedDecision::Forward(plan) => {
+                let candidates = plan.candidates;
+                let should_retain_for_lpn = plan.should_retain_for_lpn;
                 let mut forwarded_any = false;
                 let mut had_drop = false;
 

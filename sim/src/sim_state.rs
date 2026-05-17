@@ -224,15 +224,28 @@ pub struct PeerSnapshot {
     pub hop_count: u8,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct NodeSnapshot {
     pub active: bool,
     pub short_addr: [u8; 8],
     pub uptime_secs: u32,
-    pub capabilities: u16,
+    pub capabilities: Capabilities,
     #[allow(dead_code)]
     pub node_type: NodeType,
     pub peers: heapless::Vec<PeerSnapshot, 32>,
+}
+
+impl Default for NodeSnapshot {
+    fn default() -> Self {
+        Self {
+            active: false,
+            short_addr: [0u8; 8],
+            uptime_secs: 0,
+            capabilities: Capabilities::new(0),
+            node_type: NodeType::default(),
+            peers: heapless::Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -245,8 +258,8 @@ pub struct MessageTrace {
     pub to_idx: usize,
     pub kind: MessageKind,
     pub body: String,
-    pub source_caps: u16,
-    pub target_caps: u16,
+    pub source_caps: Capabilities,
+    pub target_caps: Capabilities,
     pub packet_type: u8,
     pub packet_flags: u8,
     pub dst_addr: [u8; 8],
@@ -292,8 +305,8 @@ impl TuiState {
         to_idx: usize,
         kind: MessageKind,
         body: String,
-        source_caps: u16,
-        target_caps: u16,
+        source_caps: Capabilities,
+        target_caps: Capabilities,
         packet_type: u8,
         packet_flags: u8,
         dst_addr: [u8; 8],
@@ -446,7 +459,7 @@ pub struct SimConfig {
     pub link_enabled: [[bool; MAX_NODES]; MAX_NODES],
     /// Simulated packet drop probability (0–100 %) per directed pair.
     pub drop_prob: [[u8; MAX_NODES]; MAX_NODES],
-    pub capabilities: [u16; MAX_NODES],
+    pub capabilities: [Capabilities; MAX_NODES],
     pub node_types: [NodeType; MAX_NODES],
     pub node_behaviors: [NodeBehavior; MAX_NODES],
     pub sensor_auto: bool,
@@ -464,7 +477,7 @@ impl Default for SimConfig {
             link_enabled,
             drop_prob: [[0u8; MAX_NODES]; MAX_NODES],
             capabilities: core::array::from_fn(|_| {
-                Capabilities(Capabilities::ROUTE | Capabilities::APPLICATION).0
+                Capabilities::new(Capabilities::ROUTE | Capabilities::APPLICATION)
             }),
             node_types: core::array::from_fn(|_| NodeType::default()),
             node_behaviors: core::array::from_fn(|_| NodeBehavior::default()),

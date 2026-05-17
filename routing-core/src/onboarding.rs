@@ -12,6 +12,7 @@
 use crate::crypto::identity::{
     network_addr_of, short_addr_of, verify, NetworkAddr, NodeIdentity, PubKey, ShortAddr, Signature,
 };
+use crate::node::roles::Capabilities;
 
 /// Sentinel network address advertised by unenrolled (OnboardingReady) devices.
 pub use crate::crypto::identity::ONBOARDING_READY_NETWORK_ADDR;
@@ -30,7 +31,7 @@ pub enum NetworkMarker<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NodeCertificate {
     pub pubkey: PubKey,
-    pub capabilities: u16,
+    pub capabilities: Capabilities,
     pub network_signature: Signature,
 }
 
@@ -39,7 +40,7 @@ impl NodeCertificate {
     pub fn signable_bytes(&self) -> [u8; 34] {
         let mut out = [0u8; 34];
         out[..32].copy_from_slice(&self.pubkey);
-        out[32..34].copy_from_slice(&self.capabilities.to_le_bytes());
+        out[32..34].copy_from_slice(&self.capabilities.bits().to_le_bytes());
         out
     }
 
@@ -55,7 +56,11 @@ impl NodeCertificate {
         )
     }
 
-    pub fn issue(network_authority: &NodeIdentity, node_pubkey: PubKey, capabilities: u16) -> Self {
+    pub fn issue(
+        network_authority: &NodeIdentity,
+        node_pubkey: PubKey,
+        capabilities: Capabilities,
+    ) -> Self {
         let mut cert = Self {
             pubkey: node_pubkey,
             capabilities,
@@ -65,17 +70,17 @@ impl NodeCertificate {
         cert
     }
 
-    /// Wire format: `[authority_pubkey: 32][cert_capabilities: 2][cert_signature: 64]`.
+    /// Wire format: `[authority_pubkey: 32][cert_capabilities: Capabilities::new(2)][cert_signature: 64]`.
     pub const CERT_DATA_SIZE: usize = 32 + 2 + 64;
 
     /// Serialize the certificate into a fixed-size byte array.
     ///
-    /// Layout: `[authority_pubkey: 32][capabilities: 2][signature: 64]`.
+    /// Layout: `[authority_pubkey: 32][capabilities: Capabilities::new(2)][signature: 64]`.
     /// The authority pubkey is the network key that signed this certificate.
     pub fn to_cert_bytes(&self, authority_pubkey: &PubKey) -> [u8; Self::CERT_DATA_SIZE] {
         let mut out = [0u8; Self::CERT_DATA_SIZE];
         out[..32].copy_from_slice(authority_pubkey);
-        out[32..34].copy_from_slice(&self.capabilities.to_le_bytes());
+        out[32..34].copy_from_slice(&self.capabilities.bits().to_le_bytes());
         out[34..].copy_from_slice(&self.network_signature);
         out
     }
@@ -88,7 +93,7 @@ impl NodeCertificate {
             return None;
         }
         let authority_pubkey: PubKey = bytes[..32].try_into().ok()?;
-        let capabilities = u16::from_le_bytes([bytes[32], bytes[33]]);
+        let capabilities = Capabilities::from(u16::from_le_bytes([bytes[32], bytes[33]]));
         let mut network_signature = [0u8; 64];
         network_signature.copy_from_slice(&bytes[34..]);
         Some((
@@ -138,14 +143,14 @@ pub const CONSTELLATION_COMPANY_ID: u16 = 0x1234;
 
 /// Size of the Constellation manufacturer payload within the AD structure.
 ///
-/// Layout: `[short_addr: 8][capabilities: 2][network_addr: 8]`.
+/// Layout: `[short_addr: 8][capabilities: Capabilities::new(2)][network_addr: 8]`.
 pub const DISCOVERY_PAYLOAD_SIZE: usize = 18;
 
 /// Parsed discovery information from a Constellation BLE advertisement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DiscoveryInfo {
     pub short_addr: ShortAddr,
-    pub capabilities: u16,
+    pub capabilities: Capabilities,
     pub network_addr: NetworkAddr,
 }
 
@@ -155,7 +160,7 @@ pub struct DiscoveryInfo {
 /// `company_identifier = CONSTELLATION_COMPANY_ID`.
 pub fn serialize_discovery(
     short_addr: &ShortAddr,
-    capabilities: u16,
+    capabilities: Capabilities,
     network_addr: &NetworkAddr,
     buf: &mut [u8],
 ) -> Option<usize> {
@@ -163,7 +168,7 @@ pub fn serialize_discovery(
         return None;
     }
     buf[0..8].copy_from_slice(short_addr);
-    buf[8..10].copy_from_slice(&capabilities.to_le_bytes());
+    buf[8..10].copy_from_slice(&capabilities.bits().to_le_bytes());
     buf[10..18].copy_from_slice(network_addr);
     Some(DISCOVERY_PAYLOAD_SIZE)
 }
@@ -179,7 +184,7 @@ pub fn deserialize_discovery(data: &[u8]) -> Option<DiscoveryInfo> {
     }
     let mut short_addr = [0u8; 8];
     short_addr.copy_from_slice(&data[0..8]);
-    let capabilities = u16::from_le_bytes([data[8], data[9]]);
+    let capabilities = Capabilities::from(u16::from_le_bytes([data[8], data[9]]));
     let mut network_addr = [0u8; 8];
     network_addr.copy_from_slice(&data[10..18]);
     Some(DiscoveryInfo {
@@ -218,7 +223,7 @@ pub fn parse_discovery_from_adv(data: &[u8]) -> Option<DiscoveryInfo> {
 
 /// Parse discovery information from manufacturer data including the CID prefix.
 ///
-/// Input format: `[company_id: 2 LE][short_addr: 8][capabilities: 2 LE][network_addr: 8]`.
+/// Input format: `[company_id: 2 LE][short_addr: 8][capabilities: Capabilities::new(2) LE][network_addr: 8]`.
 /// Returns `None` if the company ID doesn't match or the payload is too short.
 pub fn parse_discovery_from_manufacturer_data(data: &[u8]) -> Option<DiscoveryInfo> {
     if data.len() < 20 {
@@ -255,7 +260,7 @@ mod tests {
     fn cert_bytes_roundtrip() {
         let authority = NodeIdentity::from_bytes(&[0xAAu8; 32]);
         let node_pubkey = [0xBBu8; 32];
-        let cert = NodeCertificate::issue(&authority, node_pubkey, 0x1234);
+        let cert = NodeCertificate::issue(&authority, node_pubkey, Capabilities::new(0x1234));
 
         let bytes = cert.to_cert_bytes(&authority.pubkey());
         let (parsed, parsed_authority) = NodeCertificate::from_cert_bytes(&bytes).unwrap();
@@ -271,7 +276,7 @@ mod tests {
     fn cert_bytes_roundtrip_preserves_verify() {
         let authority = NodeIdentity::from_bytes(&[0xCCu8; 32]);
         let node_pubkey = [0xDDu8; 32];
-        let cert = NodeCertificate::issue(&authority, node_pubkey, 0x5678);
+        let cert = NodeCertificate::issue(&authority, node_pubkey, Capabilities::new(0x5678));
 
         let bytes = cert.to_cert_bytes(&authority.pubkey());
         let (parsed, parsed_authority) = NodeCertificate::from_cert_bytes(&bytes).unwrap();
@@ -297,7 +302,7 @@ mod tests {
     #[test]
     fn cert_bytes_layout() {
         let authority = NodeIdentity::from_bytes(&[0x11u8; 32]);
-        let cert = NodeCertificate::issue(&authority, [0x22u8; 32], 0xABCD);
+        let cert = NodeCertificate::issue(&authority, [0x22u8; 32], Capabilities::new(0xABCD));
         let bytes = cert.to_cert_bytes(&authority.pubkey());
 
         // First 32 bytes = authority pubkey
@@ -321,12 +326,18 @@ mod tests {
         let short_addr = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
         let network_addr = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11];
         let mut buf = [0u8; DISCOVERY_PAYLOAD_SIZE];
-        let written = serialize_discovery(&short_addr, 0x1234, &network_addr, &mut buf).unwrap();
+        let written = serialize_discovery(
+            &short_addr,
+            Capabilities::new(0x1234),
+            &network_addr,
+            &mut buf,
+        )
+        .unwrap();
         assert_eq!(written, DISCOVERY_PAYLOAD_SIZE);
 
         let info = deserialize_discovery(&buf).unwrap();
         assert_eq!(info.short_addr, short_addr);
-        assert_eq!(info.capabilities, 0x1234);
+        assert_eq!(info.capabilities, Capabilities::new(0x1234));
         assert_eq!(info.network_addr, network_addr);
     }
 
@@ -334,7 +345,13 @@ mod tests {
     fn serialize_discovery_onboarding_ready_network_addr() {
         let short_addr = [0x11u8; 8];
         let mut buf = [0u8; DISCOVERY_PAYLOAD_SIZE];
-        serialize_discovery(&short_addr, 0, &ONBOARDING_READY_NETWORK_ADDR, &mut buf).unwrap();
+        serialize_discovery(
+            &short_addr,
+            Capabilities::new(0),
+            &ONBOARDING_READY_NETWORK_ADDR,
+            &mut buf,
+        )
+        .unwrap();
 
         let info = deserialize_discovery(&buf).unwrap();
         assert_eq!(info.network_addr, ONBOARDING_READY_NETWORK_ADDR);
@@ -346,7 +363,10 @@ mod tests {
         let short_addr = [0u8; 8];
         let network_addr = [0u8; 8];
         let mut buf = [0u8; 10]; // too small
-        assert!(serialize_discovery(&short_addr, 0, &network_addr, &mut buf).is_none());
+        assert!(
+            serialize_discovery(&short_addr, Capabilities::new(0), &network_addr, &mut buf)
+                .is_none()
+        );
     }
 
     #[test]
@@ -364,7 +384,13 @@ mod tests {
 
         // Build manufacturer payload: [CID LE][short_addr][caps LE][network_addr]
         let mut mfr_payload = [0u8; DISCOVERY_PAYLOAD_SIZE];
-        serialize_discovery(&short_addr, capabilities, &network_addr, &mut mfr_payload).unwrap();
+        serialize_discovery(
+            &short_addr,
+            Capabilities::new(capabilities),
+            &network_addr,
+            &mut mfr_payload,
+        )
+        .unwrap();
 
         // Build ADV data: Flags + ManufacturerSpecificData
         let mut adv = [0u8; 31];
@@ -383,7 +409,7 @@ mod tests {
         let adv_end = 7 + DISCOVERY_PAYLOAD_SIZE;
         let info = parse_discovery_from_adv(&adv[..adv_end]).unwrap();
         assert_eq!(info.short_addr, short_addr);
-        assert_eq!(info.capabilities, capabilities);
+        assert_eq!(info.capabilities, Capabilities::new(capabilities));
         assert_eq!(info.network_addr, network_addr);
     }
 
@@ -393,7 +419,7 @@ mod tests {
         let mut mfr_payload = [0u8; DISCOVERY_PAYLOAD_SIZE];
         serialize_discovery(
             &short_addr,
-            0,
+            Capabilities::new(0),
             &ONBOARDING_READY_NETWORK_ADDR,
             &mut mfr_payload,
         )
@@ -450,12 +476,18 @@ mod tests {
         data[0] = (CONSTELLATION_COMPANY_ID & 0xFF) as u8;
         data[1] = ((CONSTELLATION_COMPANY_ID >> 8) & 0xFF) as u8;
         let mut payload = [0u8; DISCOVERY_PAYLOAD_SIZE];
-        serialize_discovery(&short_addr, capabilities, &network_addr, &mut payload).unwrap();
+        serialize_discovery(
+            &short_addr,
+            Capabilities::new(capabilities),
+            &network_addr,
+            &mut payload,
+        )
+        .unwrap();
         data[2..].copy_from_slice(&payload);
 
         let info = parse_discovery_from_manufacturer_data(&data).unwrap();
         assert_eq!(info.short_addr, short_addr);
-        assert_eq!(info.capabilities, capabilities);
+        assert_eq!(info.capabilities, Capabilities::new(capabilities));
         assert_eq!(info.network_addr, network_addr);
     }
 
@@ -482,7 +514,13 @@ mod tests {
         data[0] = (CONSTELLATION_COMPANY_ID & 0xFF) as u8;
         data[1] = ((CONSTELLATION_COMPANY_ID >> 8) & 0xFF) as u8;
         let mut payload = [0u8; DISCOVERY_PAYLOAD_SIZE];
-        serialize_discovery(&short_addr, 0, &ONBOARDING_READY_NETWORK_ADDR, &mut payload).unwrap();
+        serialize_discovery(
+            &short_addr,
+            Capabilities::new(0),
+            &ONBOARDING_READY_NETWORK_ADDR,
+            &mut payload,
+        )
+        .unwrap();
         data[2..].copy_from_slice(&payload);
 
         let info = parse_discovery_from_manufacturer_data(&data).unwrap();

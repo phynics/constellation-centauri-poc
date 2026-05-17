@@ -7,13 +7,17 @@
 //! Design decisions:
 //! - Keep routed-packet build/receive/relay orchestration in shared core rather
 //!   than duplicating host-specific composition logic.
+//! - Reuse canonical routed-envelope and routed-decision types from
+//!   `message.rs` so this module stays a composition layer instead of a shadow
+//!   protocol model.
 //! - Expose compact transport-ready plans instead of owning host I/O directly.
 
 use heapless::Vec;
 
-use crate::config::{BROADCAST_ADDR, HEADER_SIZE};
+use crate::config::HEADER_SIZE;
 use crate::crypto::identity::{NodeIdentity, ShortAddr};
-use crate::message::{route_message, MessageDecision, RoutedMessage};
+use crate::message::{route_message, RoutedDecision, RoutedEnvelope};
+use crate::node::roles::Capabilities;
 use crate::protocol::app::{
     AppError, EncryptedAppFrame, InfraFrame, InfraKind, PingPayload, PongPayload,
     APP_CONTENT_TYPE_UTF8,
@@ -28,10 +32,12 @@ use crate::transport::TransportAddr;
 pub const ROUTED_PACKET_MAX_LEN: usize = 512;
 pub const ROUTED_PLAINTEXT_MAX_LEN: usize = 192;
 
+pub use crate::message::{broadcast_destination, ForwardPlan};
+
 pub struct MeshFacade<'a> {
     table: &'a mut RoutingTable,
     identity: &'a NodeIdentity,
-    local_capabilities: u16,
+    local_capabilities: Capabilities,
 }
 
 #[derive(Debug)]
@@ -53,15 +59,6 @@ impl From<AppError> for FacadeError {
     fn from(value: AppError) -> Self {
         Self::App(value)
     }
-}
-
-#[derive(Clone, Copy)]
-pub struct RoutedEnvelope {
-    pub destination: ShortAddr,
-    pub is_broadcast: bool,
-    pub message_id: [u8; 8],
-    pub ttl: u8,
-    pub hop_count: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -175,24 +172,6 @@ pub trait RoutedReceiveObserver {
     fn on_invalid_local_payload(&mut self, _source: ShortAddr, _packet_type: u8) {}
 }
 
-pub enum RoutedDecision {
-    TtlExpired,
-    Duplicate,
-    DeliveredLocal,
-    NoRoute {
-        observe_broadcast: bool,
-        should_retain_for_lpn: bool,
-    },
-    Forward {
-        candidates: Vec<(ShortAddr, TransportAddr), 8>,
-        should_retain_for_lpn: bool,
-    },
-}
-
-pub fn broadcast_destination() -> ShortAddr {
-    BROADCAST_ADDR
-}
-
 pub fn observe_routed_receive_outcome<O: RoutedReceiveObserver>(
     outcome: RoutedReceiveOutcome,
     observer: &mut O,
@@ -242,7 +221,7 @@ impl<'a> MeshFacade<'a> {
     pub fn new(
         table: &'a mut RoutingTable,
         identity: &'a NodeIdentity,
-        local_capabilities: u16,
+        local_capabilities: Capabilities,
     ) -> Self {
         Self {
             table,
@@ -255,9 +234,7 @@ impl<'a> MeshFacade<'a> {
         let destination_is_low_power = self
             .table
             .find_peer(&msg.destination)
-            .map(|peer| {
-                crate::node::roles::Capabilities::is_low_power_endpoint_bits(peer.capabilities)
-            })
+            .map(|peer| peer.capabilities.is_low_power_endpoint())
             .unwrap_or(false);
         decide_routed_message(
             self.table,
@@ -317,39 +294,18 @@ impl<'a> MeshFacade<'a> {
 
 pub fn decide_routed_message(
     table: &mut RoutingTable,
-    local_capabilities: u16,
+    local_capabilities: Capabilities,
     destination_is_low_power: bool,
     local_addr: ShortAddr,
     msg: RoutedEnvelope,
 ) -> RoutedDecision {
-    match route_message(
+    route_message(
         table,
         local_capabilities,
         destination_is_low_power,
         local_addr,
-        &RoutedMessage {
-            destination: msg.destination,
-            is_broadcast: msg.is_broadcast,
-            message_id: msg.message_id,
-            ttl: msg.ttl,
-            hop_count: msg.hop_count,
-        },
-    ) {
-        MessageDecision::TtlExpired => RoutedDecision::TtlExpired,
-        MessageDecision::Duplicate => RoutedDecision::Duplicate,
-        MessageDecision::DeliveredLocal => RoutedDecision::DeliveredLocal,
-        MessageDecision::NoRoute {
-            observe_broadcast,
-            should_retain_for_lpn,
-        } => RoutedDecision::NoRoute {
-            observe_broadcast,
-            should_retain_for_lpn,
-        },
-        MessageDecision::Forward(plan) => RoutedDecision::Forward {
-            candidates: plan.candidates,
-            should_retain_for_lpn: plan.should_retain_for_lpn,
-        },
-    }
+        &msg,
+    )
 }
 
 pub fn build_encrypted_user_data_tx(
@@ -453,7 +409,7 @@ pub fn build_ping_tx(
 pub fn handle_inbound_routed_packet(
     table: &mut RoutingTable,
     local_identity: &NodeIdentity,
-    local_capabilities: u16,
+    local_capabilities: Capabilities,
     peer_transport_addr: TransportAddr,
     packet: &[u8],
 ) -> RoutedReceiveOutcome {
@@ -475,7 +431,7 @@ pub fn handle_inbound_routed_packet(
 
     let destination_is_low_power = table
         .find_peer(&header.dst)
-        .map(|peer| crate::node::roles::Capabilities::is_low_power_endpoint_bits(peer.capabilities))
+        .map(|peer| peer.capabilities.is_low_power_endpoint())
         .unwrap_or(false);
 
     match decide_routed_message(
@@ -505,8 +461,8 @@ pub fn handle_inbound_routed_packet(
             observe_broadcast,
             should_retain_for_lpn,
         },
-        RoutedDecision::Forward { candidates, .. } => {
-            let Some((_, next_hop_transport)) = candidates.first().copied() else {
+        RoutedDecision::Forward(plan) => {
+            let Some((_, next_hop_transport)) = plan.candidates.first().copied() else {
                 return RoutedReceiveOutcome::NoRoute {
                     destination: header.dst,
                     observe_broadcast: false,
@@ -710,7 +666,7 @@ mod tests {
         let _ = table.peers.push(PeerEntry {
             pubkey: [9; 32],
             short_addr: destination,
-            capabilities: 0,
+            capabilities: Capabilities::new(0),
             bloom: BloomFilter::new(),
             transport_addr: next_hop,
             last_seen_ticks: 1,
@@ -741,7 +697,7 @@ mod tests {
         let _ = relay_table.peers.push(PeerEntry {
             pubkey: sender.pubkey(),
             short_addr: *sender.short_addr(),
-            capabilities: 0,
+            capabilities: Capabilities::new(0),
             bloom: BloomFilter::new(),
             transport_addr: src_transport,
             last_seen_ticks: 1,
@@ -752,7 +708,7 @@ mod tests {
         let _ = relay_table.peers.push(PeerEntry {
             pubkey: destination.pubkey(),
             short_addr: *destination.short_addr(),
-            capabilities: 0,
+            capabilities: Capabilities::new(0),
             bloom: BloomFilter::new(),
             transport_addr: dst_transport,
             last_seen_ticks: 1,
@@ -778,7 +734,7 @@ mod tests {
         match handle_inbound_routed_packet(
             &mut relay_table,
             &relay,
-            0,
+            Capabilities::new(0),
             src_transport,
             &packet[..len],
         ) {

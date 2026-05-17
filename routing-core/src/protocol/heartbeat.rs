@@ -9,11 +9,12 @@
 
 use crate::config::BLOOM_FILTER_BYTES;
 use crate::crypto::identity::PubKey;
+use crate::node::roles::Capabilities;
 use crate::protocol::packet::PacketError;
 
 pub struct HeartbeatPayload {
     pub full_pubkey: PubKey,
-    pub capabilities: u16,
+    pub capabilities: Capabilities,
     pub uptime_secs: u32,
     pub bloom_filter: [u8; BLOOM_FILTER_BYTES],
     pub bloom_generation: u8,
@@ -44,7 +45,7 @@ impl HeartbeatPayload {
         offset += 32;
 
         // capabilities: 2 bytes (little-endian)
-        buf[offset..offset + 2].copy_from_slice(&self.capabilities.to_le_bytes());
+        buf[offset..offset + 2].copy_from_slice(&self.capabilities.bits().to_le_bytes());
         offset += 2;
 
         // uptime_secs: 4 bytes (little-endian)
@@ -78,7 +79,7 @@ impl HeartbeatPayload {
         offset += 32;
 
         // capabilities: 2 bytes (little-endian)
-        let capabilities = u16::from_le_bytes([buf[offset], buf[offset + 1]]);
+        let capabilities = Capabilities::from(u16::from_le_bytes([buf[offset], buf[offset + 1]]));
         offset += 2;
 
         // uptime_secs: 4 bytes (little-endian)

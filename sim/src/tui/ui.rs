@@ -1305,21 +1305,21 @@ fn selected_link_pair(app: &App, config: &SimConfig) -> Option<(usize, usize)> {
     None
 }
 
-fn capability_short(bits: u16) -> String {
+fn capability_short(bits: Capabilities) -> String {
     let mut s = String::new();
-    if bits & Capabilities::LOW_ENERGY != 0 {
+    if bits.contains(Capabilities::LOW_ENERGY) {
         s.push('L');
     }
-    if bits & Capabilities::ROUTE != 0 {
+    if bits.contains(Capabilities::ROUTE) {
         s.push('R');
     }
-    if bits & Capabilities::APPLICATION != 0 {
+    if bits.contains(Capabilities::APPLICATION) {
         s.push('A');
     }
-    if bits & Capabilities::BRIDGE != 0 {
+    if bits.contains(Capabilities::BRIDGE) {
         s.push('B');
     }
-    if bits & Capabilities::MOBILE != 0 {
+    if bits.contains(Capabilities::MOBILE) {
         s.push('M');
     }
     if s.is_empty() {
@@ -1328,24 +1328,24 @@ fn capability_short(bits: u16) -> String {
     s
 }
 
-fn capability_long(bits: u16) -> String {
+fn capability_long(bits: Capabilities) -> String {
     let mut labels = vec![];
-    if bits & Capabilities::LOW_ENERGY != 0 {
+    if bits.contains(Capabilities::LOW_ENERGY) {
         labels.push("low-energy");
     }
-    if bits & Capabilities::ROUTE != 0 {
+    if bits.contains(Capabilities::ROUTE) {
         labels.push("route");
     }
-    if bits & Capabilities::STORE != 0 {
+    if bits.contains(Capabilities::STORE) {
         labels.push("store");
     }
-    if bits & Capabilities::APPLICATION != 0 {
+    if bits.contains(Capabilities::APPLICATION) {
         labels.push("app");
     }
-    if bits & Capabilities::BRIDGE != 0 {
+    if bits.contains(Capabilities::BRIDGE) {
         labels.push("bridge");
     }
-    if bits & Capabilities::MOBILE != 0 {
+    if bits.contains(Capabilities::MOBILE) {
         labels.push("mobile");
     }
     if labels.is_empty() {

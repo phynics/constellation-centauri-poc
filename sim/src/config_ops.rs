@@ -6,6 +6,8 @@
 //! Design decisions:
 //! - Keep simulator config mutations in one place so TUI and harness flows do
 //!   not drift on how scenarios and links are edited.
+use routing_core::node::roles::Capabilities;
+
 use crate::sim_state::{NodeBehavior, NodeType, SimConfig, MAX_NODES};
 
 pub fn set_link_enabled(cfg: &mut SimConfig, from: usize, to: usize, enabled: bool) {
@@ -25,15 +27,15 @@ pub fn set_drop_prob(cfg: &mut SimConfig, from: usize, to: usize, prob: u8) {
     cfg.drop_prob[from][to] = prob.min(100);
 }
 
-pub fn set_capabilities(cfg: &mut SimConfig, node: usize, capabilities: u16) {
+pub fn set_capabilities(cfg: &mut SimConfig, node: usize, capabilities: Capabilities) {
     cfg.capabilities[node] = capabilities;
 }
 
 pub fn toggle_capability(cfg: &mut SimConfig, node: usize, flag: u16) {
-    if cfg.capabilities[node] & flag != 0 {
-        cfg.capabilities[node] &= !flag;
+    if cfg.capabilities[node].contains(flag) {
+        cfg.capabilities[node] = Capabilities::new(cfg.capabilities[node].bits() & !flag);
     } else {
-        cfg.capabilities[node] |= flag;
+        cfg.capabilities[node] = Capabilities::new(cfg.capabilities[node].bits() | flag);
     }
 }
 

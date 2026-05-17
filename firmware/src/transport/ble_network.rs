@@ -33,6 +33,7 @@ use routing_core::network::{
     DiscoveryEvent, H2hInitiator, H2hResponder, InboundH2h, NetworkError, MAX_SCAN_RESULTS,
     SESSION_KIND_H2H, SESSION_KIND_ROUTED,
 };
+use routing_core::node::roles::Capabilities;
 use routing_core::onboarding::{
     serialize_discovery, NodeCertificate, CONSTELLATION_COMPANY_ID,
     CONSTELLATION_PROTOCOL_SIGNATURE, DISCOVERY_PAYLOAD_SIZE, ONBOARDING_READY_MARKER,
@@ -131,7 +132,7 @@ fn apply_provisioning_to_server(
         network_marker[..32].copy_from_slice(&committed.network_pubkey);
         let cert = NodeCertificate {
             pubkey: identity.pubkey(),
-            capabilities: committed.cert_capabilities,
+            capabilities: Capabilities::new(committed.cert_capabilities),
             network_signature: committed.cert_signature,
         };
         (
@@ -371,7 +372,7 @@ impl<'stack, C: Controller> BleResponder<'stack, C> {
             let mut disc_buf = [0u8; DISCOVERY_PAYLOAD_SIZE];
             if serialize_discovery(
                 &self.identity_short,
-                self.capabilities,
+                Capabilities::new(self.capabilities),
                 &network_addr,
                 &mut disc_buf,
             )
@@ -500,7 +501,7 @@ impl<'stack, C: Controller> BleResponder<'stack, C> {
                         "[periph] H2H from {:02x?} ({} peers, cap=0x{:04x})",
                         peer_mac,
                         peer_payload.peers.len(),
-                        peer_payload.capabilities
+                        peer_payload.capabilities.bits()
                     );
                     let conn = gatt_conn.raw().clone();
                     drop(gatt_conn);
@@ -754,7 +755,7 @@ where
                             println!(
                                 "[central] Discovered {:02x?} cap=0x{:04x} net={:02x?}{}",
                                 info.short_addr,
-                                info.capabilities,
+                                info.capabilities.bits(),
                                 &info.network_addr[..4],
                                 if onboarding_ready {
                                     " (onboarding-ready)"
@@ -762,12 +763,10 @@ where
                                     ""
                                 }
                             );
-                            let _ = results.push(DiscoveryEvent {
-                                short_addr: info.short_addr,
-                                capabilities: info.capabilities,
-                                network_addr: info.network_addr,
-                                transport_addr: TransportAddr::ble(mac),
-                            });
+                            let _ = results.push(DiscoveryEvent::new(
+                                info,
+                                TransportAddr::ble(mac),
+                            ));
                         }
                         Err(_timeout) => break,
                     }

@@ -6,6 +6,8 @@
 //! Design decisions:
 //! - Keep forwarding and retention decisions in shared core so simulator and
 //!   firmware cannot drift on delivery behavior.
+//! - Own the canonical routed-envelope and routed-decision types here; higher
+//!   layers may compose or re-export them but should not redefine them.
 //! - Return plans and decisions instead of performing transport actions here.
 
 use heapless::Vec;
@@ -19,7 +21,7 @@ use crate::transport::TransportAddr;
 pub const MAX_FORWARD_CANDIDATES: usize = 8;
 
 #[derive(Clone, Copy)]
-pub struct RoutedMessage {
+pub struct RoutedEnvelope {
     pub destination: ShortAddr,
     pub is_broadcast: bool,
     pub message_id: [u8; 8],
@@ -33,7 +35,7 @@ pub struct ForwardPlan {
     pub should_retain_for_lpn: bool,
 }
 
-pub enum MessageDecision {
+pub enum RoutedDecision {
     TtlExpired,
     Duplicate,
     DeliveredLocal,
@@ -46,21 +48,21 @@ pub enum MessageDecision {
 
 pub fn route_message(
     table: &mut RoutingTable,
-    local_capabilities: u16,
+    local_capabilities: Capabilities,
     destination_is_low_power: bool,
     local_addr: ShortAddr,
-    msg: &RoutedMessage,
-) -> MessageDecision {
+    msg: &RoutedEnvelope,
+) -> RoutedDecision {
     if msg.ttl == 0 {
-        return MessageDecision::TtlExpired;
+        return RoutedDecision::TtlExpired;
     }
 
     if table.seen.check_and_insert(&msg.message_id) {
-        return MessageDecision::Duplicate;
+        return RoutedDecision::Duplicate;
     }
 
     if !msg.is_broadcast && local_addr == msg.destination {
-        return MessageDecision::DeliveredLocal;
+        return RoutedDecision::DeliveredLocal;
     }
 
     let observe_broadcast = msg.is_broadcast;
@@ -82,17 +84,16 @@ pub fn route_message(
         candidates = table.forwarding_candidates(&msg.destination);
     }
 
-    let should_retain_for_lpn = !msg.is_broadcast
-        && destination_is_low_power
-        && Capabilities::is_store_router_bits(local_capabilities);
+    let should_retain_for_lpn =
+        !msg.is_broadcast && destination_is_low_power && local_capabilities.is_store_router();
 
     if candidates.is_empty() {
-        MessageDecision::NoRoute {
+        RoutedDecision::NoRoute {
             observe_broadcast,
             should_retain_for_lpn,
         }
     } else {
-        MessageDecision::Forward(ForwardPlan {
+        RoutedDecision::Forward(ForwardPlan {
             observe_broadcast,
             candidates,
             should_retain_for_lpn,
@@ -121,7 +122,7 @@ mod tests {
     fn delivers_local_directed_message() {
         let self_addr = short(1);
         let mut table = RoutingTable::new(self_addr);
-        let msg = RoutedMessage {
+        let msg = RoutedEnvelope {
             destination: self_addr,
             is_broadcast: false,
             message_id: [1; 8],
@@ -130,8 +131,8 @@ mod tests {
         };
 
         assert!(matches!(
-            route_message(&mut table, 0, false, self_addr, &msg),
-            MessageDecision::DeliveredLocal
+            route_message(&mut table, Capabilities::new(0), false, self_addr, &msg),
+            RoutedDecision::DeliveredLocal
         ));
     }
 
@@ -139,7 +140,7 @@ mod tests {
     fn duplicates_are_rejected() {
         let self_addr = short(1);
         let mut table = RoutingTable::new(self_addr);
-        let msg = RoutedMessage {
+        let msg = RoutedEnvelope {
             destination: short(2),
             is_broadcast: false,
             message_id: [9; 8],
@@ -147,10 +148,10 @@ mod tests {
             hop_count: 0,
         };
 
-        let _ = route_message(&mut table, 0, false, self_addr, &msg);
+        let _ = route_message(&mut table, Capabilities::new(0), false, self_addr, &msg);
         assert!(matches!(
-            route_message(&mut table, 0, false, self_addr, &msg),
-            MessageDecision::Duplicate
+            route_message(&mut table, Capabilities::new(0), false, self_addr, &msg),
+            RoutedDecision::Duplicate
         ));
     }
 
@@ -162,7 +163,7 @@ mod tests {
         let _ = table.peers.push(crate::routing::table::PeerEntry {
             pubkey: [0; 32],
             short_addr: dst,
-            capabilities: 0,
+            capabilities: Capabilities::new(0),
             bloom: crate::routing::bloom::BloomFilter::new(),
             transport_addr: transport(7),
             last_seen_ticks: 1,
@@ -170,7 +171,7 @@ mod tests {
             trust: TRUST_DIRECT,
             learned_from: [0; 8],
         });
-        let msg = RoutedMessage {
+        let msg = RoutedEnvelope {
             destination: dst,
             is_broadcast: false,
             message_id: [1; 8],
@@ -178,8 +179,8 @@ mod tests {
             hop_count: 0,
         };
 
-        match route_message(&mut table, 0, false, self_addr, &msg) {
-            MessageDecision::Forward(plan) => {
+        match route_message(&mut table, Capabilities::new(0), false, self_addr, &msg) {
+            RoutedDecision::Forward(plan) => {
                 assert_eq!(plan.candidates.len(), 1);
                 assert_eq!(plan.candidates[0].0, dst);
             }
@@ -191,7 +192,7 @@ mod tests {
     fn returns_retain_hint_for_store_router_lpn_miss() {
         let self_addr = short(1);
         let mut table = RoutingTable::new(self_addr);
-        let msg = RoutedMessage {
+        let msg = RoutedEnvelope {
             destination: short(3),
             is_broadcast: false,
             message_id: [1; 8],
@@ -201,12 +202,12 @@ mod tests {
 
         match route_message(
             &mut table,
-            Capabilities::ROUTE | Capabilities::STORE,
+            Capabilities::new(Capabilities::ROUTE | Capabilities::STORE),
             true,
             self_addr,
             &msg,
         ) {
-            MessageDecision::NoRoute {
+            RoutedDecision::NoRoute {
                 should_retain_for_lpn,
                 ..
             } => assert!(should_retain_for_lpn),

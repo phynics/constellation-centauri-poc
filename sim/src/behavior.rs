@@ -31,12 +31,12 @@ use crate::store_forward::{SharedStoreForwardBackend, StoreForwardState};
 
 const DISCOVERY_DURATION_MS: u64 = 7_000;
 
-fn current_capabilities(sim_config: &Arc<Mutex<SimConfig>>, node_idx: usize) -> u16 {
+fn current_capabilities(sim_config: &Arc<Mutex<SimConfig>>, node_idx: usize) -> Capabilities {
     let cfg = sim_config.lock().unwrap();
     if node_idx < MAX_NODES {
         cfg.capabilities[node_idx]
     } else {
-        0
+        Capabilities::new(0)
     }
 }
 
@@ -239,11 +239,10 @@ where
 
         let our_addr = *identity.short_addr();
         let capabilities = current_capabilities(&sim_config, node_idx);
-        let peer_snapshots =
-            collect_h2h_peer_snapshots(identity, capabilities, routing_table).await;
+        let peer_snapshots = collect_h2h_peer_snapshots(identity, capabilities, routing_table).await;
 
         for (peer_addr, peer_transport_addr) in peer_snapshots.iter() {
-            let offset = if Capabilities::is_low_power_endpoint_bits(capabilities) {
+            let offset = if capabilities.is_low_power_endpoint() {
                 0
             } else {
                 h2h::slot_offset(&our_addr, peer_addr)
@@ -254,8 +253,14 @@ where
                 Timer::at(target_time).await;
             }
 
-            let payload =
-                build_h2h_payload(identity, capabilities, uptime, routing_table, peer_addr).await;
+            let payload = build_h2h_payload(
+                identity,
+                capabilities,
+                uptime,
+                routing_table,
+                peer_addr,
+            )
+            .await;
 
             match initiator.initiate_h2h(*peer_transport_addr, &payload).await {
                 Ok(peer_payload) => {
@@ -292,7 +297,7 @@ where
                     // successful router session. The candidate list is ranked
                     // so later peers are fallback targets, not additional sync
                     // partners for the same wake window.
-                    if Capabilities::is_low_power_endpoint_bits(capabilities) {
+                    if capabilities.is_low_power_endpoint() {
                         break;
                     }
                 }
